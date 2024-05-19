@@ -1,3 +1,4 @@
 node_modules/
 www/*.js
+www/*.css
 www/data/h3_data.csv
