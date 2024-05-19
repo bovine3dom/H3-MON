@@ -2,7 +2,10 @@
     "name": "H3-MON",
     "license": "BSD-2-Clause",
     "scripts": {
-        "serve": "yarn esbuild --bundle src/app.js --outfile=www/app.js --servedir=www"
+        "serve_memleak": "yarn esbuild --bundle src/app.js --outfile=www/app.js --servedir=www",
+        "build": "yarn esbuild --minify --bundle src/app.js --outfile=www/app.js",
+        "watch": "yarn esbuild --minify --watch --bundle src/app.js --outfile=www/app.js",
+        "serve": "caddy file-server -l :8000 --root www/"
     },
     "dependencies": {
         "@loaders.gl/csv": "^4.2.1",
