@@ -26,7 +26,7 @@ const getHexData = () => new H3HexagonLayer({
     extruded: false,
     getHexagon: d => d.index,
     getFillColor: d => getColour(d.value),
-    getElevation: d => d.count,
+    getElevation: d => (1-d.value)*1000,
     elevationScale: 20,
     pickable: true
 })
