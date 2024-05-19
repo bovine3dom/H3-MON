@@ -2,6 +2,7 @@ import {MapboxOverlay} from '@deck.gl/mapbox'
 import {H3HexagonLayer} from '@deck.gl/geo-layers'
 import {CSVLoader} from '@loaders.gl/csv'
 import maplibregl from 'maplibre-gl'
+import * as d3 from 'd3'
 import 'maplibre-gl/dist/maplibre-gl.css'
 
 const map = new maplibregl.Map({
@@ -13,6 +14,10 @@ const map = new maplibregl.Map({
     pitch: 0
 })
 
+const colourRamp = d3.scaleSequential(d3.interpolateSpectral).domain([0,1])
+
+/* convert from "rgba(r,g,b,a)" string to [r,g,b] */
+const getColour = v => Object.values(d3.color(colourRamp(v))).slice(0,-1)
 let reloadNum = 0
 const getHexData = () => new H3HexagonLayer({
     id: 'H3HexagonLayer',
@@ -20,7 +25,7 @@ const getHexData = () => new H3HexagonLayer({
     loaders: [CSVLoader],
     extruded: false,
     getHexagon: d => d.index,
-    getFillColor: d => [255, d.value * 255, 0],
+    getFillColor: d => getColour(d.value),
     getElevation: d => d.count,
     elevationScale: 20,
     pickable: true
@@ -39,3 +44,5 @@ const update = () => {
     return setTimeout(update, 5000)
 }
 update()
+
+window.d3 = d3

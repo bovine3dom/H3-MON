@@ -6,7 +6,9 @@
     },
     "dependencies": {
         "@loaders.gl/csv": "^4.2.1",
+        "d3": "^7.9.0",
         "d3-dsv": "^3.0.1",
+        "d3-scale-chromatic": "^3.1.0",
         "deck.gl": "^9.0.14",
         "esbuild": "^0.21.3",
         "maplibre-gl": "^3.0.0"
