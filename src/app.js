@@ -13,9 +13,10 @@ const map = new maplibregl.Map({
     pitch: 0
 })
 
+let reloadNum = 0
 const getHexData = () => new H3HexagonLayer({
     id: 'H3HexagonLayer',
-    data: '/data/h3_data.csv',
+    data: `/data/h3_data.csv?v=${++reloadNum}`,
     loaders: [CSVLoader],
     extruded: false,
     getHexagon: d => d.index,
@@ -33,6 +34,8 @@ map.addControl(mapOverlay)
 map.addControl(new maplibregl.NavigationControl())
 console.log(CSVLoader)
 
-const update = () => mapOverlay.setProps({layers:[getHexData()]})
+const update = () => {
+    mapOverlay.setProps({layers:[getHexData()]})
+    return setTimeout(update, 5000)
+}
 update()
-setTimeout(update, 5000)
