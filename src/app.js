@@ -37,10 +37,6 @@ const mapOverlay = new MapboxOverlay({
 
 map.addControl(mapOverlay)
 map.addControl(new maplibregl.NavigationControl())
-map.addControl(new maplibregl.AttributionControl({
-    customAttribution: ‘<a href="https://www.maptiler.com/copyright/" target="_blank">&copy; MapTiler</a> <a href="https://www.openstreetmap.org/copyright" target="_blank">&copy; OpenStreetMap contributors</a>’,
-    compact: true,
-}))
 
 const update = () => {
     mapOverlay.setProps({layers:[getHexData()]})
