@@ -40,8 +40,27 @@ map.addControl(new maplibregl.NavigationControl())
 
 const update = () => {
     mapOverlay.setProps({layers:[getHexData()]})
-    return setTimeout(update, 5000) // todo: make this watch rather than poll
 }
 update()
 
 window.d3 = d3
+
+try {
+    const socket = new WebSocket("ws://localhost:1990")
+    socket.addEventListener("open", (event) => {
+        socket.send("ping")
+    })
+    // Update whenever you get a message (even if the message is "do not update")
+    socket.addEventListener("message", (event) => {
+        setTimeout(update, 100) // give file some time to be written
+        console.log("Message from server:", event.data)
+    })
+} catch (e) {
+    // fall back to polling
+    console.log("Warning: websocket failed " + e + ", falling back to poll")
+    const update2 = () => {
+        update()
+        return setTimeout(update2, 5000)
+    }
+    update2()
+}

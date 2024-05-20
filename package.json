@@ -5,7 +5,7 @@
         "serve_memleak": "yarn esbuild --bundle src/app.js --outfile=www/app.js --servedir=www",
         "build": "yarn esbuild --minify --bundle src/app.js --outfile=www/app.js",
         "watch": "yarn esbuild --minify --watch --bundle src/app.js --outfile=www/app.js",
-        "serve": "caddy file-server -l :8000 --root www/"
+        "serve": "yarn deno run --allow-net --allow-read srv/watcher.js"
     },
     "dependencies": {
         "@loaders.gl/csv": "^4.2.1",
@@ -13,6 +13,7 @@
         "d3-dsv": "^3.0.1",
         "d3-scale-chromatic": "^3.1.0",
         "deck.gl": "^9.0.14",
+        "deno-bin": "^1.43.5",
         "esbuild": "^0.21.3",
         "maplibre-gl": "^3.0.0"
     }
