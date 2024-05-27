@@ -4,6 +4,7 @@ import {CSVLoader} from '@loaders.gl/csv'
 import maplibregl from 'maplibre-gl'
 import * as d3 from 'd3'
 import 'maplibre-gl/dist/maplibre-gl.css'
+import * as observablehq from './vendor/observablehq' // from https://observablehq.com/@d3/color-legend
 
 const map = new maplibregl.Map({
     container: 'map',
@@ -62,6 +63,10 @@ const update = () => {
 update()
 
 window.d3 = d3
+window.observablehq = observablehq
+
+const l = document.getElementById("attribution")
+l.insertBefore(observablehq.legend({color: colourRamp}), l.firstChild)
 
 try {
     const socket = new WebSocket("ws://localhost:1990")
