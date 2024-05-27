@@ -31,8 +31,26 @@ const getHexData = () => new H3HexagonLayer({
     pickable: true
 })
 
+function getTooltip({object}) {
+    const toDivs = kv => {
+        return `<div>${kv[0]}: ${typeof(kv[1]) == "number" ? parseFloat(kv[1].toPrecision(2)) : kv[1]}</div>` // parseFloat is a hack to bin scientific notation
+    }
+    return object && {
+        // html: `<div>${(object.value).toPrecision(2)}</div>`,
+        html: Object.entries(object).map(toDivs).join(" "),
+        style: {
+            backgroundColor: '#fff',
+            fontFamily: 'sans-serif',
+            fontSize: '0.8em',
+            padding: '0.5em',
+            // fontColor: 'black',
+        }
+    }
+}
+
 const mapOverlay = new MapboxOverlay({
     interleaved: false,
+    getTooltip,
 })
 
 map.addControl(mapOverlay)
