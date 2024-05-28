@@ -65,8 +65,11 @@ update()
 window.d3 = d3
 window.observablehq = observablehq
 
+const params = new URLSearchParams(window.location.search)
 const l = document.getElementById("attribution")
-l.insertBefore(observablehq.legend({color: colourRamp}), l.firstChild)
+l.innerText = "© " + [params.get('c'), "MapTiler",  "OpenStreetMap contributors"].filter(x=>x !== null).join(" © ")
+l.insertBefore(observablehq.legend({color: colourRamp, title: params.get('t')}), l.firstChild)
+
 
 try {
     const socket = new WebSocket("ws://localhost:1990")
