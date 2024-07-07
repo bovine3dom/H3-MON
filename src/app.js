@@ -5,6 +5,8 @@ import maplibregl from 'maplibre-gl'
 import * as d3 from 'd3'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import * as observablehq from './vendor/observablehq' // from https://observablehq.com/@d3/color-legend
+import * as aq from 'arquero'
+import * as h3 from 'h3-js'
 
 const map = new maplibregl.Map({
     container: 'map',
@@ -18,19 +20,29 @@ const map = new maplibregl.Map({
 const colourRamp = d3.scaleSequential(d3.interpolateSpectral).domain([0,1])
 
 /* convert from "rgba(r,g,b,a)" string to [r,g,b] */
-const getColour = v => Object.values(d3.color(colourRamp(v))).slice(0,-1)
-// const getColour = v => [...Object.values(d3.color(colourRamp(v))).slice(0,-1), Math.sqrt(v)*255] // with v as alpha too
+// const getColour = v => Object.values(d3.color(colourRamp(v))).slice(0,-1)
+const getColour = v => [...Object.values(d3.color(colourRamp(v))).slice(0,-1), Math.sqrt(v)*255] // with v as alpha too
 let reloadNum = 0
-const getHexData = () => new H3HexagonLayer({
+const getHexData = (dfo) => new H3HexagonLayer({
     id: 'H3HexagonLayer',
-    data: `/data/h3_data.csv?v=${++reloadNum}`,
-    loaders: [CSVLoader],
+    data: dfo,
     extruded: false,
     stroked: false,
     getHexagon: d => d.index,
     getFillColor: d => getColour(d.value),
     getElevation: d => (1-d.value)*1000,
     elevationScale: 20,
+    pickable: true
+})
+
+
+const getHighlightData = (df) => new H3HexagonLayer({
+    id: 'selectedHex',
+    data: df.objects(),
+    extruded: false,
+    stroked: false,
+    getHexagon: d => d.index,
+    getFillColor: d => [0, 255, 0, 100],
     pickable: true
 })
 
@@ -50,14 +62,30 @@ function getTooltip({object}) {
         }
     }
 }
+// df.derive({h3_5: aq.escape(d => h3.cellToParent(d.index, 5))}).groupby('h3_5').rollup({value: d => ag.op.mean(d.value)}).objects() // todo: aggregate at sensible zoom level. with some occlusion culling? aq.addFunction is roughly just as slow so don't bother
 
 const mapOverlay = new MapboxOverlay({
     interleaved: false,
-    // onClick: (info, event) => {
-    //     if (info.layer && info.layer.id === 'H3HexagonLayer') {
-    //         console.log('Clicked H3 index:', info.object.index);
-    //     }
-    // },
+    onClick: (info, event) => {
+        if (info.layer && info.layer.id === 'H3HexagonLayer') {
+            console.log('Clicked H3 index:', info.object.index)
+            let radius = 15  // todo make a nice slider etc
+            let filterTable = aq.table({index: h3.gridDisk(info.object.index, radius)})
+            let dt = df.semijoin(filterTable, 'index')
+            dt = dt.derive({cumsum: aq.rolling(d => op.sum(d.real_value))}) // get cumulative sum
+                .derive({quantile: d => d.cumsum / op.sum(d.real_value)}) // normalise to get quantiles
+                .derive({median_dist: d => aq.op.abs(d.quantile - 0.5)}) // get distance to median
+                .orderby('median_dist') // sort by it
+            window.dt = dt
+            console.log(`Approx median density at radius ${h3.getHexagonEdgeLengthAvg(h3.getResolution(dt.get('index', 0)), 'km') * 2 * radius + 1} km:`, dt.get('real_value', 0))
+            console.log("Approx population: ", dt.rollup({total: d => aq.op.mean(d.real_value)}).get('total') * dt.size * h3.getHexagonAreaAvg(h3.getResolution(dt.get('index', 0)), 'km2'))
+            mapOverlay.setProps({layers:[getHexData(dfo), getHighlightData(dt)]})
+            // hexagon diameter = 2x edge length => distance k -> 1 + k*edge_length*2
+            // agrees with tom forth pop around point numbers :D
+            // maybe worth swapping to https://human-settlement.emergency.copernicus.eu/ghs_pop2023.php anyway
+
+        }
+    },
     getTooltip,
 })
 
@@ -65,12 +93,16 @@ map.addControl(mapOverlay)
 map.addControl(new maplibregl.NavigationControl())
 
 const update = () => {
-    mapOverlay.setProps({layers:[getHexData()]})
+    aq.loadCSV(`/data/h3_data.csv?v=${++reloadNum}`).then(df => {window.df = df; window.dfo = df.objects(); mapOverlay.setProps({layers:[getHexData(dfo)]})})
 }
 update()
 
 window.d3 = d3
 window.observablehq = observablehq
+window.aq = aq
+window.h3 = h3
+
+aq.loadCSV('/data/h3_data.csv').then(x => window.df = x)
 
 const params = new URLSearchParams(window.location.search)
 const l = document.getElementById("attribution")
