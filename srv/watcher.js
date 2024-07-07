@@ -28,7 +28,7 @@ Deno.serve({port: 1990}, (req) => {
             }
             if (event.kind === "modify") {
                 // Refresh or reload your application
-                console.log("File modified, reloading...")
+                console.log("File modified, reloading...") // should add a timeout here because it gets spammed sometimes
                 socket.send("file changed")
             }
 

@@ -19,12 +19,14 @@ const colourRamp = d3.scaleSequential(d3.interpolateSpectral).domain([0,1])
 
 /* convert from "rgba(r,g,b,a)" string to [r,g,b] */
 const getColour = v => Object.values(d3.color(colourRamp(v))).slice(0,-1)
+// const getColour = v => [...Object.values(d3.color(colourRamp(v))).slice(0,-1), Math.sqrt(v)*255] // with v as alpha too
 let reloadNum = 0
 const getHexData = () => new H3HexagonLayer({
     id: 'H3HexagonLayer',
     data: `/data/h3_data.csv?v=${++reloadNum}`,
     loaders: [CSVLoader],
     extruded: false,
+    stroked: false,
     getHexagon: d => d.index,
     getFillColor: d => getColour(d.value),
     getElevation: d => (1-d.value)*1000,
@@ -34,7 +36,7 @@ const getHexData = () => new H3HexagonLayer({
 
 function getTooltip({object}) {
     const toDivs = kv => {
-        return `<div>${kv[0]}: ${typeof(kv[1]) == "number" ? parseFloat(kv[1].toPrecision(2)) : kv[1]}</div>` // parseFloat is a hack to bin scientific notation
+        return `<div>${kv[0]}: ${typeof(kv[1]) == "number" ? parseFloat(kv[1].toPrecision(3)) : kv[1]}</div>` // parseFloat is a hack to bin scientific notation
     }
     return object && {
         // html: `<div>${(object.value).toPrecision(2)}</div>`,
@@ -51,6 +53,11 @@ function getTooltip({object}) {
 
 const mapOverlay = new MapboxOverlay({
     interleaved: false,
+    // onClick: (info, event) => {
+    //     if (info.layer && info.layer.id === 'H3HexagonLayer') {
+    //         console.log('Clicked H3 index:', info.object.index);
+    //     }
+    // },
     getTooltip,
 })
 
