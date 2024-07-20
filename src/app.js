@@ -8,6 +8,35 @@ import * as observablehq from './vendor/observablehq' // from https://observable
 import * as aq from 'arquero'
 import * as h3 from 'h3-js'
 
+// copied wholesale from https://github.com/duckdb/duckdb-wasm/tree/main/packages/duckdb-wasm
+import * as duckdb from '@duckdb/duckdb-wasm';
+const JSDELIVR_BUNDLES = duckdb.getJsDelivrBundles();
+
+// Select a bundle based on browser checks
+console.log("loading duckdb...")
+duckdb.selectBundle(JSDELIVR_BUNDLES).then(bundle => {
+
+    const worker_url = URL.createObjectURL(
+      new Blob([`importScripts("${bundle.mainWorker}");`], {type: 'text/javascript'})
+    );
+
+    // Instantiate the asynchronus version of DuckDB-wasm
+    const worker = new Worker(worker_url);
+    const logger = new duckdb.ConsoleLogger();
+    const db = new duckdb.AsyncDuckDB(logger, worker);
+    db.instantiate(bundle.mainModule, bundle.pthreadWorker).then(() => {
+        window.db = db
+        console.log("duckdb loaded!")
+    })
+    URL.revokeObjectURL(worker_url);
+// conn = await db.connect()
+// (await conn.query("SELECT count(*) FROM 'https://shell.duckdb.org/data/tpch/0_01/parquet/lineitem.parquet';")).toArray().map(row => row.toJSON())
+    // (await conn.query("SELECT count(*) FROM 'http://localhost:1983/data/JRC_POPULATION_2018_H3/res=5/CNTR_ID=UK/data_0.parquet' where res = 5;")).toArray().map(row => row.toJSON()) // relative links don't seem to work
+    // (await conn.query("SELECT count(*) FROM read_parquet('http://localhost:1983/data/JRC_POPULATION_2018_H3/**/*.parquet') where res = 5;")).toArray().map(row => row.toJSON()) // globs don't work with URLs
+    // (await conn.query("SELECT count(*) FROM read_parquet(['http://localhost:1983/data/JRC_POPULATION_2018_H3/res=7/CNTR_ID=FR/data_0.parquet','http://localhost:1983/data/JRC_POPULATION_2018_H3/res=5/CNTR_ID=UK/data_0.parquet'], hive_partitioning=true) where res = 5;")).toArray().map(row => row.toJSON()) // doesn't recognise hive partitioning even if explicitly requested
+    // so i guess it's basically pointless unless we swap to an S3 compatible bucket? which I don't really want to do
+})
+
 const map = new maplibregl.Map({
     container: 'map',
     style: 'https://api.maptiler.com/maps/toner-v2/style.json?key=Y4leWPnhJFGnTFFk1cru', // only authorised for localhost

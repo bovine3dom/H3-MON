@@ -8,6 +8,7 @@
         "serve": "yarn deno run --lock=deno.lock --allow-net --allow-read srv/watcher.js"
     },
     "dependencies": {
+        "@duckdb/duckdb-wasm": "^1.28.1-dev106.0",
         "@loaders.gl/csv": "^4.2.1",
         "arquero": "^5.4.1",
         "d3": "^7.9.0",
