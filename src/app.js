@@ -92,8 +92,9 @@ const mapOverlay = new MapboxOverlay({
 map.addControl(mapOverlay)
 map.addControl(new maplibregl.NavigationControl())
 
-const update = () => {
-    aq.loadCSV(`/data/h3_data.csv?v=${++reloadNum}`).then(df => {window.df = df; window.dfo = df.objects(); mapOverlay.setProps({layers:[getHexData(dfo)]})})
+const update = async (country="UK") => {
+    // aq.loadCSV(`/data/h3_data.csv?v=${++reloadNum}`).then(df => {window.df = df; window.dfo = df.objects(); mapOverlay.setProps({layers:[getHexData(dfo)]})})
+    aq.loadArrow(`/data/JRC_POPULATION_2018_H3/res=9/CNTR_ID=${country}/part0.arrow`).then(df => {window.df = df; window.dfo = df.objects(); mapOverlay.setProps({layers:[getHexData(dfo)]})})
 }
 update()
 
@@ -102,7 +103,7 @@ window.observablehq = observablehq
 window.aq = aq
 window.h3 = h3
 
-aq.loadCSV('/data/h3_data.csv').then(x => window.df = x)
+// aq.loadCSV('/data/h3_data.csv').then(x => window.df = x)
 
 const params = new URLSearchParams(window.location.search)
 const l = document.getElementById("attribution")
@@ -110,22 +111,29 @@ l.innerText = "© " + [params.get('c'), "MapTiler",  "OpenStreetMap contributors
 l.insertBefore(observablehq.legend({color: colourRamp, title: params.get('t')}), l.firstChild)
 
 
-try {
-    const socket = new WebSocket("ws://localhost:1990")
-    socket.addEventListener("open", (event) => {
-        socket.send("ping")
-    })
-    // Update whenever you get a message (even if the message is "do not update")
-    socket.addEventListener("message", (event) => {
-        setTimeout(update, 100) // give file some time to be written
-        console.log("Message from server:", event.data)
-    })
-} catch (e) {
-    // fall back to polling
-    console.log("Warning: websocket failed " + e + ", falling back to poll")
-    const update2 = () => {
-        update()
-        return setTimeout(update2, 5000)
-    }
-    update2()
-}
+// try {
+//     const socket = new WebSocket("ws://localhost:1990")
+//     socket.addEventListener("open", (event) => {
+//         socket.send("ping")
+//     })
+//     // Update whenever you get a message (even if the message is "do not update")
+//     socket.addEventListener("message", (event) => {
+//         setTimeout(update, 100) // give file some time to be written
+//         console.log("Message from server:", event.data)
+//     })
+// } catch (e) {
+//     // fall back to polling
+//     console.log("Warning: websocket failed " + e + ", falling back to poll")
+//     const update2 = () => {
+//         update()
+//         return setTimeout(update2, 5000)
+//     }
+//     update2()
+// }
+
+window.addEventListener("hashchange", event => {
+    const newdeets = new URLSearchParams(window.location.hash.slice(1)) 
+    update(newdeets.get("country") || "UK")
+})
+
+// bug somewhere: click on centre of bristol and it's ~10k population median (plausible). click one or two hexes away and it is ... 2500 median :/
