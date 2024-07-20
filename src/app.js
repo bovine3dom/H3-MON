@@ -72,7 +72,7 @@ const mapOverlay = new MapboxOverlay({
             let radius = 15  // todo make a nice slider etc
             let filterTable = aq.table({index: h3.gridDisk(info.object.index, radius)})
             let dt = df.semijoin(filterTable, 'index')
-            dt = dt.derive({cumsum: aq.rolling(d => op.sum(d.real_value))}) // get cumulative sum
+            dt = dt.orderby('real_value').derive({cumsum: aq.rolling(d => op.sum(d.real_value))}) // get cumulative sum
                 .derive({quantile: d => d.cumsum / op.sum(d.real_value)}) // normalise to get quantiles
                 .derive({median_dist: d => aq.op.abs(d.quantile - 0.5)}) // get distance to median
                 .orderby('median_dist') // sort by it
