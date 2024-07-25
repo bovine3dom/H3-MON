@@ -136,4 +136,4 @@ window.addEventListener("hashchange", event => {
     update(newdeets.get("country") || "UK")
 })
 
-// bug somewhere: click on centre of bristol and it's ~10k population median (plausible). click one or two hexes away and it is ... 2500 median :/
+// data storage: probably big enough that hetzner might get sad? should be able to stick on backblaze b2 and proxy via cloudflare to get free egress https://www.backblaze.com/docs/cloud-storage-deliver-public-backblaze-b2-content-through-cloudflare-cdn . from the end of that guide should be able to make cloudflare host the whole thing actually
