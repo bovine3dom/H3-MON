@@ -6,11 +6,12 @@ import * as d3 from 'd3'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import * as observablehq from './vendor/observablehq' // from https://observablehq.com/@d3/color-legend
 
+const start_pos = {...{x: 0.45, y: 51.47, z: 4}, ...Object.fromEntries(new URLSearchParams(window.location.hash.slice(1)))}
 const map = new maplibregl.Map({
     container: 'map',
     style: 'https://api.maptiler.com/maps/toner-v2/style.json?key=Y4leWPnhJFGnTFFk1cru', // only authorised for localhost
-    center: [0.45, 51.47],
-    zoom: 4,
+    center: [start_pos.x, start_pos.y],
+    zoom: start_pos.z,
     bearing: 0,
     pitch: 0
 })
@@ -108,3 +109,16 @@ try {
     }
     update2()
 }
+
+map.on('moveend', () => {
+    const pos = map.getCenter()
+    const z = map.getZoom()
+    window.location.hash = `x=${pos.lng}&y=${pos.lat}&z=${z}`
+    setTimeout(x => {
+        const npos = map.getCenter()
+        if ((pos.lng == npos.lng) && (pos.lat == npos.lat)) {
+            console.log("updating")
+            update() // todo: only update if parents have changed
+        }
+    }, 1000)
+})
