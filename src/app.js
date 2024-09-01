@@ -8,11 +8,12 @@ import * as observablehq from './vendor/observablehq' // from https://observable
 import * as aq from 'arquero'
 import * as h3 from 'h3-js'
 
+const start_pos = {...{x: 0.45, y: 51.47, z: 4}, ...Object.fromEntries(new URLSearchParams(window.location.hash.slice(1)))}
 const map = new maplibregl.Map({
     container: 'map',
     style: 'https://api.maptiler.com/maps/toner-v2/style.json?key=Y4leWPnhJFGnTFFk1cru', // only authorised for localhost
-    center: [0.45, 51.47],
-    zoom: 4,
+    center: [start_pos.x, start_pos.y],
+    zoom: start_pos.z,
     bearing: 0,
     pitch: 0
 })
@@ -131,9 +132,17 @@ l.insertBefore(observablehq.legend({color: colourRamp, title: params.get('t')}),
 //     update2()
 // }
 
-window.addEventListener("hashchange", event => {
-    const newdeets = new URLSearchParams(window.location.hash.slice(1)) 
-    update(newdeets.get("country") || "UK")
+map.on('moveend', () => {
+    const pos = map.getCenter()
+    const z = map.getZoom()
+    window.location.hash = `x=${pos.lng}&y=${pos.lat}&z=${z}`
+    setTimeout(x => {
+        const npos = map.getCenter()
+        if ((pos.lng == npos.lng) && (pos.lat == npos.lat)) {
+            console.log("updating")
+            update() // todo: only update if parents have changed
+        }
+    }, 1000)
 })
 
 // data storage: probably big enough that hetzner might get sad? should be able to stick on backblaze b2 and proxy via cloudflare to get free egress https://www.backblaze.com/docs/cloud-storage-deliver-public-backblaze-b2-content-through-cloudflare-cdn . from the end of that guide should be able to make cloudflare host the whole thing actually
