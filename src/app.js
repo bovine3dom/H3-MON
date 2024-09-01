@@ -93,9 +93,34 @@ const mapOverlay = new MapboxOverlay({
 map.addControl(mapOverlay)
 map.addControl(new maplibregl.NavigationControl())
 
-const update = async (country="UK") => {
-    // aq.loadCSV(`/data/h3_data.csv?v=${++reloadNum}`).then(df => {window.df = df; window.dfo = df.objects(); mapOverlay.setProps({layers:[getHexData(dfo)]})})
-    aq.loadArrow(`/data/JRC_POPULATION_2018_H3/res=9/CNTR_ID=${country}/part0.arrow`).then(df => {window.df = df; window.dfo = df.objects(); mapOverlay.setProps({layers:[getHexData(dfo)]})})
+const what2grab = () => {
+    let res, disk
+    const z = Math.floor(map.getZoom())
+    if (z < 5) {
+        res = 5
+        disk = 15
+    } else if (z < 8) {
+        res = 7
+        disk = 10
+    } else if (z < 100) {
+        res = 9
+        disk = 1
+    }
+    return {res, disk}
+}
+
+let PARENTS = []
+const update = async () => {
+    const pos = map.getCenter()
+    const g = what2grab()
+    const s = h3.gridDisk(h3.latLngToCell(pos.lat,pos.lng,3), g.disk)
+    if (PARENTS.sort().join() == s.sort().join()) {
+        return
+    }
+    PARENTS = s
+
+    // TODO: suppress 404 errors
+    Promise.allSettled(s.map(i => aq.loadArrow(`/data/JRC_POPULATION_2018_H3_by_rnd/res=${g.res}/h3_3=${i}/part0.arrow`))).then(a => a.filter(x => x.status == "fulfilled")).then(a => a.map(x=>x.value)).then(a => a[0].concat(a.slice(1))).then(df => {window.df = df; window.dfo = df.objects(); mapOverlay.setProps({layers:[getHexData(dfo)]})})
 }
 update()
 
@@ -103,6 +128,7 @@ window.d3 = d3
 window.observablehq = observablehq
 window.aq = aq
 window.h3 = h3
+window.update = update
 
 // aq.loadCSV('/data/h3_data.csv').then(x => window.df = x)
 
@@ -110,27 +136,6 @@ const params = new URLSearchParams(window.location.search)
 const l = document.getElementById("attribution")
 l.innerText = "© " + [params.get('c'), "MapTiler",  "OpenStreetMap contributors"].filter(x=>x !== null).join(" © ")
 l.insertBefore(observablehq.legend({color: colourRamp, title: params.get('t')}), l.firstChild)
-
-
-// try {
-//     const socket = new WebSocket("ws://localhost:1990")
-//     socket.addEventListener("open", (event) => {
-//         socket.send("ping")
-//     })
-//     // Update whenever you get a message (even if the message is "do not update")
-//     socket.addEventListener("message", (event) => {
-//         setTimeout(update, 100) // give file some time to be written
-//         console.log("Message from server:", event.data)
-//     })
-// } catch (e) {
-//     // fall back to polling
-//     console.log("Warning: websocket failed " + e + ", falling back to poll")
-//     const update2 = () => {
-//         update()
-//         return setTimeout(update2, 5000)
-//     }
-//     update2()
-// }
 
 map.on('moveend', () => {
     const pos = map.getCenter()
