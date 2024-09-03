@@ -26,7 +26,21 @@ const getColour = v => [...Object.values(d3.color(colourRamp(v))).slice(0,-1), M
 let reloadNum = 0
 const getHexData = (dfo) => new H3HexagonLayer({
     id: 'H3HexagonLayer',
+    ish3: true,
     data: dfo,
+    extruded: false,
+    stroked: false,
+    getHexagon: d => d.index,
+    getFillColor: d => getColour(d.value),
+    getElevation: d => (1-d.value)*1000,
+    elevationScale: 20,
+    pickable: true
+})
+
+const getHexData2 = (f) => new H3HexagonLayer({
+    id: 'H3HexagonLayer',
+    ish3: true,
+    data: f(),
     extruded: false,
     stroked: false,
     getHexagon: d => d.index,
@@ -53,7 +67,7 @@ function getTooltip({object}) {
     }
     return object && {
         // html: `<div>${(object.value).toPrecision(2)}</div>`,
-        html: Object.entries(object).map(toDivs).join(" "),
+        html: `<div>density: ${lastDensity} population: ${lastPop} </div> ${Object.entries(object).map(toDivs).join(" ")}`,
         style: {
             backgroundColor: '#fff',
             fontFamily: 'sans-serif',
@@ -65,22 +79,26 @@ function getTooltip({object}) {
 }
 // df.derive({h3_5: aq.escape(d => h3.cellToParent(d.index, 5))}).groupby('h3_5').rollup({value: d => ag.op.mean(d.value)}).objects() // todo: aggregate at sensible zoom level. with some occlusion culling? aq.addFunction is roughly just as slow so don't bother
 
+let lastDensity
+let lastPop
 const mapOverlay = new MapboxOverlay({
     interleaved: false,
     onClick: (info, event) => {
-        if (info.layer && info.layer.id === 'H3HexagonLayer') {
+        if (info.layer.props.ish3) {// && info.layer.id === 'H3HexagonLayer') {
             console.log('Clicked H3 index:', info.object.index)
             let radius = 15  // todo make a nice slider etc
             let filterTable = aq.table({index: h3.gridDisk(info.object.index, radius)})
-            let dt = df.semijoin(filterTable, 'index')
+            let dt = aq.from(info.layer.props.data).semijoin(filterTable, 'index')
             dt = dt.orderby('real_value').derive({cumsum: aq.rolling(d => op.sum(d.real_value))}) // get cumulative sum
                 .derive({quantile: d => d.cumsum / op.sum(d.real_value)}) // normalise to get quantiles
                 .derive({median_dist: d => aq.op.abs(d.quantile - 0.5)}) // get distance to median
                 .orderby('median_dist') // sort by it
             window.dt = dt
             console.log(`Approx median density at radius ${h3.getHexagonEdgeLengthAvg(h3.getResolution(dt.get('index', 0)), 'km') * 2 * radius + 1} km:`, dt.get('real_value', 0))
+            lastDensity = dt.get('real_value', 0)
+            lastPop = dt.rollup({total: d => aq.op.mean(d.real_value)}).get('total') * dt.size * h3.getHexagonAreaAvg(h3.getResolution(dt.get('index', 0)), 'km2')
             console.log("Approx population: ", dt.rollup({total: d => aq.op.mean(d.real_value)}).get('total') * dt.size * h3.getHexagonAreaAvg(h3.getResolution(dt.get('index', 0)), 'km2'))
-            mapOverlay.setProps({layers:[getHexData(dfo), getHighlightData(dt)]})
+            mapOverlay.setProps({layers:[current_layers, getHighlightData(dt)]})
             // hexagon diameter = 2x edge length => distance k -> 1 + k*edge_length*2
             // agrees with tom forth pop around point numbers :D
             // maybe worth swapping to https://human-settlement.emergency.copernicus.eu/ghs_pop2023.php anyway
@@ -96,7 +114,7 @@ map.addControl(new maplibregl.NavigationControl())
 const what2grab = () => {
     let res, disk
     const z = Math.floor(map.getZoom())
-    if (z < 5) {
+    if (z < 6) {
         res = 5
         disk = 15
     } else if (z < 8) {
@@ -110,6 +128,8 @@ const what2grab = () => {
 }
 
 let PARENTS = []
+const data_chunks = new Map();
+let current_layers = []
 const update = async () => {
     const pos = map.getCenter()
     const g = what2grab()
@@ -119,10 +139,75 @@ const update = async () => {
     }
     PARENTS = s
 
-    // TODO: suppress 404 errors
-    Promise.allSettled(s.map(i => aq.loadArrow(`/data/JRC_POPULATION_2018_H3_by_rnd/res=${g.res}/h3_3=${i}/part0.arrow`))).then(a => a.filter(x => x.status == "fulfilled")).then(a => a.map(x=>x.value)).then(a => a[0].concat(a.slice(1))).then(df => {window.df = df; window.dfo = df.objects(); mapOverlay.setProps({layers:[getHexData(dfo)]})})
+    // TODO: suppress 404 errors. apparently impossible :*(
+    // TODO: fix Cardiff overlap? fixing data is probably easy. fixing highlight? maybe if we use the kring stuff?
+    // TODO: remove as many columns as possible to cut data size down before github site release? 1GB per user seems plausible. maybe b2 + cloudlfare better
+    // Promise.allSettled(s.map(i => aq.loadArrow(`/data/JRC_POPULATION_2018_H3_by_rnd/res=${g.res}/h3_3=${i}/part0.arrow`))).then(a => a.filter(x => x.status == "fulfilled")).then(a => a.map(x=>x.value)).then(a => a[0].concat(a.slice(1))).then(df => {window.df = df; window.dfo = df.objects(); mapOverlay.setProps({layers:[getHexData(dfo)]})})
+    const layers = []
+    for (const i of s) {
+        const key = `${g.res},${i}`
+        try {
+            if (!(data_chunks.has(key))) {
+                const url = `/data/JRC_POPULATION_2018_H3_by_rnd/res=${g.res}/h3_3=${i}/part0.arrow`
+                const f = await fetch(url)
+                if (f.status == 404) {
+                    continue
+                }
+                data_chunks.set(key, (await aq.loadArrow(url)).objects())
+            }
+            layers.push(
+                new H3HexagonLayer({
+                    id: key,
+                    ish3: true,
+                    data: data_chunks.get(key),
+                    extruded: false,
+                    stroked: false,
+                    getHexagon: d => d.index,
+                    getFillColor: d => getColour(d.value),
+                    getElevation: d => (1-d.value)*1000,
+                    elevationScale: 20,
+                    pickable: true
+                })
+            )
+        } catch(e) {
+            console.log(e)
+        } finally {
+            continue
+        }
+    }
+    mapOverlay.setProps({layers})
+    current_layers = layers
+
+    // gc
+    const s_res = s.map(i => `${g.res},${i}`)
+    for (const k of data_chunks.keys()) {
+        if (!(s_res.includes(k))) {
+            data_chunks.delete(k)
+        }
+    }
+    
+    // this is much slower :(
+    // could be ok for adding data? if we can work out how to do that
+    // async function* getData() {
+    //     for (const i of s) {
+    //         try {
+    //             const url = `/data/JRC_POPULATION_2018_H3_by_rnd/res=${g.res}/h3_3=${i}/part0.arrow`
+    //             const f = await fetch(url)
+    //             if (f.status == 404) {
+    //                 continue
+    //             }
+    //             yield (await aq.loadArrow(url)).objects()
+    //         } catch(e) {
+    //             console.log(e)
+    //         } finally {
+    //             continue
+    //         }
+    //     }
+    // }
+    // mapOverlay.setProps({layers:[getHexData2(getData)]})
 }
 update()
+
 
 window.d3 = d3
 window.observablehq = observablehq
