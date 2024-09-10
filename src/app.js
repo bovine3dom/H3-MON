@@ -75,7 +75,18 @@ window.observablehq = observablehq
 const params = new URLSearchParams(window.location.search)
 const l = document.getElementById("attribution")
 l.innerText = "© " + [params.get('c'), "MapTiler",  "OpenStreetMap contributors"].filter(x=>x !== null).join(" © ")
-l.insertBefore(observablehq.legend({color: colourRamp, title: params.get('t')}), l.firstChild)
+// todo: read impressum from metadata too
+async function makeLegend() {
+    try {
+        const d = await (await fetch("/data/meta.json")).json()
+        const fmt = v => d['scale'][Object.keys(d['scale']).map(x => [x, Math.abs(x - v)]).sort((l,r)=>l[1] - r[1])[0][0]]
+        l.insertBefore(observablehq.legend({color: colourRamp, title: params.get('t'), tickFormat: fmt}), l.firstChild)
+    } catch (e) {
+        console.warn(e)
+        l.insertBefore(observablehq.legend({color: colourRamp, title: params.get('t')}), l.firstChild)
+    }
+}
+makeLegend()
 
 
 try {
