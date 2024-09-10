@@ -18,6 +18,14 @@ const map = new maplibregl.Map({
     pitch: 0
 })
 
+let METADATA
+async function getMetadata() {
+    if (!METADATA) {
+        METADATA = await (await fetch(`/data/JRC_POPULATION_2018_H3_by_rnd/meta.json`)).json()
+    }
+    return METADATA
+}
+
 const colourRamp = d3.scaleSequential(d3.interpolateSpectral).domain([0,1])
 
 /* convert from "rgba(r,g,b,a)" string to [r,g,b] */
@@ -89,6 +97,7 @@ const mapOverlay = new MapboxOverlay({
             let radius = 15  // todo make a nice slider etc
             let filterTable = aq.table({index: h3.gridDisk(info.object.index, radius)})
             let dt = aq.from(info.layer.props.data).semijoin(filterTable, 'index')
+            // validated: for all of UK, this gives us 2945 per km^2, which agrees with our previous work
             dt = dt.orderby('real_value').derive({cumsum: aq.rolling(d => op.sum(d.real_value))}) // get cumulative sum
                 .derive({quantile: d => d.cumsum / op.sum(d.real_value)}) // normalise to get quantiles
                 .derive({median_dist: d => aq.op.abs(d.quantile - 0.5)}) // get distance to median
@@ -133,13 +142,19 @@ let current_layers = []
 const update = async () => {
     const pos = map.getCenter()
     const g = what2grab()
-    const s = h3.gridDisk(h3.latLngToCell(pos.lat,pos.lng,3), g.disk)
+    const s2 = h3.gridDisk(h3.latLngToCell(pos.lat,pos.lng,3), g.disk)
+    const meta = await getMetadata()
+    const s = []
+    for (const i of s2) {
+        if ((meta.valid_parents[g.res].includes(i))){
+            s.push(i)
+        }
+    }
     if (PARENTS.sort().join() == s.sort().join()) {
         return
     }
     PARENTS = s
-
-    // TODO: suppress 404 errors. apparently impossible :*(
+    
     // TODO: fix Cardiff overlap? fixing data is probably easy. fixing highlight? maybe if we use the kring stuff?
     // TODO: remove as many columns as possible to cut data size down before github site release? 1GB per user seems plausible. maybe b2 + cloudlfare better
     // Promise.allSettled(s.map(i => aq.loadArrow(`/data/JRC_POPULATION_2018_H3_by_rnd/res=${g.res}/h3_3=${i}/part0.arrow`))).then(a => a.filter(x => x.status == "fulfilled")).then(a => a.map(x=>x.value)).then(a => a[0].concat(a.slice(1))).then(df => {window.df = df; window.dfo = df.objects(); mapOverlay.setProps({layers:[getHexData(dfo)]})})
@@ -155,6 +170,8 @@ const update = async () => {
                 }
                 data_chunks.set(key, (await aq.loadArrow(url)).objects())
             }
+
+            // so here we want a second loop over grouped i of s that concats and makes layers
             layers.push(
                 new H3HexagonLayer({
                     id: key,
@@ -175,6 +192,23 @@ const update = async () => {
             continue
         }
     }
+
+
+    // https://stackoverflow.com/questions/8188548/splitting-a-js-array-into-n-arrays#answer-51514813
+    function splitToNChunks(array, n) {
+        let result = []
+        for (let i = n; i > 0; i--) {
+            result.push(array.splice(0, Math.ceil(array.length / i)))
+        }
+        return result
+    }
+    // TODO: merge layers so that there's fewer than 255
+    // not sure we can do that tho without breaking the 'do not change refs' criteria for deck
+    // -> probably a better approach to just use bigger chunks server side for higher resolutions, e.g. max(parent - 5, 1)
+    // for (const layer_inds of splitToNChunks([...s], 10)) {
+
+    // }
+
     mapOverlay.setProps({layers})
     current_layers = layers
 
@@ -236,3 +270,5 @@ map.on('moveend', () => {
 })
 
 // data storage: probably big enough that hetzner might get sad? should be able to stick on backblaze b2 and proxy via cloudflare to get free egress https://www.backblaze.com/docs/cloud-storage-deliver-public-backblaze-b2-content-through-cloudflare-cdn . from the end of that guide should be able to make cloudflare host the whole thing actually
+
+// Promise.allSettled([1].map(i => aq.loadArrow(`/data/JRC_POPULATION_2018_H3/res=9/CNTR_ID=UK/part0.arrow`))).then(a => a.filter(x => x.status == "fulfilled")).then(a => a.map(x=>x.value)).then(a => a[0].concat(a.slice(1))).then(df => {window.df = df}) // for debugging
