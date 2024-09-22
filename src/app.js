@@ -114,11 +114,4 @@ map.on('moveend', () => {
     const pos = map.getCenter()
     const z = map.getZoom()
     window.location.hash = `x=${pos.lng}&y=${pos.lat}&z=${z}`
-    setTimeout(x => {
-        const npos = map.getCenter()
-        if ((pos.lng == npos.lng) && (pos.lat == npos.lat)) {
-            console.log("updating")
-            update() // todo: only update if parents have changed
-        }
-    }, 1000)
 })
