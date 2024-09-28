@@ -30,7 +30,7 @@ const getHexData = () => new H3HexagonLayer({
     stroked: false,
     getHexagon: d => d.index,
     getFillColor: d => getColour(d.value),
-    getElevation: d => (1-d.value)*1000,
+    getElevation: d => d.value*30,
     elevationScale: 20,
     pickable: true
 })
@@ -66,6 +66,7 @@ map.addControl(mapOverlay)
 map.addControl(new maplibregl.NavigationControl())
 
 const update = () => {
+    // makeLegend() // todo: turn on when reliable
     mapOverlay.setProps({layers:[getHexData()]})
 }
 update()
@@ -78,13 +79,18 @@ const l = document.getElementById("attribution")
 l.innerText = "© " + [params.get('c'), "MapTiler",  "OpenStreetMap contributors"].filter(x=>x !== null).join(" © ")
 // todo: read impressum from metadata too
 async function makeLegend() {
+    // document.getElementById("observable_legend")?.remove() // todo: make this reliable, should stick svg in a div
     try {
         const d = await (await fetch("/data/meta.json")).json()
         const fmt = v => d['scale'][Object.keys(d['scale']).map(x => [x, Math.abs(x - v)]).sort((l,r)=>l[1] - r[1])[0][0]]
-        l.insertBefore(observablehq.legend({color: colourRamp, title: params.get('t'), tickFormat: fmt}), l.firstChild)
+        const legend = observablehq.legend({color: colourRamp, title: params.get('t'), tickFormat: fmt})
+        legend.id = "observable_legend"
+        l.insertBefore(legend, l.firstChild)
     } catch (e) {
         console.warn(e)
-        l.insertBefore(observablehq.legend({color: colourRamp, title: params.get('t')}), l.firstChild)
+        const legend = observablehq.legend({color: colourRamp, title: params.get('t')})
+        legend.id = "observable_legend"
+        l.insertBefore(legend, l.firstChild)
     }
 }
 makeLegend()
