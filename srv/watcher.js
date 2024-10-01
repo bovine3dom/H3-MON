@@ -1,4 +1,5 @@
 import {serveDir} from "https://deno.land/std@0.224.0/http/file_server.ts"
+import {debounce} from "https://deno.land/std@0.224.0/async/debounce.ts"
 
 // web socket for watching CSV
 Deno.serve({port: 1990}, (req) => {
@@ -18,6 +19,8 @@ Deno.serve({port: 1990}, (req) => {
         }
     })
 
+    const throttled_send = debounce(() => socket.send("file changed"), 200) // only keeps most recent call if called twice within 200ms
+
     // Loop over file system events
     async function watchcsv() {
         const watcher = Deno.watchFs(`${Deno.cwd()}/www/data/h3_data.csv`)
@@ -28,9 +31,9 @@ Deno.serve({port: 1990}, (req) => {
             }
             if (event.kind === "modify") {
                 // Refresh or reload your application
-                console.log("File modified, reloading...") // should add a timeout here because it gets spammed sometimes
+                console.log("File modified, reloading...")
                 if (socket.readyState === 1) { // should probably retry
-                    socket.send("file changed")
+                    throttled_send()
                 }
             }
 
