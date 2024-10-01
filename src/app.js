@@ -1,6 +1,7 @@
 import {MapboxOverlay} from '@deck.gl/mapbox'
 import {H3HexagonLayer} from '@deck.gl/geo-layers'
 import {CSVLoader} from '@loaders.gl/csv'
+import {load} from '@loaders.gl/core'
 import maplibregl from 'maplibre-gl'
 import * as d3 from 'd3'
 import 'maplibre-gl/dist/maplibre-gl.css'
@@ -22,18 +23,32 @@ const colourRamp = d3.scaleSequential(d3.interpolateSpectral).domain([0,1])
 const getColour = v => Object.values(d3.color(colourRamp(v))).slice(0,-1)
 // const getColour = v => [...Object.values(d3.color(colourRamp(v))).slice(0,-1), Math.sqrt(v)*255] // with v as alpha too
 let reloadNum = 0
-const getHexData = () => new H3HexagonLayer({
-    id: 'H3HexagonLayer',
-    data: `/data/h3_data.csv?v=${++reloadNum}`,
-    loaders: [CSVLoader],
-    extruded: false,
-    stroked: false,
-    getHexagon: d => d.index,
-    getFillColor: d => getColour(d.value),
-    getElevation: d => d.value*30,
-    elevationScale: 20,
-    pickable: true
-})
+const getHexData = async () => {
+
+    const doQuantiles = (new URLSearchParams(window.location.search)).get('raw') == null
+    const valuekey = doQuantiles ? "quantile" : "value"
+    const raw_data = (await load(`/data/h3_data.csv?v=${++reloadNum}`, CSVLoader)).data
+    let data = raw_data
+    if (doQuantiles) {
+        const [getquantile, getvalue] = ecdf(raw_data.map(r => r.value))
+        data = raw_data.map(o => {return {...o, quantile: getquantile(o.value)}})
+        makeLegend(getvalue)
+    } else {
+        makeLegend()
+    }
+
+    return new H3HexagonLayer({
+        id: 'H3HexagonLayer',
+        data: data,
+        extruded: false,
+        stroked: false,
+        getHexagon: d => d.index,
+        getFillColor: d => getColour(d[valuekey]),
+        getElevation: d => d[valuekey]*30,
+        elevationScale: 20,
+        pickable: true
+    })
+}
 
 function getTooltip({object}) {
     const toDivs = kv => {
@@ -66,10 +81,8 @@ map.addControl(mapOverlay)
 map.addControl(new maplibregl.NavigationControl())
 
 const update = () => {
-    // makeLegend() // todo: turn on when reliable
-    mapOverlay.setProps({layers:[getHexData()]})
+    getHexData().then(x=>mapOverlay.setProps({layers:[x]}))
 }
-update()
 
 window.d3 = d3
 window.observablehq = observablehq
@@ -77,23 +90,31 @@ window.observablehq = observablehq
 const params = new URLSearchParams(window.location.search)
 const l = document.getElementById("attribution")
 l.innerText = "© " + [params.get('c'), "MapTiler",  "OpenStreetMap contributors"].filter(x=>x !== null).join(" © ")
+const legendDiv = document.createElement('div')
+legendDiv.id = "observable_legend"
+l.insertBefore(legendDiv, l.firstChild)
 // todo: read impressum from metadata too
-async function makeLegend() {
-    // document.getElementById("observable_legend")?.remove() // todo: make this reliable, should stick svg in a div
+async function makeLegend(fmt) {
     try {
-        const d = await (await fetch("/data/meta.json")).json()
-        const fmt = v => d['scale'][Object.keys(d['scale']).map(x => [x, Math.abs(x - v)]).sort((l,r)=>l[1] - r[1])[0][0]]
-        const legend = observablehq.legend({color: colourRamp, title: params.get('t'), tickFormat: fmt})
-        legend.id = "observable_legend"
-        l.insertBefore(legend, l.firstChild)
-    } catch (e) {
+        if (fmt !== undefined) {
+            const legend = observablehq.legend({color: colourRamp, title: params.get('t'), tickFormat: v => parseFloat(fmt(v).toPrecision(3))})
+            legendDiv.innerHTML = ""
+            legendDiv.insertBefore(legend, legendDiv.firstChild)
+        } else {
+            const d = await (await fetch("/data/meta.json")).json()
+            const fmt = v => d['scale'][Object.keys(d['scale']).map(x => [x, Math.abs(x - v)]).sort((l,r)=>l[1] - r[1])[0][0]]
+            window.fmt = fmt
+            const legend = observablehq.legend({color: colourRamp, title: params.get('t'), tickFormat: fmt})
+            legendDiv.innerHTML = ""
+            legendDiv.insertBefore(legend, legendDiv.firstChild)
+        }
+    } catch(e) {
         console.warn(e)
         const legend = observablehq.legend({color: colourRamp, title: params.get('t')})
-        legend.id = "observable_legend"
-        l.insertBefore(legend, l.firstChild)
+        legendDiv.innerHTML = ""
+        legendDiv.insertBefore(legend, legendDiv.firstChild)
     }
 }
-makeLegend()
 
 
 try {
@@ -102,6 +123,7 @@ try {
         socket.send("ping")
     })
     // Update whenever you get a message (even if the message is "do not update")
+    // nb: this means that the "pong" message is important
     socket.addEventListener("message", (event) => {
         setTimeout(update, 100) // give file some time to be written
         console.log("Message from server:", event.data)
@@ -121,3 +143,10 @@ map.on('moveend', () => {
     const z = map.getZoom()
     window.location.hash = `x=${pos.lng}&y=${pos.lat}&z=${z}`
 })
+
+function ecdf(array){
+    const mini_array = Array.from({length: Math.min(8192, array.length)}, () => Math.floor(Math.random()*array.length)).map(i => array[i]).sort((l,r) => l-r) // sort() sorts alphabetically otherwise
+    let i = 0
+    const quantile = mini_array.map(v => i+=1).map(v => v/i) // +=v to weight by number rather than position
+    return [target => quantile[mini_array.findIndex(v => v > target)] ?? 1, target => mini_array[quantile.findIndex(v => Math.min(Math.max(0.01,v),0.99) > target)] ?? mini_array.slice(-1)[0]] // function to get quantile from value and value from quantile, with fudging to exclude top/bottom 1% from legend
+}
