@@ -61,6 +61,7 @@ const getHexData2 = (f) => new H3HexagonLayer({
 
 const getHighlightData = (df) => new H3HexagonLayer({
     id: 'selectedHex',
+    ish3: true,
     data: df.objects(),
     extruded: false,
     stroked: false,
@@ -87,7 +88,7 @@ function getTooltip({object}) {
 }
 // df.derive({h3_5: aq.escape(d => h3.cellToParent(d.index, 5))}).groupby('h3_5').rollup({value: d => ag.op.mean(d.value)}).objects() // todo: aggregate at sensible zoom level. with some occlusion culling? aq.addFunction is roughly just as slow so don't bother
 function human(number){
-    return parseFloat(number.toPrecision(3))
+    return parseFloat(number.toPrecision(3)).toLocaleString()
 }
 
 let lastDensity
@@ -96,12 +97,17 @@ let lastPop
 const mapOverlay = new MapboxOverlay({
     interleaved: false,
     onClick: (info, event) => {
+        if (info.layer == null) {
+            return
+        }
+        if (info.layer.id === 'selectedHex') {
+            mapOverlay.setProps({layers:[current_layers.filter(layer=>layer.id != 'selectedHex')]})
+        }
         if (info.layer.props.ish3) {// && info.layer.id === 'H3HexagonLayer') {
-            console.log('Clicked H3 index:', info.object.index)
-            // let radius = 15  // todo make a nice slider etc
             const radius = document.getElementById("desired_radius").value
+            const parents = new Set(h3.gridDisk(info.object.index, radius).map(ind => h3.cellToParent(ind, 3))) // work out which tiles to look at
             let filterTable = aq.table({index: h3.gridDisk(info.object.index, radius)})
-            let dt = aq.from(info.layer.props.data).semijoin(filterTable, 'index')
+            let dt = aq.from(Array.from(parents).map(p=>data_chunks.get(`${h3.getResolution(info.object.index)},${p}`)).flat().filter(x=>x!==undefined)).semijoin(filterTable, 'index') // extract data relevant to those tiles
             // validated: for all of UK, this gives us 2945 per km^2, which agrees with our previous work
             dt = dt.orderby('real_value').derive({cumsum: aq.rolling(d => op.sum(d.real_value))}) // get cumulative sum
                 .derive({quantile: d => d.cumsum / op.sum(d.real_value)}) // normalise to get quantiles
@@ -152,8 +158,9 @@ const data_chunks = new Map();
 let current_layers = []
 const update = async () => {
     const pos = map.getCenter()
+    const centreCell = h3.latLngToCell(pos.lat,pos.lng,3)
     const g = what2grab()
-    const s2 = h3.gridDisk(h3.latLngToCell(pos.lat,pos.lng,3), g.disk)
+    const s2 = h3.gridDisk(centreCell, g.disk) // why did i call it s2? that's the google index
     const meta = await getMetadata()
     const s = []
     for (const i of s2) {
@@ -164,11 +171,20 @@ const update = async () => {
     if (PARENTS.sort().join() == s.sort().join()) {
         return
     }
-    PARENTS = s
+
+    function unreliable_sort(a) {
+        try {
+            return a.sort((l,r) => h3.gridDistance(l,centreCell) - h3.gridDistance(r,centreCell)).slice(0,250)
+        } catch(e) {
+            console.warn(e)
+            return a
+        }
+    }
     
-    // TODO: fix Cardiff overlap? fixing data is probably easy. fixing highlight? maybe if we use the kring stuff?
-    // TODO: remove as many columns as possible to cut data size down before github site release? 1GB per user seems plausible. maybe b2 + cloudlfare better
-    // Promise.allSettled(s.map(i => aq.loadArrow(`/data/JRC_POPULATION_2018_H3_by_rnd/res=${g.res}/h3_3=${i}/part0.arrow`))).then(a => a.filter(x => x.status == "fulfilled")).then(a => a.map(x=>x.value)).then(a => a[0].concat(a.slice(1))).then(df => {window.df = df; window.dfo = df.objects(); mapOverlay.setProps({layers:[getHexData(dfo)]})})
+    const max_layers = 250 // deck doesn't like more than 255
+    const mini_s = unreliable_sort(s).slice(0,250)
+    PARENTS = mini_s
+
     const layers = []
     for (const i of s) {
         const key = `${g.res},${i}`
@@ -181,7 +197,16 @@ const update = async () => {
                 }
                 data_chunks.set(key, (await aq.loadArrow(url)).objects())
             }
+        } catch(e) {
+            console.log(e)
+        } finally {
+            continue
+        }
+    }
 
+    for (const i of mini_s) {
+        const key = `${g.res},${i}`
+        if ((data_chunks.has(key))) {
             // so here we want a second loop over grouped i of s that concats and makes layers
             layers.push(
                 new H3HexagonLayer({
@@ -197,28 +222,8 @@ const update = async () => {
                     pickable: true
                 })
             )
-        } catch(e) {
-            console.log(e)
-        } finally {
-            continue
         }
     }
-
-
-    // https://stackoverflow.com/questions/8188548/splitting-a-js-array-into-n-arrays#answer-51514813
-    function splitToNChunks(array, n) {
-        let result = []
-        for (let i = n; i > 0; i--) {
-            result.push(array.splice(0, Math.ceil(array.length / i)))
-        }
-        return result
-    }
-    // TODO: merge layers so that there's fewer than 255
-    // not sure we can do that tho without breaking the 'do not change refs' criteria for deck
-    // -> probably a better approach to just use bigger chunks server side for higher resolutions, e.g. max(parent - 5, 1)
-    // for (const layer_inds of splitToNChunks([...s], 10)) {
-
-    // }
 
     mapOverlay.setProps({layers})
     current_layers = layers
@@ -230,26 +235,6 @@ const update = async () => {
             data_chunks.delete(k)
         }
     }
-    
-    // this is much slower :(
-    // could be ok for adding data? if we can work out how to do that
-    // async function* getData() {
-    //     for (const i of s) {
-    //         try {
-    //             const url = `/data/JRC_POPULATION_2018_H3_by_rnd/res=${g.res}/h3_3=${i}/part0.arrow`
-    //             const f = await fetch(url)
-    //             if (f.status == 404) {
-    //                 continue
-    //             }
-    //             yield (await aq.loadArrow(url)).objects()
-    //         } catch(e) {
-    //             console.log(e)
-    //         } finally {
-    //             continue
-    //         }
-    //     }
-    // }
-    // mapOverlay.setProps({layers:[getHexData2(getData)]})
 }
 update()
 
@@ -259,8 +244,6 @@ window.observablehq = observablehq
 window.aq = aq
 window.h3 = h3
 window.update = update
-
-// aq.loadCSV('/data/h3_data.csv').then(x => window.df = x)
 
 const params = new URLSearchParams(window.location.search)
 const l = document.getElementById("attribution")
@@ -275,11 +258,8 @@ map.on('moveend', () => {
         const npos = map.getCenter()
         if ((pos.lng == npos.lng) && (pos.lat == npos.lat)) {
             console.log("updating")
-            update() // todo: only update if parents have changed
+            update()
         }
     }, 1000)
 })
 
-// data storage: probably big enough that hetzner might get sad? should be able to stick on backblaze b2 and proxy via cloudflare to get free egress https://www.backblaze.com/docs/cloud-storage-deliver-public-backblaze-b2-content-through-cloudflare-cdn . from the end of that guide should be able to make cloudflare host the whole thing actually
-
-// Promise.allSettled([1].map(i => aq.loadArrow(`/data/JRC_POPULATION_2018_H3/res=9/CNTR_ID=UK/part0.arrow`))).then(a => a.filter(x => x.status == "fulfilled")).then(a => a.map(x=>x.value)).then(a => a[0].concat(a.slice(1))).then(df => {window.df = df}) // for debugging

@@ -4,7 +4,7 @@
         <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.17.1/cdn/themes/light.css" />
         <script type="module" src="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.17.1/cdn/shoelace-autoloader.js"></script>
         <meta charset='UTF-8' />
-        <title>H3-MON: THE MOST POWERFUL MON(itor) IN THE UNIVERSE</title>
+        <title>Population around a tile</title>
         <style>
 :root {
     --sl-font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
@@ -46,12 +46,50 @@
         <div id="widgets">
             <!-- https://shoelace.style/getting-started/usage -->
             <sl-drawer contained="true" id="settings" label="Population around a tile" placement="top">
-                <sl-range id="desired_radius" label="Radius (number of hexagons)" min=1 max=100 step=1 value=15></sl-range>
+                <sl-range id="desired_radius" label="Radius (number of hexagons)" min=1 max=200 step=1 value=15></sl-range>
                 <div id="results">
                     <p id="results_text">click somewhere on the map to get the population and population density within the selected radius</p>
+                    <sl-details summary="faq/info/why">
+                        <div id="waffle">
+                            <pre>
+what does "density experienced by the median person" mean?
+    it is the density that the median person lives at
+
+what is density experienced by median person?
+    it is the density that the median person lives at
+
+when i am zoomed out the numbers look dodgy?
+    yeah, i'm not sure why. zoom in.
+
+i want it to be faster when the radius is big?
+    buy a better computer
+
+why is only europe covered?
+    i need a better computer or the time to think about how to do it without needing ~100GB of RAM
+    to convert that global population layer tiff to h3. i started work on it here
+    https://github.com/bovine3dom/grid2h3 but good luck deciphering it
+
+how does it work?
+    nerd. 
+
+        - jrc population 1km (2018 coz that version includes the uk) grid reprojected to h3 with code
+          that i scribbled down in https://github.com/bovine3dom/grid2h3
+
+        - that repo splits the data into a hive style directory structure so it can be streamed to
+          the browser without needing anything more than a dumb web server
+
+        - then deck.gl is used for visualisation with a maplibre map and a nice tileset from maptiler
+
+        - arquero is used to calculate the statistics on the selected tiles
+
+        - shoelace is used for the UI
+
+                            </pre>
+                        </div>
+                    </sl-details>
                 </div>
             </sl-drawer>
-            <sl-button size="small" onclick="document.getElementById('settings').show()">Parameters</sl-button>
+            <sl-button size="small" onclick="document.getElementById('settings').show()">Parameters/info</sl-button>
         </div>
         <script type="module" src='app.js'></script>
     </body>
