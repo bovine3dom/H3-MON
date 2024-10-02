@@ -93,7 +93,6 @@ function human(number){
 let lastDensity
 let lastLandDensity
 let lastPop
-document.getElementById("settings").modal.activateExternal()
 const mapOverlay = new MapboxOverlay({
     interleaved: false,
     onClick: (info, event) => {
