@@ -1,9 +1,15 @@
 <!doctype html>
 <html>
     <head>
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.17.1/cdn/themes/light.css" />
+        <script type="module" src="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.17.1/cdn/shoelace-autoloader.js"></script>
         <meta charset='UTF-8' />
         <title>H3-MON: THE MOST POWERFUL MON(itor) IN THE UNIVERSE</title>
         <style>
+:root {
+    --sl-font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+    font-family: var(--sl-font-sans);
+}
 #map {
     position: fixed;
     top: 0;
@@ -36,6 +42,16 @@
         <div id="map">
             <div id="legend"></div>
             <div id="attribution"></div>
+        </div>
+        <div id="widgets">
+            <!-- https://shoelace.style/getting-started/usage -->
+            <sl-drawer id="settings" label="Settings" placement="top">
+                <sl-range id="desired_radius" label="Radius (km)" min=1 max=100 step=1></sl-range>
+                <div id="results">
+                    <p> yeah radius will go here mate </p>
+                </div>
+            </sl-drawer>
+            <sl-button size="small" onclick="document.getElementById('settings').show()">Parameters</sl-button>
         </div>
         <script type="module" src='app.js'></script>
     </body>
