@@ -86,15 +86,21 @@ function getTooltip({object}) {
     }
 }
 // df.derive({h3_5: aq.escape(d => h3.cellToParent(d.index, 5))}).groupby('h3_5').rollup({value: d => ag.op.mean(d.value)}).objects() // todo: aggregate at sensible zoom level. with some occlusion culling? aq.addFunction is roughly just as slow so don't bother
+function human(number){
+    return parseFloat(number.toPrecision(3))
+}
 
 let lastDensity
+let lastLandDensity
 let lastPop
+document.getElementById("settings").modal.activateExternal()
 const mapOverlay = new MapboxOverlay({
     interleaved: false,
     onClick: (info, event) => {
         if (info.layer.props.ish3) {// && info.layer.id === 'H3HexagonLayer') {
             console.log('Clicked H3 index:', info.object.index)
-            let radius = 15  // todo make a nice slider etc
+            // let radius = 15  // todo make a nice slider etc
+            const radius = document.getElementById("desired_radius").value
             let filterTable = aq.table({index: h3.gridDisk(info.object.index, radius)})
             let dt = aq.from(info.layer.props.data).semijoin(filterTable, 'index')
             // validated: for all of UK, this gives us 2945 per km^2, which agrees with our previous work
@@ -105,8 +111,16 @@ const mapOverlay = new MapboxOverlay({
             window.dt = dt
             console.log(`Approx median density at radius ${h3.getHexagonEdgeLengthAvg(h3.getResolution(dt.get('index', 0)), 'km') * 2 * radius + 1} km:`, dt.get('real_value', 0))
             lastDensity = dt.get('real_value', 0)
+            lastLandDensity = dt.rollup({median: d => aq.op.median(d.real_value)}).get('median')
             lastPop = dt.rollup({total: d => aq.op.mean(d.real_value)}).get('total') * dt.size * h3.getHexagonAreaAvg(h3.getResolution(dt.get('index', 0)), 'km2')
             console.log("Approx population: ", dt.rollup({total: d => aq.op.mean(d.real_value)}).get('total') * dt.size * h3.getHexagonAreaAvg(h3.getResolution(dt.get('index', 0)), 'km2'))
+            document.getElementById("results_text").innerText = `
+            Approx radius: ${human(h3.getHexagonEdgeLengthAvg(h3.getResolution(dt.get('index', 0)), 'km') * 2 * radius + 1)} km
+            Population density of median person: ${human(lastDensity)} / km^2
+            Population density of median piece of land: ${human(lastLandDensity)} / km^2
+            Total population: ${human(lastPop)}
+            `
+            document.getElementById("settings").show()
             mapOverlay.setProps({layers:[current_layers, getHighlightData(dt)]})
             // hexagon diameter = 2x edge length => distance k -> 1 + k*edge_length*2
             // agrees with tom forth pop around point numbers :D

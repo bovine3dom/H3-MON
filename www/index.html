@@ -45,10 +45,10 @@
         </div>
         <div id="widgets">
             <!-- https://shoelace.style/getting-started/usage -->
-            <sl-drawer id="settings" label="Settings" placement="top">
-                <sl-range id="desired_radius" label="Radius (km)" min=1 max=100 step=1></sl-range>
+            <sl-drawer contained="true" id="settings" label="Population around a tile" placement="top">
+                <sl-range id="desired_radius" label="Radius (number of hexagons)" min=1 max=100 step=1 value=15></sl-range>
                 <div id="results">
-                    <p> yeah radius will go here mate </p>
+                    <p id="results_text">click somewhere on the map to get the population and population density within the selected radius</p>
                 </div>
             </sl-drawer>
             <sl-button size="small" onclick="document.getElementById('settings').show()">Parameters</sl-button>
