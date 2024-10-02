@@ -108,16 +108,14 @@ const mapOverlay = new MapboxOverlay({
                 .derive({median_dist: d => aq.op.abs(d.quantile - 0.5)}) // get distance to median
                 .orderby('median_dist') // sort by it
             window.dt = dt
-            console.log(`Approx median density at radius ${h3.getHexagonEdgeLengthAvg(h3.getResolution(dt.get('index', 0)), 'km') * 2 * radius + 1} km:`, dt.get('real_value', 0))
             lastDensity = dt.get('real_value', 0)
             lastLandDensity = dt.rollup({median: d => aq.op.median(d.real_value)}).get('median')
             lastPop = dt.rollup({total: d => aq.op.mean(d.real_value)}).get('total') * dt.size * h3.getHexagonAreaAvg(h3.getResolution(dt.get('index', 0)), 'km2')
-            console.log("Approx population: ", dt.rollup({total: d => aq.op.mean(d.real_value)}).get('total') * dt.size * h3.getHexagonAreaAvg(h3.getResolution(dt.get('index', 0)), 'km2'))
-            document.getElementById("results_text").innerText = `
-            Approx radius: ${human(h3.getHexagonEdgeLengthAvg(h3.getResolution(dt.get('index', 0)), 'km') * 2 * radius + 1)} km
-            Population density of median person: ${human(lastDensity)} / km^2
-            Population density of median piece of land: ${human(lastLandDensity)} / km^2
-            Total population: ${human(lastPop)}
+            document.getElementById("results_text").innerHTML = `
+            <p>Approx radius: ${human(h3.getHexagonEdgeLengthAvg(h3.getResolution(dt.get('index', 0)), 'km') * 2 * radius + 1)} km </p>
+            <p>Population density experienced by median person: <b>${human(lastDensity)}</b> / km^2                                </p>
+            <p>Population density experienced by median piece of populated land: <b>${human(lastLandDensity)}</b> / km^2                     </p>
+            <p>Total population: <b>${human(lastPop)}</b>                                                                          </p>
             `
             document.getElementById("settings").show()
             mapOverlay.setProps({layers:[current_layers, getHighlightData(dt)]})
