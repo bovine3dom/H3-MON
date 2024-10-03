@@ -146,7 +146,6 @@ map.on('moveend', () => {
 
 function ecdf(array){
     const mini_array = Array.from({length: Math.min(8192, array.length)}, () => Math.floor(Math.random()*array.length)).map(i => array[i]).sort((l,r) => l-r) // sort() sorts alphabetically otherwise
-    let i = 0
-    const quantile = mini_array.map(v => i+=1).map(v => v/i) // +=v to weight by number rather than position
+    const quantile = mini_array.map((v, position) => position + 1).map(v => v/mini_array.length) // +=v to weight by number rather than position
     return [target => quantile[mini_array.findIndex(v => v > target)] ?? 1, target => mini_array[quantile.findIndex(v => Math.min(Math.max(0.01,v),0.99) > target)] ?? mini_array.slice(-1)[0]] // function to get quantile from value and value from quantile, with fudging to exclude top/bottom 1% from legend
 }
