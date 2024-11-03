@@ -26,7 +26,8 @@ const map = new maplibregl.Map({
     pitch: 0
 })
 
-const colourRamp = d3.scaleSequential(d3.interpolateSpectral).domain([0,1])
+const doCyclical = (new URLSearchParams(window.location.search)).get('cyclical') != null
+const colourRamp = d3.scaleSequential(doCyclical ? d3.interpolateRainbow : d3.interpolateSpectral).domain([0,1])
 
 /* convert from "rgba(r,g,b,a)" string to [r,g,b] */
 const getColour = v => Object.values(d3.color(colourRamp(v))).slice(0,-1)
