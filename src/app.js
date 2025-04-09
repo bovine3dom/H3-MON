@@ -37,7 +37,7 @@ let reloadNum = 0
 const getHexData = async () => {
 
     const doQuantiles = params.get('raw') == null
-    const trimFactor = params.has('trimFactor') ? params.get('trimFactor') : 0.05
+    const trimFactor = params.has('trimFactor') ? params.get('trimFactor') : 0.01
     const valuekey = doQuantiles ? "quantile" : "value"
     const raw_data = (await load(`/data/h3_data.csv?v=${++reloadNum}`, CSVLoader)).data
     let data = raw_data
@@ -155,7 +155,7 @@ map.on('moveend', () => {
     window.location.hash = `x=${pos.lng}&y=${pos.lat}&z=${z}`
 })
 
-function ecdf(array, trimFactor=0.05){
+function ecdf(array, trimFactor=0.01){
     const mini_array = Array.from({length: Math.min(8192, array.length)}, () => Math.floor(Math.random()*array.length)).map(i => array[i]).sort((l,r) => l-r) // sort() sorts alphabetically otherwise
     const quantile = mini_array.map((v, position) => position + 1).map(v => v/mini_array.length) // +=v to weight by number rather than position
     return [target => quantile[mini_array.findIndex(v => v > target)] ?? 1, target => (mini_array[quantile.findIndex(v => Math.min(Math.max(trimFactor,v),1-trimFactor) > target)] ?? mini_array.slice(-1)[0])] // function to get quantile from value and value from quantile, with fudging to exclude top/bottom 1% from legend
