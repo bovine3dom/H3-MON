@@ -26,7 +26,8 @@ const map = new maplibregl.Map({
     pitch: 0
 })
 
-const doCyclical = (new URLSearchParams(window.location.search)).get('cyclical') != null
+const params = new URLSearchParams(window.location.search)
+const doCyclical = param.get('cyclical') != null
 const colourRamp = d3.scaleSequential(doCyclical ? d3.interpolateRainbow : d3.interpolateSpectral).domain([0,1])
 
 /* convert from "rgba(r,g,b,a)" string to [r,g,b] */
@@ -35,12 +36,13 @@ const getColour = v => Object.values(d3.color(colourRamp(v))).slice(0,-1)
 let reloadNum = 0
 const getHexData = async () => {
 
-    const doQuantiles = (new URLSearchParams(window.location.search)).get('raw') == null
+    const doQuantiles = params.get('raw') == null
+    const trimFactor = params.has('trimFactor') ? params.get('trimFactor') : 0.05
     const valuekey = doQuantiles ? "quantile" : "value"
     const raw_data = (await load(`/data/h3_data.csv?v=${++reloadNum}`, CSVLoader)).data
     let data = raw_data
     if (doQuantiles) {
-        const [getquantile, getvalue] = ecdf(raw_data.map(r => r.value))
+        const [getquantile, getvalue] = ecdf(raw_data.map(r => r.value), trimFactor)
         data = raw_data.map(o => {return {...o, quantile: getquantile(o.value)}})
         makeLegend(getvalue)
     } else {
@@ -97,7 +99,6 @@ const update = () => {
 window.d3 = d3
 window.observablehq = observablehq
 
-const params = new URLSearchParams(window.location.search)
 const l = document.getElementById("attribution")
 l.innerText = "© " + [params.get('c'), "MapTiler",  "OpenStreetMap contributors"].filter(x=>x !== null).join(" © ")
 const legendDiv = document.createElement('div')
@@ -154,8 +155,8 @@ map.on('moveend', () => {
     window.location.hash = `x=${pos.lng}&y=${pos.lat}&z=${z}`
 })
 
-function ecdf(array){
+function ecdf(array, trimFactor=0.05){
     const mini_array = Array.from({length: Math.min(8192, array.length)}, () => Math.floor(Math.random()*array.length)).map(i => array[i]).sort((l,r) => l-r) // sort() sorts alphabetically otherwise
     const quantile = mini_array.map((v, position) => position + 1).map(v => v/mini_array.length) // +=v to weight by number rather than position
-    return [target => quantile[mini_array.findIndex(v => v > target)] ?? 1, target => mini_array[quantile.findIndex(v => Math.min(Math.max(0.01,v),0.99) > target)] ?? mini_array.slice(-1)[0]] // function to get quantile from value and value from quantile, with fudging to exclude top/bottom 1% from legend
+    return [target => quantile[mini_array.findIndex(v => v > target)] ?? 1, target => mini_array[quantile.findIndex(v => Math.min(Math.max(trimFactor,v),1-trimFactor) > target)] ?? mini_array.slice(-1)[0]] // function to get quantile from value and value from quantile, with fudging to exclude top/bottom 1% from legend
 }
