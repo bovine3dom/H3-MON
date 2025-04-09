@@ -27,7 +27,7 @@ const map = new maplibregl.Map({
 })
 
 const params = new URLSearchParams(window.location.search)
-const doCyclical = param.get('cyclical') != null
+const doCyclical = params.get('cyclical') != null
 const colourRamp = d3.scaleSequential(doCyclical ? d3.interpolateRainbow : d3.interpolateSpectral).domain([0,1])
 
 /* convert from "rgba(r,g,b,a)" string to [r,g,b] */
@@ -108,7 +108,7 @@ l.insertBefore(legendDiv, l.firstChild)
 async function makeLegend(fmt) {
     try {
         if (fmt !== undefined) {
-            const legend = observablehq.legend({color: colourRamp, title: params.get('t'), tickFormat: v => parseFloat(fmt(v).toPrecision(3))})
+            const legend = observablehq.legend({color: colourRamp, title: params.get('t'), tickFormat: v => parseFloat(fmt(v).toPrecision(2)).toLocaleString()})
             legendDiv.innerHTML = ""
             legendDiv.insertBefore(legend, legendDiv.firstChild)
         } else {
@@ -158,5 +158,5 @@ map.on('moveend', () => {
 function ecdf(array, trimFactor=0.05){
     const mini_array = Array.from({length: Math.min(8192, array.length)}, () => Math.floor(Math.random()*array.length)).map(i => array[i]).sort((l,r) => l-r) // sort() sorts alphabetically otherwise
     const quantile = mini_array.map((v, position) => position + 1).map(v => v/mini_array.length) // +=v to weight by number rather than position
-    return [target => quantile[mini_array.findIndex(v => v > target)] ?? 1, target => mini_array[quantile.findIndex(v => Math.min(Math.max(trimFactor,v),1-trimFactor) > target)] ?? mini_array.slice(-1)[0]] // function to get quantile from value and value from quantile, with fudging to exclude top/bottom 1% from legend
+    return [target => quantile[mini_array.findIndex(v => v > target)] ?? 1, target => (mini_array[quantile.findIndex(v => Math.min(Math.max(trimFactor,v),1-trimFactor) > target)] ?? mini_array.slice(-1)[0])] // function to get quantile from value and value from quantile, with fudging to exclude top/bottom 1% from legend
 }
