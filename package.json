@@ -5,7 +5,7 @@
         "serve_memleak": "yarn esbuild --bundle src/app.js --outfile=www/app.js --servedir=www",
         "build": "yarn esbuild --minify --bundle src/app.js --outfile=www/app.js",
         "watch": "yarn esbuild --minify --watch --bundle src/app.js --outfile=www/app.js",
-        "serve": "yarn deno run --lock=deno.lock --allow-net --allow-read srv/watcher.js"
+        "serve": "yarn deno run --lock=deno.lock --allow-net --allow-read srv/watcher.ts"
     },
     "dependencies": {
         "@loaders.gl/csv": "^4.2.1",

@@ -30,6 +30,8 @@ const params = new URLSearchParams(window.location.search)
 const doCyclical = params.get('cyclical') != null
 const flip = params.get('flip') != null
 const colourRamp = d3.scaleSequential(doCyclical ? d3.interpolateRainbow : d3.interpolateSpectral).domain(flip ? [1,0] : [0,1])
+const file_name = `${params.has('data') ? params.get('data') : 'h3_data'}.csv`
+const file_path = `/data/${file_name}`
 
 /* convert from "rgba(r,g,b,a)" string to [r,g,b] */
 const getColour = v => Object.values(d3.color(colourRamp(v))).slice(0,-1)
@@ -40,7 +42,7 @@ const getHexData = async () => {
     const doQuantiles = params.get('raw') == null
     const trimFactor = params.has('trimFactor') ? params.get('trimFactor') : 0.01
     const valuekey = doQuantiles ? "quantile" : "value"
-    const raw_data = (await load(`/data/h3_data.csv?v=${++reloadNum}`, CSVLoader)).data
+    const raw_data = (await load(`${file_path}?v=${++reloadNum}`, CSVLoader)).data
     let data = raw_data
     if (doQuantiles) {
         const [getquantile, getvalue] = ecdf(raw_data.map(r => r.value), trimFactor)
@@ -133,6 +135,7 @@ try {
     const socket = new WebSocket("ws://localhost:1990")
     socket.addEventListener("open", (event) => {
         socket.send("ping")
+        socket.send(`watch:${file_name}`)
     })
     // Update whenever you get a message (even if the message is "do not update")
     // nb: this means that the "pong" message is important
@@ -141,13 +144,14 @@ try {
         console.log("Message from server:", event.data)
     })
 } catch (e) {
-    // fall back to polling
-    console.log("Warning: websocket failed " + e + ", falling back to poll")
-    const update2 = () => {
-        update()
-        return setTimeout(update2, 5000)
-    }
-    update2()
+    // // fall back to polling
+    // // not sure i actually want to do this, it seems like a bad idea
+    // console.log("Warning: websocket failed " + e + ", falling back to poll")
+    // const update2 = () => {
+    //     update()
+    //     return setTimeout(update2, 5000)
+    // }
+    // update2()
 }
 
 map.on('moveend', () => {
