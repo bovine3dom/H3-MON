@@ -157,7 +157,7 @@ try {
 map.on('moveend', () => {
     const pos = map.getCenter()
     const z = map.getZoom()
-    window.location.hash = `x=${pos.lng}&y=${pos.lat}&z=${z}`
+    window.location.hash = `x=${pos.lng.toFixed(4)}&y=${pos.lat.toFixed(4)}&z=${z.toFixed(4)}`
 })
 
 function ecdf(array, trimFactor=0.01){
