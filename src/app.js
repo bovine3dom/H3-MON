@@ -31,7 +31,7 @@ const doCyclical = params.get('cyclical') != null
 const flip = params.get('flip') != null
 const colourRamp = d3.scaleSequential(doCyclical ? d3.interpolateRainbow : d3.interpolateSpectral).domain(flip ? [1,0] : [0,1])
 const file_name = `${params.has('data') ? params.get('data') : 'h3_data'}.csv`
-const file_path = `/data/${file_name}`
+const file_path = `data/${file_name}`
 
 /* convert from "rgba(r,g,b,a)" string to [r,g,b] */
 const getColour = v => Object.values(d3.color(colourRamp(v))).slice(0,-1)
@@ -132,7 +132,7 @@ async function makeLegend(fmt) {
 
 
 try {
-    const socket = new WebSocket("ws://localhost:1990")
+    const socket = new WebSocket(`ws://${window.location.hostname}:1990`)
     socket.addEventListener("open", (event) => {
         socket.send("ping")
         socket.send(`watch:${file_name}`)
