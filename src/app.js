@@ -32,6 +32,7 @@ const flip = params.get('flip') != null
 const colourRamp = d3.scaleSequential(doCyclical ? d3.interpolateRainbow : d3.interpolateSpectral).domain(flip ? [1,0] : [0,1])
 const file_name = `${params.has('data') ? params.get('data') : 'h3_data'}.csv`
 const file_path = `data/${file_name}`
+if (params.has('t')) document.title = params.get('t') 
 
 /* convert from "rgba(r,g,b,a)" string to [r,g,b] */
 const getColour = v => Object.values(d3.color(colourRamp(v))).slice(0,-1)
@@ -140,8 +141,10 @@ try {
     // Update whenever you get a message (even if the message is "do not update")
     // nb: this means that the "pong" message is important
     socket.addEventListener("message", (event) => {
-        setTimeout(update, 100) // give file some time to be written
         console.log("Message from server:", event.data)
+        if (event.data.startsWith("change") || event.data.startsWith("watching")) {
+            setTimeout(update, 100) // give file some time to be written
+        }
     })
 } catch (e) {
     // // fall back to polling
