@@ -85,11 +85,11 @@ function getTooltip({object}) {
 
 const mapOverlay = new MapboxOverlay({
     interleaved: false,
-    // onClick: (info, event) => {
-    //     if (info.layer && info.layer.id === 'H3HexagonLayer') {
-    //         console.log('Clicked H3 index:', info.object.index);
-    //     }
-    // },
+    onClick: (info, event) => {
+        if (info.layer && info.layer.id === 'H3HexagonLayer') {
+            console.log('Clicked H3 index:', info.object.index);
+        }
+    },
     getTooltip,
 })
 
