@@ -126,10 +126,13 @@ function bootstrap(meta = {}){
                 legendDiv.innerHTML = ""
                 legendDiv.insertBefore(legend, legendDiv.firstChild)
             } else {
-                const d = await (await fetch("/data/meta.json")).json()
-                const fmt = v => d['scale'][Object.keys(d['scale']).map(x => [x, Math.abs(x - v)]).sort((l,r)=>l[1] - r[1])[0][0]]
-                window.fmt = fmt
-                const legend = observablehq.legend({color: colourRamp, title: settings.t, tickFormat: fmt})
+                const legend_options = {color: colourRamp, title: settings.t}
+                if (settings.scale) {
+                    const fmt = v => settings['scale'][Object.keys(settings['scale']).map(x => [x, Math.abs(x - v)]).sort((l,r)=>l[1] - r[1])[0][0]]
+                    window.fmt = fmt
+                    legend_options.tickFormat = fmt
+                }
+                const legend = observablehq.legend(legend_options)
                 legendDiv.innerHTML = ""
                 legendDiv.insertBefore(legend, legendDiv.firstChild)
             }
