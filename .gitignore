@@ -1,4 +1,4 @@
 node_modules/
+www/data/*
 www/*.js
 www/*.css
-www/data/h3_data.csv
