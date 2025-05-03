@@ -27,12 +27,21 @@ const map = new maplibregl.Map({
 })
 
 const params = new URLSearchParams(window.location.search)
-const doCyclical = params.get('cyclical') != null
-const flip = params.get('flip') != null
-const colourRamp = d3.scaleSequential(doCyclical ? d3.interpolateRainbow : d3.interpolateSpectral).domain(flip ? [1,0] : [0,1])
 const file_name = `${params.has('data') ? params.get('data') : 'h3_data'}.csv`
+const meta_name = `${params.has('data') ? params.get('data') : 'meta'}.json`
+fetch(`data/${meta_name}`).then(r => r.json()).then(meta => {
+    bootstrap(meta)
+}).catch(_ => {
+    bootstrap()
+})
+
+function bootstrap(meta = {}){
+const settings = Object.assign({}, meta, Object.fromEntries(params.entries()))
+const doCyclical = settings.cyclical != undefined
+const flip = settings.flip != undefined
+const colourRamp = d3.scaleSequential(doCyclical ? d3.interpolateRainbow : d3.interpolateSpectral).domain(flip ? [1,0] : [0,1])
 const file_path = `data/${file_name}`
-if (params.has('t')) document.title = params.get('t') 
+if (settings.t) document.title = settings.t
 
 /* convert from "rgba(r,g,b,a)" string to [r,g,b] */
 const getColour = v => Object.values(d3.color(colourRamp(v))).slice(0,-1)
@@ -40,8 +49,8 @@ const getColour = v => Object.values(d3.color(colourRamp(v))).slice(0,-1)
 let reloadNum = 0
 const getHexData = async () => {
 
-    const doQuantiles = params.get('raw') == null
-    const trimFactor = params.has('trimFactor') ? params.get('trimFactor') : 0.01
+    const doQuantiles = settings.raw == undefined
+    const trimFactor = settings.trimFactor ? settings.trimFactor : 0.01
     const valuekey = doQuantiles ? "quantile" : "value"
     const raw_data = (await load(`${file_path}?v=${++reloadNum}`, CSVLoader)).data
     let data = raw_data
@@ -104,7 +113,8 @@ window.d3 = d3
 window.observablehq = observablehq
 
 const l = document.getElementById("attribution")
-l.innerText = "© " + [params.get('c'), "MapTiler",  "OpenStreetMap contributors"].filter(x=>x !== null).join(" © ")
+const extra_c = settings.c ? settings.c.split(",") : []
+l.innerText = "© " + [...extra_c, "MapTiler",  "OpenStreetMap contributors"].filter(x=>x !== null).join(" © ")
 const legendDiv = document.createElement('div')
 legendDiv.id = "observable_legend"
 l.insertBefore(legendDiv, l.firstChild)
@@ -112,20 +122,20 @@ l.insertBefore(legendDiv, l.firstChild)
 async function makeLegend(fmt) {
     try {
         if (fmt !== undefined) {
-            const legend = observablehq.legend({color: colourRamp, title: params.get('t'), tickFormat: v => parseFloat(fmt(v).toPrecision(2)).toLocaleString()})
+            const legend = observablehq.legend({color: colourRamp, title: settings.t, tickFormat: v => parseFloat(fmt(v).toPrecision(2)).toLocaleString()})
             legendDiv.innerHTML = ""
             legendDiv.insertBefore(legend, legendDiv.firstChild)
         } else {
             const d = await (await fetch("/data/meta.json")).json()
             const fmt = v => d['scale'][Object.keys(d['scale']).map(x => [x, Math.abs(x - v)]).sort((l,r)=>l[1] - r[1])[0][0]]
             window.fmt = fmt
-            const legend = observablehq.legend({color: colourRamp, title: params.get('t'), tickFormat: fmt})
+            const legend = observablehq.legend({color: colourRamp, title: settings.t, tickFormat: fmt})
             legendDiv.innerHTML = ""
             legendDiv.insertBefore(legend, legendDiv.firstChild)
         }
     } catch(e) {
         console.warn(e)
-        const legend = observablehq.legend({color: colourRamp, title: params.get('t')})
+        const legend = observablehq.legend({color: colourRamp, title: settings.t})
         legendDiv.innerHTML = ""
         legendDiv.insertBefore(legend, legendDiv.firstChild)
     }
@@ -167,4 +177,5 @@ function ecdf(array, trimFactor=0.01){
     const mini_array = Array.from({length: Math.min(8192, array.length)}, () => Math.floor(Math.random()*array.length)).map(i => array[i]).sort((l,r) => l-r) // sort() sorts alphabetically otherwise
     const quantile = mini_array.map((v, position) => position + 1).map(v => v/mini_array.length) // +=v to weight by number rather than position
     return [target => quantile[mini_array.findIndex(v => v > target)] ?? 1, target => (mini_array[quantile.findIndex(v => Math.min(Math.max(trimFactor,v),1-trimFactor) > target)] ?? mini_array.slice(-1)[0])] // function to get quantile from value and value from quantile, with fudging to exclude top/bottom 1% from legend
+}
 }
