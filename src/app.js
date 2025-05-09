@@ -26,6 +26,19 @@ const map = new maplibregl.Map({
     pitch: 0
 })
 
+window.addEventListener("hashchange", () => {
+    const pos = Object.fromEntries(new URLSearchParams(window.location.hash.slice(1)))
+    const longitude = pos.x ? pos.x : 0.45
+    const latitude = pos.y ? pos.y : 51.47
+    const zoom = pos.z ? pos.z : 4
+    map.flyTo({
+        center: [longitude, latitude],
+        zoom: zoom,
+        bearing: 0,
+        pitch: 0
+    })
+})
+
 const params = new URLSearchParams(window.location.search)
 const file_name = `${params.has('data') ? params.get('data') : 'h3_data'}.csv`
 const meta_name = `${params.has('data') ? params.get('data') : 'meta'}.json`
