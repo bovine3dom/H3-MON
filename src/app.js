@@ -1,5 +1,6 @@
 import {MapboxOverlay} from '@deck.gl/mapbox'
-import {H3HexagonLayer} from '@deck.gl/geo-layers'
+import {H3HexagonLayer, TileLayer} from '@deck.gl/geo-layers'
+import {BitmapLayer} from '@deck.gl/layers'
 import {CSVLoader} from '@loaders.gl/csv'
 import {load} from '@loaders.gl/core'
 import maplibregl from 'maplibre-gl'
@@ -88,6 +89,24 @@ function bootstrap(meta = {}){
         })
     }
 
+    const choochoo = new TileLayer({
+        id: 'OpenRailwayMapLayer',
+        data: 'https://tiles.openrailwaymap.org/maxspeed/{z}/{x}/{y}.png',
+        maxZoom: 19,
+        minZoom: 0,
+
+        renderSubLayers: props => {
+            const {boundingBox} = props.tile;
+
+            return new BitmapLayer(props, {
+                data: null,
+                image: props.data,
+                bounds: [boundingBox[0][0], boundingBox[0][1], boundingBox[1][0], boundingBox[1][1]]
+            })
+        },
+        pickable: false
+    })
+
     function getTooltip({object}) {
         const toDivs = kv => {
             return `<div>${kv[0]}: ${typeof(kv[1]) == "number" ? parseFloat(kv[1].toPrecision(3)) : kv[1]}</div>` // parseFloat is a hack to bin scientific notation
@@ -119,7 +138,14 @@ function bootstrap(meta = {}){
     map.addControl(new maplibregl.NavigationControl())
 
     const update = () => {
-        getHexData().then(x=>mapOverlay.setProps({layers:[x]}))
+        getHexData().then(x=>{
+            const layers = []
+            layers.push(x)
+            if (settings.trains) {
+                layers.push(choochoo)
+            }
+            mapOverlay.setProps({layers})
+        })
     }
 
     window.d3 = d3
@@ -127,6 +153,7 @@ function bootstrap(meta = {}){
 
     const l = document.getElementById("attribution")
     const extra_c = settings.c ? settings.c.split(",") : []
+    if (settings.trains) extra_c.push("OpenRailwayMap")
     l.innerText = "© " + [...extra_c, "MapTiler",  "OpenStreetMap contributors"].filter(x=>x !== null).join(" © ")
     const legendDiv = document.createElement('div')
     legendDiv.id = "observable_legend"
