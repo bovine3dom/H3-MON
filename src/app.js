@@ -154,7 +154,7 @@ function bootstrap(meta = {}){
     const l = document.getElementById("attribution")
     const extra_c = settings.c ? settings.c.split(",") : []
     if (settings.trains) extra_c.push("OpenRailwayMap")
-    l.innerText = "© " + [...extra_c, "MapTiler",  "OpenStreetMap contributors"].filter(x=>x !== null).join(" © ")
+    l.innerText = "©\u00a0" + [...extra_c, "MapTiler",  "OpenStreetMap contributors"].filter(x=>x !== null).join(" ©\u00a0")
     const legendDiv = document.createElement('div')
     legendDiv.id = "observable_legend"
     l.insertBefore(legendDiv, l.firstChild)
