@@ -27,7 +27,12 @@ const map = new maplibregl.Map({
     pitch: 0
 })
 
+let humanMoved = false
 window.addEventListener("hashchange", () => {
+    if (humanMoved) {
+        humanMoved = false
+        return
+    }
     const pos = Object.fromEntries(new URLSearchParams(window.location.hash.slice(1)))
     const longitude = pos.x ? pos.x : 0.45
     const latitude = pos.y ? pos.y : 51.47
@@ -211,6 +216,7 @@ function bootstrap(meta = {}){
     }
 
     map.on('moveend', () => {
+        humanMoved = true
         const pos = map.getCenter()
         const z = map.getZoom()
         window.location.hash = `x=${pos.lng.toFixed(4)}&y=${pos.lat.toFixed(4)}&z=${z.toFixed(4)}`
