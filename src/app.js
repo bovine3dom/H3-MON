@@ -3,11 +3,15 @@ import {H3HexagonLayer, TileLayer} from '@deck.gl/geo-layers'
 import {BitmapLayer} from '@deck.gl/layers'
 import {CSVLoader} from '@loaders.gl/csv'
 import {ArrowLoader} from '@loaders.gl/arrow'
-import {load} from '@loaders.gl/core'
+import {load, parse} from '@loaders.gl/core'
 import maplibregl from 'maplibre-gl'
 import * as d3 from 'd3'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import * as observablehq from './vendor/observablehq' // from https://observablehq.com/@d3/color-legend
+
+window.load = load
+window.parse = parse
+window.ArrowLoader = ArrowLoader
 
 let STYLE = ""
 if (window.location.hostname == 'localhost'){
@@ -17,6 +21,11 @@ if (window.location.hostname == 'localhost'){
 } else {
         STYLE = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json" // fall back to CARTO
 }
+
+
+// ok so one gotcha is that Uint arrays are weird - ensure everything is float64
+const username = window.prompt("Enter ClickHouse username:")
+const password = window.prompt("Enter ClickHouse password:")
 
 const start_pos = {...{x: 0.45, y: 51.47, z: 4}, ...Object.fromEntries(new URLSearchParams(window.location.hash.slice(1)))}
 const map = new maplibregl.Map({
@@ -47,20 +56,26 @@ window.addEventListener("hashchange", () => {
 })
 
 const params = new URLSearchParams(window.location.search)
-const file_name = `${params.has('data') ? params.get('data') : 'h3_data'}.csv`
-const meta_name = `${params.has('data') ? params.get('data') : 'meta'}.json`
-fetch(`data/${meta_name}`).then(r => r.json()).then(meta => {
-    bootstrap(meta)
-}).catch(_ => {
+// const file_name = `${params.has('data') ? params.get('data') : 'h3_data'}.csv`
+// const meta_name = `${params.has('data') ? params.get('data') : 'meta'}.json`
+// fetch(`data/${meta_name}`).then(r => r.json()).then(meta => {
+//     bootstrap(meta)
+// }).catch(_ => {
     bootstrap()
-})
+// })
 
 function bootstrap(meta = {}){
+    let requestNum = 0
     const settings = Object.assign({}, meta, Object.fromEntries(params.entries()))
     const doCyclical = settings.cyclical != undefined
     const flip = settings.flip != undefined
     const colourRamp = d3.scaleSequential(doCyclical ? d3.interpolateRainbow : d3.interpolateSpectral).domain(flip ? [1,0] : [0,1])
-    const file_path = `data/${file_name}`
+    const table_name = settings.table_name ? settings.table_name : "transitous_pop_within_60"
+    const variable = settings.variable ? settings.variable : "pop_in_60"
+    const ch = settings.ch ? settings.ch : "http://localhost:8123"
+    const conditions = settings.conditions ? settings.conditions.split(",").map(c => c.split(":").reduce((l,r) => `${l} = '${r}'`)).join(" and ") : "true"
+    console.log(conditions)
+    // const file_path = `data/${file_name}`
     if (settings.t) document.title = settings.t
 
     /* convert from "rgba(r,g,b,a)" string to [r,g,b] */
@@ -72,12 +87,34 @@ function bootstrap(meta = {}){
         const doQuantiles = settings.raw == undefined
         const trimFactor = settings.trimFactor ? settings.trimFactor : 0.01
         const valuekey = doQuantiles ? "quantile" : "value"
-        // const raw_data = (await load(`${file_path}?v=${++reloadNum}`, CSVLoader)).data
-        const arrow_data = await load("data/h3_data.arrow", ArrowLoader)
+        const pos = map.getCenter()
+        const bounds = map.getBounds()
+        const south = bounds.getSouth()
+        const north = bounds.getNorth()
+        const west = bounds.getWest()
+        const east = bounds.getEast()
+        const arrow_data = await parse(fetch(`${ch}/?query=
+            with
+            ${east} as east,
+            ${west} as west,
+            ${south} as south,
+            ${north} as north,
+            best_res as (
+            select toUInt8(argMin(number, abs(geoDistance(east, south, west, north)/h3EdgeLengthM(toUInt8(number)) - 400))) best from numbers(4, 11-4)
+            )
+            select lower(right(hex(h3), -1)) index, percent_rank() over (order by value asc) value from (
+                select median(${variable}) value, geoToH3(lon, lat, best) h3
+                from ${table_name}
+                inner join best_res b on true
+                where true
+                and lon between ${west - (east-west)} and ${east + (east-west)}
+                and lat between ${south - (north-south)} and ${north + (north-south)}
+                and ${conditions}
+                group by h3
+            )
+            format arrow settings output_format_arrow_compression_method = 'none'
+        `, {headers: new Headers({'Authorization': `Basic ${btoa(username+':'+password)}`})}), ArrowLoader)
         window.arrow_data = arrow_data
-        // NB: need to totally disable compression, e.g.
-        // select * from 'h3_data.csv' into outfile 'h3_data.arrow' truncate compression 'none' settings output_format_arrow_compression_method = 'none'
-        // let data = raw_data.data.value
 
         // sack off quantile for now
         // if (doQuantiles) {
@@ -93,24 +130,8 @@ function bootstrap(meta = {}){
             data: {src: arrow_data.data, length: arrow_data.data.value.length},
             extruded: false,
             stroked: false,
-            getHexagon: (_, {index, data}) => {
-                // console.log(index)
-                return data.src.index[index]
-            },
-            getFillColor: (wot, {index, data, target}) => {
-                // console.log(index)
-                // console.log(data.value[index])
-                const colour = getColour(data.src.value[index])
-                target[0] = 255*data.src.value[index]
-                target[1] = 255*data.src.value[index]
-                target[2] = 255*data.src.value[index]
-                target[3] = 255
-                return colour
-            },
-            // getHexagon: d => d.index,
-            // getFillColor: d => getColour(d[valuekey]),
-            // getElevation: d => d[valuekey]*30,
-            elevationScale: 20,
+            getHexagon: (_, {index, data}) => data.src.index[index],
+            getFillColor: (_, {index, data}) => getColour(data.src.value[index]),
             pickable: true
         })
     }
@@ -152,12 +173,13 @@ function bootstrap(meta = {}){
 
     const mapOverlay = new MapboxOverlay({
         interleaved: false,
-        onClick: (info, event) => {
-            if (info.layer && info.layer.id === 'H3HexagonLayer') {
-                console.log('Clicked H3 index:', info.object.index);
-            }
-        },
-        getTooltip,
+        // // need to write our own tooltip etc for binary data
+        // onClick: (info, event) => {
+        //     if (info.layer && info.layer.id === 'H3HexagonLayer') {
+        //         console.log('Clicked H3 index:', info.object);
+        //     }
+        // },
+        // getTooltip,
         // // experimental stuff to improve perf on mobile
         // _pickable: false,
         // _typedArrayManagerProps: {overAlloc: 1, poolSize: 0},
@@ -167,7 +189,10 @@ function bootstrap(meta = {}){
     map.addControl(new maplibregl.NavigationControl())
 
     const update = () => {
+        requestNum += 1
+        const ourUpdate = requestNum
         getHexData().then(x=>{
+            if (requestNum != ourUpdate) return
             const layers = []
             layers.push(x)
             if (settings.trains) {
@@ -214,33 +239,34 @@ function bootstrap(meta = {}){
     }
 
 
-    try {
-        const socket = new WebSocket(`ws://${window.location.hostname}:1990`)
-        socket.addEventListener("open", (event) => {
-            socket.send("ping")
-            socket.send(`watch:${file_name}`)
-        })
-        // Update whenever you get a message (even if the message is "do not update")
-        // nb: this means that the "pong" message is important
-        socket.addEventListener("message", (event) => {
-            console.log("Message from server:", event.data)
-            if (event.data.startsWith("change") || event.data.startsWith("watching")) {
-                setTimeout(update, 100) // give file some time to be written
-            }
-        })
-    } catch (e) {
-        // // fall back to polling
-        // // not sure i actually want to do this, it seems like a bad idea
-        // console.log("Warning: websocket failed " + e + ", falling back to poll")
-        // const update2 = () => {
-        //     update()
-        //     return setTimeout(update2, 5000)
-        // }
-        // update2()
-    }
+    // try {
+    //     const socket = new WebSocket(`ws://${window.location.hostname}:1990`)
+    //     socket.addEventListener("open", (event) => {
+    //         socket.send("ping")
+    //         socket.send(`watch:${file_name}`)
+    //     })
+    //     // Update whenever you get a message (even if the message is "do not update")
+    //     // nb: this means that the "pong" message is important
+    //     socket.addEventListener("message", (event) => {
+    //         console.log("Message from server:", event.data)
+    //         if (event.data.startsWith("change") || event.data.startsWith("watching")) {
+    //             setTimeout(update, 100) // give file some time to be written
+    //         }
+    //     })
+    // } catch (e) {
+    //     // // fall back to polling
+    //     // // not sure i actually want to do this, it seems like a bad idea
+    //     // console.log("Warning: websocket failed " + e + ", falling back to poll")
+    //     // const update2 = () => {
+    //     //     update()
+    //     //     return setTimeout(update2, 5000)
+    //     // }
+    //     // update2()
+    // }
 
     map.on('moveend', () => {
         humanMoved = true
+        update()
         const pos = map.getCenter()
         const z = map.getZoom()
         window.location.hash = `x=${pos.lng.toFixed(4)}&y=${pos.lat.toFixed(4)}&z=${z.toFixed(4)}`
@@ -251,4 +277,6 @@ function bootstrap(meta = {}){
         const quantile = mini_array.map((v, position) => position + 1).map(v => v/mini_array.length) // +=v to weight by number rather than position
         return [target => quantile[mini_array.findIndex(v => v > target)] ?? 1, target => (mini_array[quantile.findIndex(v => Math.min(Math.max(trimFactor,v),1-trimFactor) > target)] ?? mini_array.slice(-1)[0])] // function to get quantile from value and value from quantile, with fudging to exclude top/bottom 1% from legend
     }
+    
+    update()
 }
