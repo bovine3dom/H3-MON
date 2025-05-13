@@ -2,6 +2,7 @@ import {MapboxOverlay} from '@deck.gl/mapbox'
 import {H3HexagonLayer, TileLayer} from '@deck.gl/geo-layers'
 import {BitmapLayer} from '@deck.gl/layers'
 import {CSVLoader} from '@loaders.gl/csv'
+import {ArrowLoader} from '@loaders.gl/arrow'
 import {load} from '@loaders.gl/core'
 import maplibregl from 'maplibre-gl'
 import * as d3 from 'd3'
@@ -71,24 +72,44 @@ function bootstrap(meta = {}){
         const doQuantiles = settings.raw == undefined
         const trimFactor = settings.trimFactor ? settings.trimFactor : 0.01
         const valuekey = doQuantiles ? "quantile" : "value"
-        const raw_data = (await load(`${file_path}?v=${++reloadNum}`, CSVLoader)).data
-        let data = raw_data
-        if (doQuantiles) {
-            const [getquantile, getvalue] = ecdf(raw_data.map(r => r.value), trimFactor)
-            data = raw_data.map(o => {return {...o, quantile: getquantile(o.value)}})
-            makeLegend(getvalue)
-        } else {
-            makeLegend()
-        }
+        // const raw_data = (await load(`${file_path}?v=${++reloadNum}`, CSVLoader)).data
+        const arrow_data = await load("data/h3_data.arrow", ArrowLoader)
+        window.arrow_data = arrow_data
+        // NB: need to totally disable compression, e.g.
+        // select * from 'h3_data.csv' into outfile 'h3_data.arrow' truncate compression 'none' settings output_format_arrow_compression_method = 'none'
+        // let data = raw_data.data.value
+
+        // sack off quantile for now
+        // if (doQuantiles) {
+        //     const [getquantile, getvalue] = ecdf(arrow_data.data.value, trimFactor)
+        //     data = raw_data.map(o => {return {...o, quantile: getquantile(o.value)}})
+        //     makeLegend(getvalue)
+        // } else {
+        makeLegend()
+        // }
 
         return new H3HexagonLayer({
             id: 'H3HexagonLayer',
-            data: data,
+            data: {src: arrow_data.data, length: arrow_data.data.value.length},
             extruded: false,
             stroked: false,
-            getHexagon: d => d.index,
-            getFillColor: d => getColour(d[valuekey]),
-            getElevation: d => d[valuekey]*30,
+            getHexagon: (_, {index, data}) => {
+                // console.log(index)
+                return data.src.index[index]
+            },
+            getFillColor: (wot, {index, data, target}) => {
+                // console.log(index)
+                // console.log(data.value[index])
+                const colour = getColour(data.src.value[index])
+                target[0] = 255*data.src.value[index]
+                target[1] = 255*data.src.value[index]
+                target[2] = 255*data.src.value[index]
+                target[3] = 255
+                return colour
+            },
+            // getHexagon: d => d.index,
+            // getFillColor: d => getColour(d[valuekey]),
+            // getElevation: d => d[valuekey]*30,
             elevationScale: 20,
             pickable: true
         })
@@ -137,6 +158,9 @@ function bootstrap(meta = {}){
             }
         },
         getTooltip,
+        // // experimental stuff to improve perf on mobile
+        // _pickable: false,
+        // _typedArrayManagerProps: {overAlloc: 1, poolSize: 0},
     })
 
     map.addControl(mapOverlay)
