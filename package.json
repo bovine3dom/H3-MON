@@ -8,6 +8,7 @@
         "serve": "yarn deno run --lock=deno.lock --allow-net --allow-read srv/watcher.ts"
     },
     "dependencies": {
+        "@loaders.gl/arrow": "^4.3.3",
         "@loaders.gl/csv": "^4.2.1",
         "d3": "^7.9.0",
         "d3-dsv": "^3.0.1",
