@@ -99,13 +99,12 @@ function bootstrap(meta = {}){
             ${west} as west,
             ${south} as south,
             ${north} as north,
-            best_res as (
-            select toUInt8(argMin(number, abs(geoDistance(east, south, west, north)/h3EdgeLengthM(toUInt8(number)) - 400))) best from numbers(4, 11-4)
-            )
+            (
+            select toUInt8(argMin(number, abs(geoDistance(east, south, west, north)/h3EdgeLengthM(toUInt8(number)) - 400))) from numbers(4, 11-4)
+            ) as best_res
             select lower(right(hex(h3), -1)) index, percent_rank() over (order by value asc) value from (
-                select median(${variable}) value, geoToH3(lon, lat, best) h3
+                select median(${variable}) value, geoToH3(lon, lat, best_res) h3
                 from ${table_name}
-                inner join best_res b on true
                 where true
                 and lon between ${west - (east-west)} and ${east + (east-west)}
                 and lat between ${south - (north-south)} and ${north + (north-south)}
