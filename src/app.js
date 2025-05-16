@@ -92,6 +92,7 @@ function bootstrap(meta = {}){
         const north = bounds.getNorth()
         const west = bounds.getWest()
         const east = bounds.getEast()
+        //  round(n / (10^(floor(log10(n))-1))) * (10^(floor(log10(n)) - 1))
         const arrow_data = await parse(fetch(`${ch}/?query=
             with
             ${east} as east,
@@ -101,8 +102,8 @@ function bootstrap(meta = {}){
             (
             select toUInt8(argMin(number, abs(geoDistance(east, south, west, north)/h3EdgeLengthM(toUInt8(number)) - 400))) from numbers(4, 11-4)
             ) as best_res
-            select lower(right(hex(h3), -1)) index, percent_rank() over (order by value asc) value from (
-                select median(${variable}) value, geoToH3(lon, lat, best_res) h3
+            select lower(right(hex(h3), -1)) index, round(percent_rank() over (order by q50 asc),2) value, round(q50 / exp10(floor(log10(q50) - 1))) * exp10(floor(log10(q50) - 1)) actual_value from (
+                select median(${variable}) q50, geoToH3(lon, lat, best_res) h3
                 from ${table_name}
                 where true
                 and lon between ${west - (east-west)} and ${east + (east-west)}
@@ -110,6 +111,7 @@ function bootstrap(meta = {}){
                 and ${conditions}
                 group by h3
             )
+            order by value
             format arrow settings output_format_arrow_compression_method = 'none'
         `, {headers: new Headers({'Authorization': `Basic ${btoa(username+':'+password)}`})}), ArrowLoader)
         window.arrow_data = arrow_data
@@ -219,11 +221,17 @@ function bootstrap(meta = {}){
                 legendDiv.insertBefore(legend, legendDiv.firstChild)
             } else {
                 const legend_options = {color: colourRamp, title: settings.t}
-                if (settings.scale) {
-                    const fmt = v => settings['scale'][Object.keys(settings['scale']).map(x => [x, Math.abs(x - v)]).sort((l,r)=>l[1] - r[1])[0][0]]
+                // if (settings.scale) {
+                    // const fmt = v => settings['scale'][Object.keys(settings['scale']).map(x => [x, Math.abs(x - v)]).sort((l,r)=>l[1] - r[1])[0][0]]
+                    const d = window.arrow_data.data.actual_value
+                    const l = d.length
+                    const fmt = v => {
+                        const val = d[Math.max(Math.min(Math.floor(l * v), l-1), 0)]
+                        return val ? val.toLocaleString() : "0"
+                    }
                     window.fmt = fmt
                     legend_options.tickFormat = fmt
-                }
+                // }
                 const legend = observablehq.legend(legend_options)
                 legendDiv.innerHTML = ""
                 legendDiv.insertBefore(legend, legendDiv.firstChild)
