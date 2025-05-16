@@ -74,7 +74,6 @@ function bootstrap(meta = {}){
     const variable = settings.variable ? settings.variable : "pop_in_60"
     const ch = settings.ch ? settings.ch : "http://localhost:8123"
     const conditions = settings.conditions ? settings.conditions.split(",").map(c => c.split(":").reduce((l,r) => `${l} = '${r}'`)).join(" and ") : "true"
-    console.log(conditions)
     // const file_path = `data/${file_name}`
     if (settings.t) document.title = settings.t
 
