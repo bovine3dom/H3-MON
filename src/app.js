@@ -286,3 +286,15 @@ function bootstrap(meta = {}){
     
     update()
 }
+
+window.opensatellitemap = () => {
+	const pos = Object.fromEntries(new URLSearchParams(window.location.hash.slice(1)))
+	return window.open(`https://www.google.com/maps/@?api=1&map_action=map&center=${pos.y}%2C${pos.x}&zoom=${Math.ceil(pos.z)}&basemap=satellite`, "", "popup")
+}
+
+// bind to ctrl+m
+window.addEventListener("keydown", e => {
+    if (e.ctrlKey && e.key == "m") {
+        window.opensatellitemap()
+    }
+})
