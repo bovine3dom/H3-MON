@@ -38,23 +38,24 @@ const map = new maplibregl.Map({
 })
 
 let humanMoved = false
-window.addEventListener("hashchange", () => {
-    if (humanMoved) {
-        humanMoved = false
-        return
-    }
-    const pos = Object.fromEntries(new URLSearchParams(window.location.hash.slice(1)))
-    const longitude = pos.x ? pos.x : 0.45
-    const latitude = pos.y ? pos.y : 51.47
-    const zoom = pos.z ? pos.z : 4
-    map.flyTo({
-        center: [longitude, latitude],
-        zoom: zoom,
-        bearing: 0,
-        pitch: 0
-    })
-})
+// window.addEventListener("hashchange", () => {
+//     if (humanMoved) {
+//         humanMoved = false
+//         return
+//     }
+//     const pos = Object.fromEntries(new URLSearchParams(window.location.hash.slice(1)))
+//     const longitude = pos.x ? pos.x : 0.45
+//     const latitude = pos.y ? pos.y : 51.47
+//     const zoom = pos.z ? pos.z : 4
+//     map.flyTo({
+//         center: [longitude, latitude],
+//         zoom: zoom,
+//         bearing: 0,
+//         pitch: 0
+//     })
+// })
 
+let lastcalled = performance.now()
 const params = new URLSearchParams(window.location.search)
 // const file_name = `${params.has('data') ? params.get('data') : 'h3_data'}.csv`
 // const meta_name = `${params.has('data') ? params.get('data') : 'meta'}.json`
@@ -93,28 +94,34 @@ function bootstrap(meta = {}){
         const west = bounds.getWest()
         const east = bounds.getEast()
         //  round(n / (10^(floor(log10(n))-1))) * (10^(floor(log10(n)) - 1))
-        const arrow_data = await parse(fetch(`${ch}/?query=
-            with
-            ${east} as east,
-            ${west} as west,
-            ${south} as south,
-            ${north} as north,
-            (
-            select toUInt8(argMin(number, abs(geoDistance(east, south, west, north)/h3EdgeLengthM(toUInt8(number)) - 400))) from numbers(4, 11-4)
-            ) as best_res
-            select lower(right(hex(h3), -1)) index, round(percent_rank() over (order by q50 asc),2) value, round(q50 / exp10(floor(log10(q50) - 1))) * exp10(floor(log10(q50) - 1)) actual_value from (
-                select median(${variable}) q50, geoToH3(lon, lat, best_res) h3
-                from ${table_name}
-                where true
-                and lon between ${west - (east-west)} and ${east + (east-west)}
-                and lat between ${south - (north-south)} and ${north + (north-south)}
-                and ${conditions}
-                group by h3
-            )
-            order by value
-            format arrow settings output_format_arrow_compression_method = 'none'
-        `, {headers: new Headers({'Authorization': `Basic ${btoa(username+':'+password)}`})}), ArrowLoader)
+        // const arrow_data = await parse(fetch(`${ch}/?query=
+        //     with
+        //     ${east} as east,
+        //     ${west} as west,
+        //     ${south} as south,
+        //     ${north} as north,
+        //     (
+        //     select toUInt8(argMin(number, abs(geoDistance(east, south, west, north)/h3EdgeLengthM(toUInt8(number)) - 400))) from numbers(4, 11-4)
+        //     ) as best_res
+        //     select lower(right(hex(h3), -1)) index, round(percent_rank() over (order by q50 asc),2) value, round(q50 / exp10(floor(log10(q50) - 1))) * exp10(floor(log10(q50) - 1)) actual_value from (
+        //         select median(${variable}) q50, geoToH3(lon, lat, best_res) h3
+        //         from ${table_name}
+        //         where true
+        //         and lon between ${west - (east-west)} and ${east + (east-west)}
+        //         and lat between ${south - (north-south)} and ${north + (north-south)}
+        //         and ${conditions}
+        //         group by h3
+        //     )
+        //     order by value
+        //     format arrow settings output_format_arrow_compression_method = 'none'
+        // `, {headers: new Headers({'Authorization': `Basic ${btoa(username+':'+password)}`})}), ArrowLoader)
+        // window.arrow_data = arrow_data
+        
+        const arrow_data = await parse(await fetch(`http://localhost:50075/isochrone?x=${pos.lng}&y=${pos.lat}&t=1`), ArrowLoader)
+        lastcalled = performance.now()
         window.arrow_data = arrow_data
+
+        // return []
 
         // sack off quantile for now
         // if (doQuantiles) {
@@ -189,6 +196,10 @@ function bootstrap(meta = {}){
     map.addControl(new maplibregl.NavigationControl())
 
     const update = () => {
+        // only make request if more than 10ms since previous
+        if ((performance.now() - lastcalled) < 50) {
+            return
+        }
         requestNum += 1
         const ourUpdate = requestNum
         getHexData().then(x=>{
@@ -270,12 +281,12 @@ function bootstrap(meta = {}){
     //     // update2()
     // }
 
-    map.on('moveend', () => {
+    map.on('move', () => {
         humanMoved = true
         update()
         const pos = map.getCenter()
         const z = map.getZoom()
-        window.location.hash = `x=${pos.lng.toFixed(4)}&y=${pos.lat.toFixed(4)}&z=${z.toFixed(4)}`
+        // window.location.hash = `x=${pos.lng.toFixed(4)}&y=${pos.lat.toFixed(4)}&z=${z.toFixed(4)}`
     })
 
     function ecdf(array, trimFactor=0.01){
