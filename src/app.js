@@ -38,22 +38,22 @@ const map = new maplibregl.Map({
 })
 
 let humanMoved = false
-// window.addEventListener("hashchange", () => {
-//     if (humanMoved) {
-//         humanMoved = false
-//         return
-//     }
-//     const pos = Object.fromEntries(new URLSearchParams(window.location.hash.slice(1)))
-//     const longitude = pos.x ? pos.x : 0.45
-//     const latitude = pos.y ? pos.y : 51.47
-//     const zoom = pos.z ? pos.z : 4
-//     map.flyTo({
-//         center: [longitude, latitude],
-//         zoom: zoom,
-//         bearing: 0,
-//         pitch: 0
-//     })
-// })
+window.addEventListener("hashchange", () => {
+    if (humanMoved) {
+        humanMoved = false
+        return
+    }
+    const pos = Object.fromEntries(new URLSearchParams(window.location.hash.slice(1)))
+    const longitude = pos.x ? pos.x : 0.45
+    const latitude = pos.y ? pos.y : 51.47
+    const zoom = pos.z ? pos.z : 4
+    map.flyTo({
+        center: [longitude, latitude],
+        zoom: zoom,
+        bearing: 0,
+        pitch: 0
+    })
+})
 
 let lastcalled = performance.now()
 const params = new URLSearchParams(window.location.search)
@@ -282,11 +282,14 @@ function bootstrap(meta = {}){
     // }
 
     map.on('move', () => {
-        humanMoved = true
         update()
+    })
+
+    map.on('moveend', () => {
+        humanMoved = true
         const pos = map.getCenter()
         const z = map.getZoom()
-        // window.location.hash = `x=${pos.lng.toFixed(4)}&y=${pos.lat.toFixed(4)}&z=${z.toFixed(4)}`
+        window.location.hash = `x=${pos.lng.toFixed(4)}&y=${pos.lat.toFixed(4)}&z=${z.toFixed(4)}`
     })
 
     function ecdf(array, trimFactor=0.01){
