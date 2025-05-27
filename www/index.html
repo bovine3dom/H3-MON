@@ -29,6 +29,23 @@
     max-width: 350px;
 }
 
+#reticule {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  color: #aaa;
+  width: 80px;
+  height: 80px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  z-index: 10;
+}
+
+#reticule-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
 
         </style>
 <!-- #legend { position: absolute; z-index: 1; background-color: rgba(255, 255, 255, 0.6); color: rgba(0, 0, 0, 0.6); top: 0; right: 0; font-family: "Helvetica Neue", "sans-serif"; font-size: 8pt; border-radius: 0px; } #legend text { stroke: white; stroke-width: 2px; paint-order: stroke; } -->
@@ -37,6 +54,18 @@
         <div id="map">
             <div id="legend"></div>
             <div id="attribution"></div>
+        </div>
+        <div id="reticule">
+            <svg
+                id="reticule-svg"
+                width="20"
+                height="20"
+                viewBox="0 0 20 20"
+                xmlns="http://www.w3.org/2000/svg"
+            >
+                <line x1="10" y1="0" x2="10" y2="80" stroke="#aaa" stroke-width="0.25" />
+                <line x1="0" y1="10" x2="80" y2="10" stroke="#aaa" stroke-width="0.25" />
+            </svg>
         </div>
         <script type="module" src='app.js'></script>
     </body>
