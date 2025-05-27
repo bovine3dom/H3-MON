@@ -55,7 +55,7 @@ window.addEventListener("hashchange", () => {
     })
 })
 
-let lastcalled = performance.now()
+let lastcalled = performance.now() - 1000
 const params = new URLSearchParams(window.location.search)
 // const file_name = `${params.has('data') ? params.get('data') : 'h3_data'}.csv`
 // const meta_name = `${params.has('data') ? params.get('data') : 'meta'}.json`
