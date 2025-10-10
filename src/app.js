@@ -72,11 +72,12 @@ function bootstrap(meta = {}){
     const flip = settings.flip != undefined
     const colourRamp = d3.scaleSequential(doCyclical ? d3.interpolateRainbow : d3.interpolateSpectral).domain(flip ? [1,0] : [0,1])
     const table_name = settings.table_name ? settings.table_name : "transitous_pop_within_60_baked"
+    const title = settings.t ? settings.t : table_name
     const variable = settings.variable ? settings.variable : "pop_in_60"
     const ch = settings.ch ? settings.ch : "http://localhost:8123"
     const conditions = settings.conditions ? settings.conditions.split(",").map(c => c.split(":").reduce((l,r) => `${l} = '${r}'`)).join(" and ") : "true"
     // const file_path = `data/${file_name}`
-    if (settings.t) document.title = settings.t
+    if (title) document.title = title
 
     /* convert from "rgba(r,g,b,a)" string to [r,g,b] */
     const getColour = v => Object.values(d3.color(colourRamp(v))).slice(0,-1)
@@ -238,11 +239,11 @@ function bootstrap(meta = {}){
     async function makeLegend(fmt) {
         try {
             if (fmt !== undefined) {
-                const legend = observablehq.legend({color: colourRamp, title: settings.t, tickFormat: v => parseFloat(fmt(v).toPrecision(2)).toLocaleString()})
+                const legend = observablehq.legend({color: colourRamp, title: title, tickFormat: v => parseFloat(fmt(v).toPrecision(2)).toLocaleString()})
                 legendDiv.innerHTML = ""
                 legendDiv.insertBefore(legend, legendDiv.firstChild)
             } else {
-                const legend_options = {color: colourRamp, title: settings.t}
+                const legend_options = {color: colourRamp, title: title}
                 // if (settings.scale) {
                     // const fmt = v => settings['scale'][Object.keys(settings['scale']).map(x => [x, Math.abs(x - v)]).sort((l,r)=>l[1] - r[1])[0][0]]
                     const d = window.arrow_data.data.actual_value
@@ -260,7 +261,7 @@ function bootstrap(meta = {}){
             }
         } catch(e) {
             console.warn(e)
-            const legend = observablehq.legend({color: colourRamp, title: settings.t})
+            const legend = observablehq.legend({color: colourRamp, title: title})
             legendDiv.innerHTML = ""
             legendDiv.insertBefore(legend, legendDiv.firstChild)
         }
