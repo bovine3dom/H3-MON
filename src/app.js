@@ -68,9 +68,10 @@ function bootstrap(meta = {}){
     let requestNum = 0
     const settings = Object.assign({}, meta, Object.fromEntries(params.entries()))
     const doCyclical = settings.cyclical != undefined
+    const doAggregation = settings.aggregate != undefined
     const flip = settings.flip != undefined
     const colourRamp = d3.scaleSequential(doCyclical ? d3.interpolateRainbow : d3.interpolateSpectral).domain(flip ? [1,0] : [0,1])
-    const table_name = settings.table_name ? settings.table_name : "transitous_pop_within_60"
+    const table_name = settings.table_name ? settings.table_name : "transitous_pop_within_60_baked"
     const variable = settings.variable ? settings.variable : "pop_in_60"
     const ch = settings.ch ? settings.ch : "http://localhost:8123"
     const conditions = settings.conditions ? settings.conditions.split(",").map(c => c.split(":").reduce((l,r) => `${l} = '${r}'`)).join(" and ") : "true"
@@ -93,7 +94,28 @@ function bootstrap(meta = {}){
         const west = bounds.getWest()
         const east = bounds.getEast()
         //  round(n / (10^(floor(log10(n))-1))) * (10^(floor(log10(n)) - 1))
-        const arrow_data = await parse(fetch(`${ch}/?query=
+        const arrow_data = !doAggregation ? await parse(fetch(`${ch}/?query=
+            with
+            ${east} as east,
+            ${west} as west,
+            ${south} as south,
+            ${north} as north,
+            (
+            select toUInt8(argMin(number, abs(geoDistance(east, south, west, north)/h3EdgeLengthM(toUInt8(number)) - 400))) from numbers(4, 11-4)
+            ) as best_res
+            select lower(hex(h3)) index, round(percent_rank() over (order by q50 asc),2) value, round(q50 / exp10(floor(log10(q50) - 1))) * exp10(floor(log10(q50) - 1)) actual_value from (
+                select ${variable} q50, h3
+                from ${table_name}
+                where true
+                and lon between ${west - (east-west)} and ${east + (east-west)}
+                and lat between ${south - (north-south)} and ${north + (north-south)}
+                and res = best_res
+                and ${conditions}
+            )
+            order by value
+            format arrow settings output_format_arrow_compression_method = 'none'
+        `, {headers: new Headers({'Authorization': `Basic ${btoa(username+':'+password)}`})}), ArrowLoader)
+        : await parse(fetch(`${ch}/?query=
             with
             ${east} as east,
             ${west} as west,
