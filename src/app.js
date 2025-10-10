@@ -19,7 +19,7 @@ if (window.location.hostname == 'localhost'){
 } else if (window.location.hostname == 'o.blanthorn.com')  {
         STYLE = "https://api.maptiler.com/maps/toner-v2/style.json?key=L7Sd3jHa1AR1dtyLCTgq"
 } else {
-        STYLE = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json" // fall back to CARTO
+        STYLE = "https://tiles.openfreemap.org/styles/positron" // fall back to openfreemap
 }
 
 
@@ -208,7 +208,7 @@ function bootstrap(meta = {}){
     const l = document.getElementById("attribution")
     const extra_c = settings.c ? settings.c.split(",") : []
     if (settings.trains) extra_c.push("OpenRailwayMap")
-    l.innerText = "©\u00a0" + [...extra_c, "MapTiler",  "OpenStreetMap contributors"].filter(x=>x !== null).join(" ©\u00a0")
+    l.innerText = "©\u00a0" + [...extra_c, "bovine3dom", "OpenFreeMap",  "OpenStreetMap contributors"].filter(x=>x !== null).join(" ©\u00a0")
     const legendDiv = document.createElement('div')
     legendDiv.id = "observable_legend"
     l.insertBefore(legendDiv, l.firstChild)
