@@ -102,8 +102,8 @@ function bootstrap(meta = {}){
             (
             select toUInt8(argMin(number, abs(geoDistance(east, south, west, north)/h3EdgeLengthM(toUInt8(number)) - 400))) from numbers(4, 11-4)
             ) as best_res
-            select lower(right(hex(h3), -1)) index, round(percent_rank() over (order by q50 asc),2) value, round(q50 / exp10(floor(log10(q50) - 1))) * exp10(floor(log10(q50) - 1)) actual_value from (
-                select median(${variable}) q50, geoToH3(lon, lat, best_res) h3
+            select lower(hex(h3)) index, round(percent_rank() over (order by q50 asc),2) value, round(q50 / exp10(floor(log10(q50) - 1))) * exp10(floor(log10(q50) - 1)) actual_value from (
+                select median(${variable}) q50, geoToH3(lat, lon, best_res) h3
                 from ${table_name}
                 where true
                 and lon between ${west - (east-west)} and ${east + (east-west)}
