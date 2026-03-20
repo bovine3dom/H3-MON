@@ -8,14 +8,8 @@ import * as d3 from 'd3'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import * as observablehq from './vendor/observablehq' // from https://observablehq.com/@d3/color-legend
 
-let STYLE = ""
-if (window.location.hostname == 'localhost'){
-        STYLE = "https://api.maptiler.com/maps/toner-v2/style.json?key=Y4leWPnhJFGnTFFk1cru"
-} else if (window.location.hostname == 'o.blanthorn.com')  {
-        STYLE = "https://api.maptiler.com/maps/toner-v2/style.json?key=L7Sd3jHa1AR1dtyLCTgq"
-} else {
-        STYLE = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json" // fall back to CARTO
-}
+//const STYLE = "http://localhost:1983/toner_ofm_moderatlist.json"
+const STYLE = "https://compute.olie.science/fahrtle/toner_ofm_moderatlist.json"
 
 const start_pos = {...{x: 0.45, y: 51.47, z: 4}, ...Object.fromEntries(new URLSearchParams(window.location.hash.slice(1)))}
 const map = new maplibregl.Map({
@@ -159,7 +153,7 @@ function bootstrap(meta = {}){
     const l = document.getElementById("attribution")
     const extra_c = settings.c ? settings.c.split(",") : []
     if (settings.trains) extra_c.push("OpenRailwayMap")
-    l.innerText = "©\u00a0" + [...extra_c, "MapTiler",  "OpenStreetMap contributors"].filter(x=>x !== null).join(" ©\u00a0")
+    l.innerText = "©\u00a0" + [...extra_c, "OpenFreeMap", "Natural Earth", "GEBCO", "Mapterhorn", "OpenStreetMap contributors"].filter(x=>x !== null).join(" ©\u00a0")
     const legendDiv = document.createElement('div')
     legendDiv.id = "observable_legend"
     l.insertBefore(legendDiv, l.firstChild)
