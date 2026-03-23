@@ -172,7 +172,7 @@ function bootstrap(meta = {}){
             } else {
                 // geojson
                 values = raw.features.map(f => f.properties?.value ?? f.value ?? f.properties?.val)
-                weights = null
+                weights = raw.features.map(f => f.properties?.weight ?? f.weight)
             }
             const [getquantile, getvalue] = ecdf(values, trimFactor, weights)
             if (format.layer === 'hex') {
