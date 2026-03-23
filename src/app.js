@@ -17,7 +17,6 @@ const FORMATS = {
     arrow:   {loader: ArrowLoader,    kind: 'column', layer: 'hex'},
     parquet: {loader: ParquetWasmLoader, kind: 'column', layer: 'hex', loadOptions: {shape: 'columnar-table', parquet: {wasmUrl: PARQUET_WASM_URL}}},
     geojson: {kind: 'row',            layer: 'geojson'},
-    json:    {kind: 'row',            layer: 'geojson'},
 }
 
 //const STYLE = "http://localhost:1983/toner_ofm_moderatlist.json"
@@ -165,11 +164,32 @@ function bootstrap(meta = {}){
 
         let data
         let valuekey = 'value'
-        if (doQuantiles && format.layer === 'hex') {
-            const values = extractValues(raw, format.kind)
-            const weights = extractWeights(raw, format.kind)
+        if (doQuantiles && (format.layer === 'hex' || format.layer === 'geojson')) {
+            let values, weights
+            if (format.layer === 'hex') {
+                values = extractValues(raw, format.kind)
+                weights = extractWeights(raw, format.kind)
+            } else {
+                // geojson
+                values = raw.features.map(f => f.properties?.value ?? f.value ?? f.properties?.val)
+                weights = null
+            }
             const [getquantile, getvalue] = ecdf(values, trimFactor, weights)
-            data = applyQuantiles(raw, format.kind, getquantile)
+            if (format.layer === 'hex') {
+                data = applyQuantiles(raw, format.kind, getquantile)
+            } else {
+                // assign quantile to each feature
+                data = {
+                    ...raw,
+                    features: raw.features.map(f => ({
+                        ...f,
+                        properties: {
+                            ...f.properties,
+                            quantile: getquantile(f.properties?.value ?? f.value ?? f.properties?.val)
+                        }
+                    }))
+                }
+            }
             valuekey = 'quantile'
             makeLegend(getvalue)
         } else {
@@ -197,7 +217,7 @@ function bootstrap(meta = {}){
         if (format.layer === 'geojson') {
             const randomColour = () => [Math.random()*255, Math.random()*255, Math.random()*255, 200]
             const getColor = f => {
-                const v = f.properties?.value ?? f.value ?? f.properties?.val
+                const v = valuekey === 'quantile' ? f.properties?.quantile : (f.properties?.value ?? f.value ?? f.properties?.val)
                 return v != null ? getColour(v) : randomColour()
             }
             return new GeoJsonLayer({
@@ -206,8 +226,12 @@ function bootstrap(meta = {}){
                 filled: true,
                 stroked: true,
                 getFillColor: getColor,
-                getLineColor: [255, 255, 255, 100],
-                getLineWidth: 1,
+                getLineColor: f => {
+                    const rgb = getColor(f);
+                    return [...rgb.slice(0,3), 255];
+                },
+                lineWidthMinPixels: 2,
+                lineBillboard: true,
                 pickable: true
             })
         }
