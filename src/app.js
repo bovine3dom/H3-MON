@@ -103,6 +103,11 @@ function bootstrap(meta = {}){
         return raw.map(r => r.value)
     }
 
+    function extractWeights(raw, kind) {
+        if (kind === 'column') return raw.weight ? Array.from(raw.weight) : null
+        return raw.length > 0 && raw[0].weight != null ? raw.map(r => r.weight) : null
+    }
+
     function applyQuantiles(raw, kind, getquantile) {
         if (kind === 'column') {
             const quantiles = Array.from(raw.value).map(getquantile)
@@ -162,7 +167,8 @@ function bootstrap(meta = {}){
         let valuekey = 'value'
         if (doQuantiles && format.layer === 'hex') {
             const values = extractValues(raw, format.kind)
-            const [getquantile, getvalue] = ecdf(values, trimFactor)
+            const weights = extractWeights(raw, format.kind)
+            const [getquantile, getvalue] = ecdf(values, trimFactor, weights)
             data = applyQuantiles(raw, format.kind, getquantile)
             valuekey = 'quantile'
             makeLegend(getvalue)
@@ -353,9 +359,17 @@ function bootstrap(meta = {}){
         window.location.hash = `x=${pos.lng.toFixed(4)}&y=${pos.lat.toFixed(4)}&z=${z.toFixed(4)}`
     })
 
-    function ecdf(array, trimFactor=0.01){
-        const mini_array = Array.from({length: Math.min(8192, array.length)}, () => Math.floor(Math.random()*array.length)).map(i => array[i]).sort((l,r) => l-r) // sort() sorts alphabetically otherwise
-        const quantile = mini_array.map((v, position) => position + 1).map(v => v/mini_array.length) // +=v to weight by number rather than position
-        return [target => quantile[mini_array.findIndex(v => v > target)] ?? 1, target => (mini_array[quantile.findIndex(v => Math.min(Math.max(trimFactor,v),1-trimFactor) > target)] ?? mini_array.slice(-1)[0])] // function to get quantile from value and value from quantile, with fudging to exclude top/bottom 1% from legend
+    function ecdf(array, trimFactor=0.01, weights=null) {
+        const sampleSize = Math.min(8192, array.length)
+        const indices = Array.from({length: sampleSize}, () => Math.floor(Math.random()*array.length))
+        const pairs = indices.map(i => [array[i], weights ? weights[i] : 1])
+        pairs.sort((a, b) => a[0] - b[0])
+        const mini_array = pairs.map(([v]) => v)
+        const sortedWeights = pairs.map(([, w]) => w)
+        let cumW = 0
+        const totalW = sortedWeights.reduce((s, w) => s + w, 0)
+        const quantile = sortedWeights.map(w => { cumW += w; return cumW / totalW })
+        
+        return [target => quantile[mini_array.findIndex(v => v > target)] ?? 1, target => (mini_array[quantile.findIndex(v => Math.min(Math.max(trimFactor,v),1-trimFactor) > target)] ?? mini_array.slice(-1)[0])]
     }
 }
