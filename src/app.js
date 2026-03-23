@@ -230,7 +230,12 @@ function bootstrap(meta = {}){
                     const rgb = getColor(f);
                     return [...rgb.slice(0,3), 255];
                 },
-                lineWidthMinPixels: 2,
+                getLineWidth: 1000,
+                lineWidthMinPixels: 1,
+                lineJointRounded: true,
+                lineCapRounded: true,
+                lineWidthMaxPixels: 4,
+                lineWidthUnits: 'meters',
                 lineBillboard: true,
                 pickable: true
             })
