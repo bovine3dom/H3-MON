@@ -1,13 +1,24 @@
 import {MapboxOverlay} from '@deck.gl/mapbox'
 import {H3HexagonLayer, TileLayer} from '@deck.gl/geo-layers'
-import {BitmapLayer} from '@deck.gl/layers'
+import {BitmapLayer, GeoJsonLayer} from '@deck.gl/layers'
 import {CSVLoader} from '@loaders.gl/csv'
 import {ArrowLoader} from '@loaders.gl/arrow'
+import {ParquetWasmLoader} from '@loaders.gl/parquet'
 import {load} from '@loaders.gl/core'
 import maplibregl from 'maplibre-gl'
 import * as d3 from 'd3'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import * as observablehq from './vendor/observablehq' // from https://observablehq.com/@d3/color-legend
+
+const PARQUET_WASM_URL = './parquet_wasm_bg.wasm'
+
+const FORMATS = {
+    csv:     {loader: CSVLoader,      kind: 'row',    layer: 'hex'},
+    arrow:   {loader: ArrowLoader,    kind: 'column', layer: 'hex'},
+    parquet: {loader: ParquetWasmLoader, kind: 'column', layer: 'hex', loadOptions: {shape: 'columnar-table', parquet: {wasmUrl: PARQUET_WASM_URL}}},
+    geojson: {kind: 'row',            layer: 'geojson'},
+    json:    {kind: 'row',            layer: 'geojson'},
+}
 
 //const STYLE = "http://localhost:1983/toner_ofm_moderatlist.json"
 const STYLE = "https://compute.olie.science/fahrtle/toner_ofm_moderatlist.json"
@@ -41,8 +52,14 @@ window.addEventListener("hashchange", () => {
 })
 
 const params = new URLSearchParams(window.location.search)
-const file_name = `${params.has('data') ? params.get('data') : 'h3_data'}.csv`
-const meta_name = `${params.has('data') ? params.get('data') : 'meta'}.json`
+const dataParam = params.get('data') || 'h3_data'
+const dotIdx = dataParam.lastIndexOf('.')
+const ext = dotIdx >= 0 ? dataParam.slice(dotIdx + 1).toLowerCase() : 'csv'
+const format = FORMATS[ext] || FORMATS.csv
+if (!FORMATS[ext] && dotIdx >= 0) console.warn(`Unknown extension ".${ext}", falling back to csv`)
+const file_name = dotIdx >= 0 ? dataParam : `${dataParam}.csv`
+const base_name = dotIdx >= 0 ? dataParam.slice(0, dotIdx) : dataParam
+const meta_name = `${base_name}.json`
 fetch(`data/${meta_name}`).then(r => r.json()).then(meta => {
     bootstrap(meta)
 }).catch(_ => {
@@ -59,54 +76,135 @@ function bootstrap(meta = {}){
 
     /* convert from "rgba(r,g,b,a)" string to [r,g,b] */
     const getColour = v => Object.values(d3.color(colourRamp(v))).slice(0,-1)
-    // const getColour = v => [...Object.values(d3.color(colourRamp(v))).slice(0,-1), Math.sqrt(v)*255] // with v as alpha too
+
+    function hexAccessors(kind, indexkey, valuekey, getColour) {
+        if (kind === 'column') {
+            return {
+                getHexagon: (_, {index, data}) => data.src[indexkey][index],
+                getFillColor: (_, {index, data, target}) => {
+                    const v = data.src[valuekey][index]
+                    const colour = getColour(v)
+                    target[0] = 255*v
+                    target[1] = 255*v
+                    target[2] = 255*v
+                    target[3] = 255
+                    return colour
+                }
+            }
+        }
+        return {
+            getHexagon: d => d.index,
+            getFillColor: d => getColour(d[valuekey])
+        }
+    }
+
+    function extractValues(raw, kind) {
+        if (kind === 'column') return Array.from(raw.value)
+        return raw.map(r => r.value)
+    }
+
+    function applyQuantiles(raw, kind, getquantile) {
+        if (kind === 'column') {
+            const quantiles = Array.from(raw.value).map(getquantile)
+            return {...raw, quantile: quantiles}
+        }
+        return raw.map(o => ({...o, quantile: getquantile(o.value)}))
+    }
+
     let reloadNum = 0
     const getHexData = async () => {
 
         const doQuantiles = settings.raw == undefined
         const trimFactor = settings.trimFactor ? settings.trimFactor : 0.01
-        const valuekey = doQuantiles ? "quantile" : "value"
-        // const raw_data = (await load(`${file_path}?v=${++reloadNum}`, CSVLoader)).data
-        const arrow_data = await load("data/h3_data.arrow", ArrowLoader)
-        window.arrow_data = arrow_data
-        // NB: need to totally disable compression, e.g.
-        // select * from 'h3_data.csv' into outfile 'h3_data.arrow' truncate compression 'none' settings output_format_arrow_compression_method = 'none'
-        // let data = raw_data.data.value
+        let loaded
+        if (format.layer === 'geojson') {
+            const resp = await fetch(`${file_path}?v=${++reloadNum}`)
+            loaded = {data: await resp.json()}
+        } else {
+            loaded = await load(`${file_path}?v=${++reloadNum}`, format.loader, format.loadOptions)
+        }
+        let raw = loaded.data
+        window.raw_data = raw
 
-        // sack off quantile for now
-        // if (doQuantiles) {
-        //     const [getquantile, getvalue] = ecdf(arrow_data.data.value, trimFactor)
-        //     data = raw_data.map(o => {return {...o, quantile: getquantile(o.value)}})
-        //     makeLegend(getvalue)
-        // } else {
-        makeLegend()
-        // }
+        if (raw && raw.batches && raw.schema) {
+            const table = raw
+            const fields = table.schema.fields.map(f => f.name)
+            const columnar = {}
+            for (const field of fields) {
+                columnar[field] = []
+            }
+            for (const batch of table.batches) {
+                batch.data.children.forEach((child, i) => {
+                    const name = fields[i]
+                    if (child.dictionary) {
+                        const dict = child.dictionary.values
+                        const indices = child.values
+                        const decoded = Array.from(indices, idx => dict[idx])
+                        columnar[name] = columnar[name].concat(decoded)
+                    } else if (child.valueOffsets && child.values) {
+                        const offsets = child.valueOffsets
+                        const bytes = child.values
+                        const decoder = new TextDecoder()
+                        for (let j = 0; j < offsets.length - 1; j++) {
+                            const start = offsets[j]
+                            const end = offsets[j + 1]
+                            columnar[name].push(decoder.decode(bytes.subarray(start, end)))
+                        }
+                    } else if (child.values) {
+                        columnar[name] = columnar[name].concat(Array.from(child.values))
+                    }
+                })
+            }
+            raw = columnar
+        }
 
-        return new H3HexagonLayer({
-            id: 'H3HexagonLayer',
-            data: {src: arrow_data.data, length: arrow_data.data.value.length},
-            extruded: false,
-            stroked: false,
-            getHexagon: (_, {index, data}) => {
-                // console.log(index)
-                return data.src.index[index]
-            },
-            getFillColor: (wot, {index, data, target}) => {
-                // console.log(index)
-                // console.log(data.value[index])
-                const colour = getColour(data.src.value[index])
-                target[0] = 255*data.src.value[index]
-                target[1] = 255*data.src.value[index]
-                target[2] = 255*data.src.value[index]
-                target[3] = 255
-                return colour
-            },
-            // getHexagon: d => d.index,
-            // getFillColor: d => getColour(d[valuekey]),
-            // getElevation: d => d[valuekey]*30,
-            elevationScale: 20,
-            pickable: true
-        })
+        let data
+        let valuekey = 'value'
+        if (doQuantiles && format.layer === 'hex') {
+            const values = extractValues(raw, format.kind)
+            const [getquantile, getvalue] = ecdf(values, trimFactor)
+            data = applyQuantiles(raw, format.kind, getquantile)
+            valuekey = 'quantile'
+            makeLegend(getvalue)
+        } else {
+            data = raw
+            makeLegend()
+        }
+
+        if (format.layer === 'hex') {
+            const accessors = hexAccessors(format.kind, 'index', valuekey, getColour)
+            const dataWrap = format.kind === 'column'
+                ? {src: data, length: data.value.length}
+                : data
+            if (format.kind === 'column') window._columnData = data
+            return new H3HexagonLayer({
+                id: 'H3HexagonLayer',
+                data: dataWrap,
+                extruded: false,
+                stroked: false,
+                ...accessors,
+                elevationScale: 20,
+                pickable: true
+            })
+        }
+
+        if (format.layer === 'geojson') {
+            const randomColour = () => [Math.random()*255, Math.random()*255, Math.random()*255, 200]
+            const getColor = f => {
+                const v = f.properties?.value ?? f.value ?? f.properties?.val
+                return v != null ? getColour(v) : randomColour()
+            }
+            return new GeoJsonLayer({
+                id: 'GeoJsonLayer',
+                data: data,
+                filled: true,
+                stroked: true,
+                getFillColor: getColor,
+                getLineColor: [255, 255, 255, 100],
+                getLineWidth: 1,
+                pickable: true
+            })
+        }
     }
 
     const choochoo = new TileLayer({
@@ -127,19 +225,34 @@ function bootstrap(meta = {}){
         pickable: false
     })
 
-    function getTooltip({object}) {
-        const toDivs = kv => {
-            return `<div>${kv[0]}: ${typeof(kv[1]) == "number" ? parseFloat(kv[1].toPrecision(3)) : kv[1]}</div>` // parseFloat is a hack to bin scientific notation
+    function getTooltip({object, index}) {
+        if (index < 0) return null
+        let row
+        if (format.kind === 'column' && window._columnData) {
+            row = Object.fromEntries(
+                Object.keys(window._columnData).filter(k => k !== 'quantile').map(k => [k, window._columnData[k][index]])
+            )
+        } else if (object && object.type === 'Feature') {
+            row = object.properties || {}
+        } else if (object) {
+            row = object
+        } else {
+            return null
         }
-        return object && {
-            // html: `<div>${(object.value).toPrecision(2)}</div>`,
-            html: Object.entries(object).map(toDivs).join(" "),
+        const fmtVal = v => {
+            if (v == null) return ''
+            if (typeof v === 'number') return parseFloat(v.toPrecision(3)).toLocaleString()
+            if (typeof v === 'object') return JSON.stringify(v)
+            return v
+        }
+        const toDivs = kv => `<div>${kv[0]}: ${fmtVal(kv[1])}</div>`
+        return {
+            html: Object.entries(row).filter(([,v]) => v != null && v !== '').map(toDivs).join(" "),
             style: {
                 backgroundColor: '#fff',
                 fontFamily: 'sans-serif',
                 fontSize: '0.8em',
                 padding: '0.5em',
-                // fontColor: 'black',
             }
         }
     }

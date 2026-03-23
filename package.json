@@ -2,20 +2,24 @@
     "name": "H3-MON",
     "license": "BSD-2-Clause",
     "scripts": {
-        "serve_memleak": "yarn esbuild --bundle src/app.js --outfile=www/app.js --servedir=www",
-        "build": "yarn esbuild --minify --bundle src/app.js --outfile=www/app.js",
-        "watch": "yarn esbuild --minify --watch --bundle src/app.js --outfile=www/app.js",
-        "serve": "yarn deno run --lock=deno.lock --allow-net --allow-read srv/watcher.ts"
+        "serve_memleak": "node esbuild.config.mjs --servedir=www",
+        "build": "node esbuild.config.mjs",
+        "watch": "node esbuild.config.mjs --watch",
+        "serve": "yarn deno run --lock=deno.lock --allow-net --allow-read srv/watcher.ts",
+        "postinstall": "cp node_modules/@loaders.gl/parquet/dist/parquet_wasm_bg.wasm www/"
     },
     "dependencies": {
         "@loaders.gl/arrow": "^4.3.3",
         "@loaders.gl/csv": "^4.2.1",
+        "@loaders.gl/json": "^4.3.4",
+        "@loaders.gl/parquet": "^4.3.4",
         "d3": "^7.9.0",
         "d3-dsv": "^3.0.1",
         "d3-scale-chromatic": "^3.1.0",
         "deck.gl": "^9.0.14",
         "deno-bin": "^1.43.5",
         "esbuild": "^0.21.3",
+        "lz4js": "^0.2.0",
         "maplibre-gl": "^3.0.0"
     }
 }
