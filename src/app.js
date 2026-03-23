@@ -172,7 +172,11 @@ function bootstrap(meta = {}){
             } else {
                 // geojson
                 values = raw.features.map(f => f.properties?.value ?? f.value ?? f.properties?.val)
-                weights = raw.features.map(f => f.properties?.weight ?? f.weight)
+                weights = raw.features.map(f => f.properties?.weight ?? f.weight).filter(x => x != null)
+                if (weights.length !== values.length) {
+                    if (weights.length !== 0) console.warn(`Weights and values have different lengths`)
+                    weights = null
+                }
             }
             const [getquantile, getvalue] = ecdf(values, trimFactor, weights)
             if (format.layer === 'hex') {
