@@ -4,12 +4,51 @@
         <meta charset='UTF-8' />
         <title>H3-MON: THE MOST POWERFUL MON(itor) IN THE UNIVERSE</title>
         <style>
-#map {
+#layout {
     position: fixed;
     top: 0;
     left: 0;
     right: 0;
     bottom: 0;
+    display: flex;
+}
+#side-pane {
+    background: #f5f5f5;
+    flex: 0 0 0;
+    overflow: hidden;
+    transition: flex-basis 0.2s ease;
+}
+#map {
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 0;
+    position: relative;
+}
+body.pane-open #side-pane {
+    flex: 0 0 50%;
+}
+#toggle-pane {
+    position: absolute;
+    top: 0.5em;
+    left: 0.5em;
+    z-index: 2;
+    width: 1.8em;
+    height: 1.8em;
+    border: 1px solid rgba(0, 0, 0, 0.2);
+    border-radius: 0.25em;
+    background: rgba(255, 255, 255, 0.9);
+    cursor: pointer;
+    font: 14px/1 sans-serif;
+    padding: 0;
+}
+#toggle-pane:hover {
+    background: #fff;
+}
+@media (orientation: landscape) {
+    #layout { flex-direction: row; }
+}
+@media (orientation: portrait) {
+    #layout { flex-direction: column; }
 }
 #deckgl-overlay {
     mix-blend-mode: multiply;
@@ -65,13 +104,17 @@
 <!-- #legend { position: absolute; z-index: 1; background-color: rgba(255, 255, 255, 0.6); color: rgba(0, 0, 0, 0.6); top: 0; right: 0; font-family: "Helvetica Neue", "sans-serif"; font-size: 8pt; border-radius: 0px; } #legend text { stroke: white; stroke-width: 2px; paint-order: stroke; } -->
     </head>
     <body>
-        <div id="map">
-            <div id="search-container">
-                <input type="text" id="city-search" placeholder="Jump to a city..." autocomplete="off" />
-                <div id="city-results"></div>
+        <div id="layout">
+            <aside id="side-pane"></aside>
+            <div id="map">
+                <button id="toggle-pane" type="button" aria-label="Close side pane">‹</button>
+                <div id="search-container">
+                    <input type="text" id="city-search" placeholder="Jump to a city..." autocomplete="off" />
+                    <div id="city-results"></div>
+                </div>
+                <div id="legend"></div>
+                <div id="attribution"></div>
             </div>
-            <div id="legend"></div>
-            <div id="attribution"></div>
         </div>
         <script type="module" src='app.js'></script>
     </body>

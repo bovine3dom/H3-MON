@@ -64,6 +64,21 @@ const map = new maplibregl.Map({
     pitch: 0
 })
 
+const toggleBtn = document.getElementById('toggle-pane')
+const mql = window.matchMedia('(orientation: portrait)')
+const isPortrait = () => mql.matches
+const setPane = (open) => {
+    document.body.classList.toggle('pane-open', open)
+    toggleBtn.textContent = isPortrait() ? (open ? '˄' : '˅') : (open ? '‹' : '›')
+    toggleBtn.setAttribute('aria-label', open ? 'Close side pane' : 'Open side pane')
+    requestAnimationFrame(() => map.resize())
+}
+setPane(true)
+toggleBtn.addEventListener('click', () => setPane(!document.body.classList.contains('pane-open')))
+mql.addEventListener('change', () => setPane(document.body.classList.contains('pane-open')))
+window.addEventListener('resize', () => map.resize())
+window.addEventListener('orientationchange', () => map.resize())
+
 let humanMoved = false
 window.addEventListener("hashchange", () => {
     if (humanMoved) {
