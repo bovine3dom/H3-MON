@@ -13,6 +13,7 @@
         "@loaders.gl/csv": "^4.2.1",
         "@loaders.gl/json": "^4.3.4",
         "@loaders.gl/parquet": "^4.3.4",
+        "@perspective-dev/client": "^4.5.1",
         "d3": "^7.9.0",
         "d3-dsv": "^3.0.1",
         "d3-scale-chromatic": "^3.1.0",

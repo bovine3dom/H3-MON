@@ -23,6 +23,9 @@ const options = {
   outfile: 'www/app.js',
   minify: !isWatch,
   plugins: [nodeBuiltinPlugin],
+  loader: {
+    '.wasm': 'file',
+  },
 };
 
 if (isWatch) {

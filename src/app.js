@@ -10,6 +10,37 @@ import * as d3 from 'd3'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import * as observablehq from './vendor/observablehq' // from https://observablehq.com/@d3/color-legend
 import {getCitiesStartsWith} from 'tiny-geocoder'
+import perspective from '@perspective-dev/client'
+import PERSPECTIVE_SERVER_WASM from "@perspective-dev/server/dist/wasm/perspective-server.wasm"
+import PERSPECTIVE_CLIENT_WASM from "@perspective-dev/client/dist/wasm/perspective-js.wasm"
+
+console.log(perspective)
+
+perspective.init_server(fetch(PERSPECTIVE_SERVER_WASM))
+perspective.init_client(fetch(PERSPECTIVE_CLIENT_WASM))
+
+perspective.worker().then(async (worker) => {
+    const arrow_resp = await fetch('data/mapping.arrow')
+    const table = await worker.table(await arrow_resp.arrayBuffer())
+    window.table = table
+    console.log(table)
+    // looks like aggregates can only operate on single columns so we need to do this in two steps
+    // => weighted quantiles impossible? :(
+    const sanity_check = (await (await table.view({
+        expressions: {'wp': '"weight" * "population"'},
+        columns: ['x', 'y', 'wp'],
+        aggregates: {'wp': 'sum'},
+        group_by: ['x', 'y'], // shit, after to_columns h3 aren't bigints ... check they are internally?
+        // sort: [['wp', 'desc']], // this doesn't seem to do anything
+    })).to_columns())
+    console.log(sanity_check) // nice. populations are around ~150k. this is working. 🚀
+    // next steps:
+    // 1) draw the cartogram in a new pane with borders
+    // 2) aggregate actual data into the cartogram
+    // 3) link cartogram <-> map 
+    // (e.g. click on cartogram -> draw h3 that contribute to that cell * weight; 
+    // zoom/move cartogram -> zoom/move map based on bbox of cartogram ... might be worth pre-computing lat/lon?)
+})
 
 const PARQUET_WASM_URL = './parquet_wasm_bg.wasm'
 
