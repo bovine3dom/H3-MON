@@ -13,6 +13,7 @@ import {getCitiesStartsWith} from 'tiny-geocoder'
 import perspective from '@perspective-dev/client'
 import PERSPECTIVE_SERVER_WASM from "@perspective-dev/server/dist/wasm/perspective-server.wasm"
 import PERSPECTIVE_CLIENT_WASM from "@perspective-dev/client/dist/wasm/perspective-js.wasm"
+import {render_cartogram} from './cartogram'
 
 console.log(perspective)
 
@@ -27,19 +28,34 @@ perspective.worker().then(async (worker) => {
     // looks like aggregates can only operate on single columns so we need to do this in two steps
     // => weighted quantiles impossible? :(
     const sanity_check = (await (await table.view({
-        expressions: {'wp': '"weight" * "population"'},
-        columns: ['x', 'y', 'wp'],
-        aggregates: {'wp': 'sum'},
-        group_by: ['x', 'y'], // shit, after to_columns h3 aren't bigints ... check they are internally?
-        // sort: [['wp', 'desc']], // this doesn't seem to do anything
+        // ideally ~150k pop per cell
+        expressions: {'wp': '"weight" * "population" / (150000 * 2)', 'h3_s': 'string("h3")', '_code': '"code"/1000'}, // h3 gets truncated in to_columns otherwise. but need to hex it
+        columns: ['x', 'y', 'wp', '_code', 'label'],
+        aggregates: {'wp': 'sum', '_code': 'dominant', 'label': 'dominant', 'x': 'first', 'y': 'first'}, // something very weird going on here, x/y are not unique, lots of stuff gets shoved in 354/114. string join works but stringifies nulls
+        // isn't it extremely weird that group_by columns also need to be in the aggregate? but all their examples have it
+        group_by: ['x', 'y'],
+        group_rollup_mode: 'flat', // dunno what this does honestly. but it fixes the duplicate labels!! yey!
+        //sort: [['wp', 'desc']], // this doesn't seem to do anything
     })).to_columns())
     console.log(sanity_check) // nice. populations are around ~150k. this is working. 🚀
+    sanity_check.code = sanity_check._code
+    render_cartogram('#cartogram', sanity_check, {data_col: 'wp'})
     // next steps:
+    // 0) debug why on earth labels are showing up in multiple places even though they are unique in mapping.arrow. ditto for country borders?
     // 1) draw the cartogram in a new pane with borders
+    // done ^
     // 2) aggregate actual data into the cartogram
     // 3) link cartogram <-> map 
     // (e.g. click on cartogram -> draw h3 that contribute to that cell * weight; 
     // zoom/move cartogram -> zoom/move map based on bbox of cartogram ... might be worth pre-computing lat/lon?)
+
+    // probably easiest to demand strings in the input? but if we need to, "0x" + BigInt(h3s).toString(16) would work
+    // ... if perpsective doesn't support joins we are kind of buggered right?
+    // worker.join() exists https://perspective-dev.github.io/browser/classes/dist_wasm_perspective-js.d.ts.Client.html#join
+    // left - The left source table (a [Table] instance or a table name string).
+    // right - The right source table (a [Table] instance or a table name string).
+    // on - The column name to join on. Must exist in both tables with the same type.
+    // options - Optional join configuration: { join_type?: "inner" | "left" | "outer", name?: string }.
 })
 
 const PARQUET_WASM_URL = './parquet_wasm_bg.wasm'
