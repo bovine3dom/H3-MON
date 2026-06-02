@@ -7,6 +7,7 @@ import {ParquetWasmLoader} from '@loaders.gl/parquet'
 import {load} from '@loaders.gl/core'
 import maplibregl from 'maplibre-gl'
 import * as d3 from 'd3'
+import {cellToBoundary} from 'h3-js'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import * as observablehq from './vendor/observablehq' // from https://observablehq.com/@d3/color-legend
 import {getCitiesStartsWith} from 'tiny-geocoder'
@@ -14,6 +15,60 @@ import perspective from '@perspective-dev/client'
 import PERSPECTIVE_SERVER_WASM from "@perspective-dev/server/dist/wasm/perspective-server.wasm"
 import PERSPECTIVE_CLIENT_WASM from "@perspective-dev/client/dist/wasm/perspective-js.wasm"
 import {render_cartogram} from './cartogram'
+
+function computeH3Bounds(indices) {
+    let minLat = 90, maxLat = -90, minLng = 180, maxLng = -180
+    for (const idx of indices) {
+        try {
+            const boundary = cellToBoundary(idx, true)
+            console.log(boundary)
+            for (const [lat, lng] of boundary) {
+                if (lat < minLat) minLat = lat
+                if (lat > maxLat) maxLat = lat
+                if (lng < minLng) minLng = lng
+                if (lng > maxLng) maxLng = lng
+            }
+        } catch (e) {
+            console.warn('Invalid H3 index:', idx, e)
+        }
+    }
+    if (minLat === 90) return null
+    return [[minLat, minLng], [maxLat, maxLng]]
+}
+
+let highlightLayer = null
+let renderLayers = null
+
+function hex(hexes) {
+    console.log(hexes)
+    if (!hexes || hexes.length === 0) {
+        highlightLayer = null
+        renderLayers && renderLayers()
+        return
+    }
+    const indices = hexes.map(h => {
+        if (typeof h === 'bigint') return h.toString(16)
+        if (typeof h === 'number') return BigInt(h).toString(16)
+        return String(h)
+    })
+    highlightLayer = new H3HexagonLayer({
+        id: 'hex-highlight',
+        data: indices,
+        getHexagon: d => d,
+        getFillColor: [255, 0, 0, 255], // it'd be neat to colour by weight but it's a tiny bit tricky
+        getLineColor: [0, 0, 0, 255], // doesn't seem to do anything?
+        getLineWidth: 10,
+        stroked: true,
+        extruded: false,
+        pickable: false,
+    })
+    console.log(highlightLayer)
+    console.log(indices)
+    renderLayers && renderLayers()
+    const bounds = computeH3Bounds(indices)
+    console.log(bounds)
+    if (bounds) map.fitBounds(bounds, {padding: 200})
+}
 
 console.log(perspective)
 
@@ -42,9 +97,10 @@ perspective.worker().then(async (worker) => {
     render_cartogram('#cartogram', sanity_check, {
         data_col: 'wp',
         onclick_callback: (data, event, i) => {
-            console.log(
-                data.h3_s[i].split(", ").map(x => "0x" + BigInt(x).toString(16))
-            )
+            if (data.h3_s && data.h3_s[i]) {
+                const hexes = data.h3_s[i].split(", ").filter(x => x).map(x => BigInt(x))
+                hex(hexes)
+            }
         }
     })
     // next steps:
@@ -75,7 +131,7 @@ const FORMATS = {
 }
 
 //const STYLE = "http://localhost:1983/toner_ofm_moderatlist.json"
-const STYLE = "" //"https://compute.olie.science/fahrtle/toner_ofm_moderatlist.json"
+const STYLE = {version: 8, sources: {}, layers: [], glyphs: 'https://fonts.openmaptiles.org/{fontstack}/{range}.pbf'} // blank style for debugging on metered connection. swap with url for basemap
 
 const start_pos = {...{x: 0.45, y: 51.47, z: 4}, ...Object.fromEntries(new URLSearchParams(window.location.hash.slice(1)))}
 const map = new maplibregl.Map({
@@ -86,6 +142,8 @@ const map = new maplibregl.Map({
     bearing: 0,
     pitch: 0
 })
+
+window.m = map
 
 const toggleBtn = document.getElementById('toggle-pane')
 const mql = window.matchMedia('(orientation: portrait)')
@@ -449,14 +507,21 @@ function bootstrap(meta = {}){
         }
     })
 
+    let mainLayers = []
+
+    renderLayers = () => {
+        const layers = [...mainLayers]
+        if (highlightLayer) layers.push(highlightLayer)
+        if (settings.trains) {
+            layers.push(choochoo)
+        }
+        mapOverlay.setProps({layers})
+    }
+
     const update = () => {
-        getHexData().then(x=>{
-            const layers = []
-            layers.push(x)
-            if (settings.trains) {
-                layers.push(choochoo)
-            }
-            mapOverlay.setProps({layers})
+        getHexData().then(x => {
+            mainLayers = [x]
+            renderLayers()
         })
     }
 
