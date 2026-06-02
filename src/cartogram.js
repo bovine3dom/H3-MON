@@ -64,12 +64,13 @@ export function render_cartogram(container, data, options = {}) {
         .attr("width", "100%")
         .attr("height", "100%")
         .attr("viewBox", `0 0 ${width} ${height}`)
+        .attr("preserveAspectRatio", "xMidYMid slice")
 
     const g = svg.append("g")
 
     let movePending = false
     let latestTransform = null
-    svg.call(d3.zoom().scaleExtent([0.5, 8]).on("zoom", (e) => {
+    svg.call(d3.zoom().scaleExtent([0.5, 100]).on("zoom", (e) => {
         g.attr("transform", e.transform)
         if (onmove_callback) {
             latestTransform = e.transform
