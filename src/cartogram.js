@@ -25,7 +25,8 @@ export function render_cartogram(container, data, options = {}) {
         // data
         data_col = 'code',
         
-        get_color = (z) => d3.scaleSequential(d3.interpolateSpectral).domain([0,1])(z)
+        get_color = (z) => d3.scaleSequential(d3.interpolateSpectral).domain([0,1])(z),
+        onclick_callback = console.log,
     } = options
 
     const xCol = data.x
@@ -84,16 +85,17 @@ export function render_cartogram(container, data, options = {}) {
         .attr("stroke", draw_outline ? outline_color : "none")
         .attr("stroke-width", draw_outline ? outline_width : 0)
 
-    // Simple Interactivity
-    cells.on("mousedown", function(event, i) {
-        d3.select(this)
-            .attr("stroke", "orange")
-            .attr("stroke-width", 2)
+    // Simple interactivity
+    cells.on("mousedown", (event, i) => onclick_callback(data, event, i))
+    // cells.on("mousedown", function(event, i) {
+    //     d3.select(this)
+    //         .attr("stroke", "orange")
+    //         .attr("stroke-width", 2)
             
-        const labelText = labelCol ? labelCol[i] : null
-        // showTooltip(event, `${labelText || 'Unknown'} (Code: ${codeCol[i]})`)
-        console.log(event, labelText, codeCol[i])
-    }) // todo: replace when clicking elsewhere
+    //     const labelText = labelCol ? labelCol[i] : null
+    //     // showTooltip(event, `${labelText || 'Unknown'} (Code: ${codeCol[i]})`)
+    //     console.log(event, labelText, codeCol[i])
+    // }) // todo: replace when clicking elsewhere
     // .on("mouseout", function() {
     //     d3.select(this)
     //         .attr("stroke", draw_outline ? outline_color : "none")

@@ -30,8 +30,8 @@ perspective.worker().then(async (worker) => {
     const sanity_check = (await (await table.view({
         // ideally ~150k pop per cell
         expressions: {'wp': '"weight" * "population" / (150000 * 2)', 'h3_s': 'string("h3")', '_code': '"code"/1000'}, // h3 gets truncated in to_columns otherwise. but need to hex it
-        columns: ['x', 'y', 'wp', '_code', 'label'],
-        aggregates: {'wp': 'sum', '_code': 'dominant', 'label': 'dominant', 'x': 'first', 'y': 'first'}, // something very weird going on here, x/y are not unique, lots of stuff gets shoved in 354/114. string join works but stringifies nulls
+        columns: ['x', 'y', 'wp', '_code', 'label', 'h3_s'],
+        aggregates: {'wp': 'sum', '_code': 'dominant', 'label': 'dominant', 'x': 'first', 'y': 'first', 'h3_s': 'join'}, // something very weird going on here, x/y are not unique, lots of stuff gets shoved in 354/114. string join works but stringifies nulls
         // isn't it extremely weird that group_by columns also need to be in the aggregate? but all their examples have it
         group_by: ['x', 'y'],
         group_rollup_mode: 'flat', // dunno what this does honestly. but it fixes the duplicate labels!! yey!
@@ -39,7 +39,14 @@ perspective.worker().then(async (worker) => {
     })).to_columns())
     console.log(sanity_check) // nice. populations are around ~150k. this is working. 🚀
     sanity_check.code = sanity_check._code
-    render_cartogram('#cartogram', sanity_check, {data_col: 'wp'})
+    render_cartogram('#cartogram', sanity_check, {
+        data_col: 'wp',
+        onclick_callback: (data, event, i) => {
+            console.log(
+                data.h3_s[i].split(", ").map(x => "0x" + BigInt(x).toString(16))
+            )
+        }
+    })
     // next steps:
     // 0) debug why on earth labels are showing up in multiple places even though they are unique in mapping.arrow. ditto for country borders?
     // 1) draw the cartogram in a new pane with borders
@@ -68,7 +75,7 @@ const FORMATS = {
 }
 
 //const STYLE = "http://localhost:1983/toner_ofm_moderatlist.json"
-const STYLE = "https://compute.olie.science/fahrtle/toner_ofm_moderatlist.json"
+const STYLE = "" //"https://compute.olie.science/fahrtle/toner_ofm_moderatlist.json"
 
 const start_pos = {...{x: 0.45, y: 51.47, z: 4}, ...Object.fromEntries(new URLSearchParams(window.location.hash.slice(1)))}
 const map = new maplibregl.Map({
