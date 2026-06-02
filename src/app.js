@@ -21,7 +21,6 @@ function computeH3Bounds(indices) {
     for (const idx of indices) {
         try {
             const boundary = cellToBoundary(idx, true)
-            console.log(boundary)
             for (const [lat, lng] of boundary) {
                 if (lat < minLat) minLat = lat
                 if (lat > maxLat) maxLat = lat
@@ -39,8 +38,8 @@ function computeH3Bounds(indices) {
 let highlightLayer = null
 let renderLayers = null
 
-function hex(hexes) {
-    console.log(hexes)
+function hex(hexes, options = {}) {
+    const {only_fit = false, padding = 200} = options
     if (!hexes || hexes.length === 0) {
         highlightLayer = null
         renderLayers && renderLayers()
@@ -51,23 +50,22 @@ function hex(hexes) {
         if (typeof h === 'number') return BigInt(h).toString(16)
         return String(h)
     })
-    highlightLayer = new H3HexagonLayer({
-        id: 'hex-highlight',
-        data: indices,
-        getHexagon: d => d,
-        getFillColor: [255, 0, 0, 255], // it'd be neat to colour by weight but it's a tiny bit tricky
-        getLineColor: [0, 0, 0, 255], // doesn't seem to do anything?
-        getLineWidth: 10,
-        stroked: true,
-        extruded: false,
-        pickable: false,
-    })
-    console.log(highlightLayer)
-    console.log(indices)
-    renderLayers && renderLayers()
+    if (!only_fit) {
+        highlightLayer = new H3HexagonLayer({
+            id: 'hex-highlight',
+            data: indices,
+            getHexagon: d => d,
+            getFillColor: [255, 0, 0, 255], // it'd be neat to colour by weight but it's a tiny bit tricky
+            getLineColor: [0, 0, 0, 255], // doesn't seem to do anything?
+            getLineWidth: 10,
+            stroked: true,
+            extruded: false,
+            pickable: false,
+        })
+        renderLayers && renderLayers()
+    }
     const bounds = computeH3Bounds(indices)
-    console.log(bounds)
-    if (bounds) map.fitBounds(bounds, {padding: 200})
+    if (bounds) map.fitBounds(bounds, {padding})
 }
 
 console.log(perspective)
@@ -101,16 +99,47 @@ perspective.worker().then(async (worker) => {
                 const hexes = data.h3_s[i].split(", ").filter(x => x).map(x => BigInt(x))
                 hex(hexes)
             }
-        }
+        },
+        onmove_callback: ((() => {
+            const throttle_ms = 200
+            let lastCall = 0
+            let trailingTimer
+            let lastArgs
+            function fire(data, visibleIndices) {
+                if (data.h3_s) {
+                    const allHexes = visibleIndices.flatMap(i =>
+                        data.h3_s[i] ? data.h3_s[i].split(", ").filter(x => x).map(x => BigInt(x)) : []
+                    )
+                    hex(allHexes, {only_fit: true, padding: 0})
+                }
+            }
+            return (data, visibleIndices) => {
+                lastArgs = [data, visibleIndices]
+                const now = Date.now()
+                const elapsed = now - lastCall
+                if (elapsed >= throttle_ms) {
+                    lastCall = now
+                    clearTimeout(trailingTimer)
+                    trailingTimer = null
+                    fire(...lastArgs)
+                } else if (!trailingTimer) {
+                    trailingTimer = setTimeout(() => {
+                        trailingTimer = null
+                        lastCall = Date.now()
+                        fire(...lastArgs)
+                    }, throttle_ms - elapsed)
+                }
+            }
+        }))()
     })
     // next steps:
     // 0) debug why on earth labels are showing up in multiple places even though they are unique in mapping.arrow. ditto for country borders?
     // 1) draw the cartogram in a new pane with borders
-    // done ^
-    // 2) aggregate actual data into the cartogram
     // 3) link cartogram <-> map 
     // (e.g. click on cartogram -> draw h3 that contribute to that cell * weight; 
     // zoom/move cartogram -> zoom/move map based on bbox of cartogram ... might be worth pre-computing lat/lon?)
+    // done ^
+    // 2) aggregate actual data into the cartogram
 
     // probably easiest to demand strings in the input? but if we need to, "0x" + BigInt(h3s).toString(16) would work
     // ... if perpsective doesn't support joins we are kind of buggered right?

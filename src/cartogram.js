@@ -27,6 +27,7 @@ export function render_cartogram(container, data, options = {}) {
         
         get_color = (z) => d3.scaleSequential(d3.interpolateSpectral).domain([0,1])(z),
         onclick_callback = console.log,
+        onmove_callback = () => {},
     } = options
 
     const xCol = data.x
@@ -65,7 +66,35 @@ export function render_cartogram(container, data, options = {}) {
         .attr("viewBox", `0 0 ${width} ${height}`)
 
     const g = svg.append("g")
-    svg.call(d3.zoom().scaleExtent([0.5, 8]).on("zoom", (e) => g.attr("transform", e.transform)))
+
+    let movePending = false
+    let latestTransform = null
+    svg.call(d3.zoom().scaleExtent([0.5, 8]).on("zoom", (e) => {
+        g.attr("transform", e.transform)
+        if (onmove_callback) {
+            latestTransform = e.transform
+            if (!movePending) {
+                movePending = true
+                requestAnimationFrame(() => {
+                    movePending = false
+                    const t = latestTransform
+                    const visible = []
+                    for (let i = 0; i < numRows; i++) {
+                        const cx = getX(xCol[i])
+                        const cy = getY(yCol[i])
+                        const halfExtent = square_size * t.k / 2
+                        const sx = cx * t.k + t.x
+                        const sy = cy * t.k + t.y
+                        if (sx + halfExtent >= 0 && sx - halfExtent <= width &&
+                            sy + halfExtent >= 0 && sy - halfExtent <= height) {
+                            visible.push(i)
+                        }
+                    }
+                    onmove_callback(data, visible)
+                })
+            }
+        }
+    }))
 
     const cellMap = new Map()
     for (let i = 0; i < numRows; i++) {
@@ -86,7 +115,7 @@ export function render_cartogram(container, data, options = {}) {
         .attr("stroke-width", draw_outline ? outline_width : 0)
 
     // Simple interactivity
-    cells.on("mousedown", (event, i) => onclick_callback(data, event, i))
+    cells.on("click", (event, i) => onclick_callback(data, event, i))
     // cells.on("mousedown", function(event, i) {
     //     d3.select(this)
     //         .attr("stroke", "orange")
