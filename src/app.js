@@ -101,7 +101,7 @@ perspective.worker().then(async (worker) => {
             }
         },
         onmove_callback: ((() => {
-            const throttle_ms = 200
+            const throttle_ms = 1_000
             let lastCall = 0
             let trailingTimer
             let lastArgs
@@ -139,7 +139,8 @@ perspective.worker().then(async (worker) => {
     // (e.g. click on cartogram -> draw h3 that contribute to that cell * weight; 
     // zoom/move cartogram -> zoom/move map based on bbox of cartogram ... might be worth pre-computing lat/lon?)
     // done ^
-    // 2) aggregate actual data into the cartogram
+    // 2) aggregate actual data into the cartogram. your current spec is index: string, which is incompatible with the cartogram spec of h3: uint64. so fix that first. then join and profit
+    // worth doing a smell test on index[0] to see if it is resolution 5. for now, reject all other resolutions and don't show the cartogram. (which implies also: don't load perspective)
 
     // probably easiest to demand strings in the input? but if we need to, "0x" + BigInt(h3s).toString(16) would work
     // ... if perpsective doesn't support joins we are kind of buggered right?
