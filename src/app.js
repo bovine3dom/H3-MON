@@ -137,6 +137,7 @@ perspective.worker().then(async (worker) => {
     console.log(sanity_check) // nice. populations are around ~150k. this is working. 🚀
     sanity_check.code = sanity_check._code
     cartogramApi = render_cartogram('#cartogram', sanity_check, {
+        draw_outline: false,
         data_col: 'value_mean',
         onclick_callback: (data, event, i) => {
             if (data.index && data.index[i]) {
@@ -183,10 +184,8 @@ perspective.worker().then(async (worker) => {
     // 3) link cartogram <-> map 
     // (e.g. click on cartogram -> draw h3 that contribute to that cell * weight; 
     // zoom/move cartogram -> zoom/move map based on bbox of cartogram ... might be worth pre-computing lat/lon?)
-    // done ^
     // 2) aggregate actual data into the cartogram. your current spec is index: string, which is incompatible with the cartogram spec of h3: uint64. so fix that first. then join and profit
     // worth doing a smell test on index[0] to see if it is resolution 5. for now, reject all other resolutions and don't show the cartogram. (which implies also: don't load perspective)
-
     // probably easiest to demand strings in the input? but if we need to, "0x" + BigInt(h3s).toString(16) would work
     // ... if perpsective doesn't support joins we are kind of buggered right?
     // worker.join() exists https://perspective-dev.github.io/browser/classes/dist_wasm_perspective-js.d.ts.Client.html#join
@@ -194,6 +193,14 @@ perspective.worker().then(async (worker) => {
     // right - The right source table (a [Table] instance or a table name string).
     // on - The column name to join on. Must exist in both tables with the same type.
     // options - Optional join configuration: { join_type?: "inner" | "left" | "outer", name?: string }.
+    // done ^
+    //
+    // 4) reduce duplication of effort: reuse quantiles, data. _probably_ best to use perspective's .to_arrow()?
+    // 5) investigate aggregation of non-h3 5 data. sum/mean/median? exercise for reader
+    // 6) change opacity of cells with bad 'wp' (london etc seems totally wrong useless)
+    // 7) try to work out why legend has flipped between the two
+    // 8) add tooltip to cartogram cells
+    // 9) make sure legend really applies to both cartogram and map. try with different data
 })
 
 const PARQUET_WASM_URL = './parquet_wasm_bg.wasm'
