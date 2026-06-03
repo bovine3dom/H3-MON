@@ -7,7 +7,7 @@ import {ParquetWasmLoader} from '@loaders.gl/parquet'
 import {load} from '@loaders.gl/core'
 import maplibregl from 'maplibre-gl'
 import * as d3 from 'd3'
-import {cellToBoundary} from 'h3-js'
+import {cellToBoundary, cellToLatLng, latLngToCell} from 'h3-js'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import * as observablehq from './vendor/observablehq' // from https://observablehq.com/@d3/color-legend
 import {getCitiesStartsWith} from 'tiny-geocoder'
@@ -37,6 +37,9 @@ function computeH3Bounds(indices) {
 
 let highlightLayer = null
 let renderLayers = null
+let hex_flying = false
+let h3toXY = null
+let cartogramApi = null
 
 function hex(hexes, options = {}) {
     const {only_fit = false, padding = 200} = options
@@ -65,7 +68,24 @@ function hex(hexes, options = {}) {
         renderLayers && renderLayers()
     }
     const bounds = computeH3Bounds(hexes)
-    if (bounds) map.fitBounds(bounds, {padding})
+    if (bounds) {
+        hex_flying = true
+        map.fitBounds(bounds, {padding})
+        map.once('moveend', () => { hex_flying = false })
+    }
+}
+
+function findClosestHex(targetLat, targetLng) {
+    let best = null
+    let bestDist = Infinity
+    for (const pt of h3toXY.values()) {
+        const d = (pt.lat - targetLat) ** 2 + (pt.lng - targetLng) ** 2
+        if (d < bestDist) {
+            bestDist = d
+            best = pt
+        }
+    }
+    return best
 }
 
 console.log(perspective)
@@ -78,6 +98,27 @@ perspective.worker().then(async (worker) => {
     const table = await worker.table(await arrow_resp.arrayBuffer())
     window.table = table
     console.log(table)
+    ;(async () => {
+        const rawView = await table.view({columns: ['index', 'x', 'y']})
+        const rawCols = await rawView.to_columns()
+        h3toXY = new Map()
+        for (let i = 0; i < rawCols.index.length; i++) {
+            const hex = rawCols.index[i]
+            const x = rawCols.x[i]
+            const y = rawCols.y[i]
+            const existing = h3toXY.get(hex)
+            if (existing) {
+                if (x < existing.xMin) existing.xMin = x
+                if (x > existing.xMax) existing.xMax = x
+                if (y < existing.yMin) existing.yMin = y
+                if (y > existing.yMax) existing.yMax = y
+            } else {
+                const [lat, lng] = cellToLatLng(hex)
+                h3toXY.set(hex, {xMin: x, xMax: x, yMin: y, yMax: y, lat, lng})
+            }
+        }
+        rawView.delete()
+    })()
     // looks like aggregates can only operate on single columns so we need to do this in two steps
     // => weighted quantiles impossible? :(
     const sanity_check = (await (await table.view({
@@ -92,13 +133,14 @@ perspective.worker().then(async (worker) => {
     })).to_columns())
     console.log(sanity_check) // nice. populations are around ~150k. this is working. 🚀
     sanity_check.code = sanity_check._code
-    render_cartogram('#cartogram', sanity_check, {
+    cartogramApi = render_cartogram('#cartogram', sanity_check, {
         data_col: 'wp',
         onclick_callback: (data, event, i) => {
             if (data.index && data.index[i]) {
                 const hexes = data.index[i].split(", ").filter(x => x)
                 hex(hexes)
             }
+            console.log(data.x[i], data.y[i])
         },
         onmove_callback: ((() => {
             const throttle_ms = 1_000
@@ -622,6 +664,31 @@ function bootstrap(meta = {}){
         const pos = map.getCenter()
         const z = map.getZoom()
         history.replaceState(null, '', `#x=${pos.lng.toFixed(4)}&y=${pos.lat.toFixed(4)}&z=${z.toFixed(4)}`)
+        if (hex_flying) return
+        const h3map = h3toXY
+        const api = cartogramApi
+        if (!h3map || !api) return
+        const bounds = map.getBounds()
+        if (!bounds) return
+        const corners = [
+            bounds.getNorthWest(),
+            bounds.getNorthEast(),
+            bounds.getSouthWest(),
+            bounds.getSouthEast(),
+        ]
+        let xMin = Infinity, yMin = Infinity, xMax = -Infinity, yMax = -Infinity
+        for (const c of corners) {
+            const h = latLngToCell(c.lat, c.lng, 5)
+            let pt = h3map.get(h)
+            if (!pt) pt = findClosestHex(c.lat, c.lng)
+            if (!pt) continue
+            if (pt.xMin < xMin) xMin = pt.xMin
+            if (pt.yMin < yMin) yMin = pt.yMin
+            if (pt.xMax > xMax) xMax = pt.xMax
+            if (pt.yMax > yMax) yMax = pt.yMax
+        }
+        if (xMin === Infinity) return
+        api.fitToBounds([[xMin, yMin, xMax, yMax]])
     })
 
     function ecdf(array, trimFactor=0.01, weights=null) {

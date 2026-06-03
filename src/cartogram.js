@@ -70,8 +70,10 @@ export function render_cartogram(container, data, options = {}) {
 
     let movePending = false
     let latestTransform = null
-    svg.call(d3.zoom().scaleExtent([0.5, 100]).on("zoom", (e) => {
+    let fitToBoundsActive = false
+    const zoom = d3.zoom().scaleExtent([0.5, 100]).on("zoom", (e) => {
         g.attr("transform", e.transform)
+        if (fitToBoundsActive) return
         if (onmove_callback) {
             latestTransform = e.transform
             if (!movePending) {
@@ -95,7 +97,8 @@ export function render_cartogram(container, data, options = {}) {
                 })
             }
         }
-    }))
+    })
+    svg.call(zoom)
 
     const cellMap = new Map()
     for (let i = 0; i < numRows; i++) {
@@ -191,5 +194,25 @@ export function render_cartogram(container, data, options = {}) {
             .attr("fill", text_color)
             .text(i => labelCol[i])
             .style("pointer-events", "none")
+    }
+
+    return {
+        fitToBounds: ([[x1, y1, x2, y2]], duration = 500) => {
+            const left = getX(x1)
+            const right = getX(x2)
+            const top = getY(y1)
+            const bottom = getY(y2)
+            const boxW = right - left
+            const boxH = bottom - top
+            if (boxW <= 0 || boxH <= 0) return
+            const pad = 20
+            const k = Math.min((width - 2 * pad) / boxW, (height - 2 * pad) / boxH)
+            const cx = (left + right) / 2
+            const cy = (top + bottom) / 2
+            fitToBoundsActive = true
+            svg.transition().duration(duration)
+                .call(zoom.transform, d3.zoomIdentity.translate(width / 2 - cx * k, height / 2 - cy * k).scale(k))
+                .on("end", () => { fitToBoundsActive = false })
+        }
     }
 }
