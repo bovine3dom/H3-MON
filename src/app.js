@@ -45,15 +45,15 @@ function hex(hexes, options = {}) {
         renderLayers && renderLayers()
         return
     }
-    const indices = hexes.map(h => {
-        if (typeof h === 'bigint') return h.toString(16)
-        if (typeof h === 'number') return BigInt(h).toString(16)
-        return String(h)
-    })
+    // const indices = hexes.map(h => {
+    //     if (typeof h === 'bigint') return h.toString(16)
+    //     if (typeof h === 'number') return BigInt(h).toString(16)
+    //     return String(h)
+    // })
     if (!only_fit) {
         highlightLayer = new H3HexagonLayer({
             id: 'hex-highlight',
-            data: indices,
+            data: hexes,
             getHexagon: d => d,
             getFillColor: [255, 0, 0, 255], // it'd be neat to colour by weight but it's a tiny bit tricky
             getLineColor: [0, 0, 0, 255], // doesn't seem to do anything?
@@ -64,7 +64,7 @@ function hex(hexes, options = {}) {
         })
         renderLayers && renderLayers()
     }
-    const bounds = computeH3Bounds(indices)
+    const bounds = computeH3Bounds(hexes)
     if (bounds) map.fitBounds(bounds, {padding})
 }
 
@@ -74,7 +74,7 @@ perspective.init_server(fetch(PERSPECTIVE_SERVER_WASM))
 perspective.init_client(fetch(PERSPECTIVE_CLIENT_WASM))
 
 perspective.worker().then(async (worker) => {
-    const arrow_resp = await fetch('data/mapping.arrow')
+    const arrow_resp = await fetch('data/mapping_string.arrow')
     const table = await worker.table(await arrow_resp.arrayBuffer())
     window.table = table
     console.log(table)
@@ -82,9 +82,9 @@ perspective.worker().then(async (worker) => {
     // => weighted quantiles impossible? :(
     const sanity_check = (await (await table.view({
         // ideally ~150k pop per cell
-        expressions: {'wp': '"weight" * "population" / (150000 * 2)', 'h3_s': 'string("h3")', '_code': '"code"/1000'}, // h3 gets truncated in to_columns otherwise. but need to hex it
-        columns: ['x', 'y', 'wp', '_code', 'label', 'h3_s'],
-        aggregates: {'wp': 'sum', '_code': 'dominant', 'label': 'dominant', 'x': 'first', 'y': 'first', 'h3_s': 'join'}, // something very weird going on here, x/y are not unique, lots of stuff gets shoved in 354/114. string join works but stringifies nulls
+        expressions: {'wp': '"weight" * "population" / (150000 * 2)', '_code': '"code"/1000'}, // h3 gets truncated in to_columns otherwise. but need to hex it
+        columns: ['x', 'y', 'wp', '_code', 'label', 'index'],
+        aggregates: {'wp': 'sum', '_code': 'dominant', 'label': 'dominant', 'x': 'first', 'y': 'first', 'index': 'join'}, // something very weird going on here, x/y are not unique, lots of stuff gets shoved in 354/114. string join works but stringifies nulls
         // isn't it extremely weird that group_by columns also need to be in the aggregate? but all their examples have it
         group_by: ['x', 'y'],
         group_rollup_mode: 'flat', // dunno what this does honestly. but it fixes the duplicate labels!! yey!
@@ -95,8 +95,8 @@ perspective.worker().then(async (worker) => {
     render_cartogram('#cartogram', sanity_check, {
         data_col: 'wp',
         onclick_callback: (data, event, i) => {
-            if (data.h3_s && data.h3_s[i]) {
-                const hexes = data.h3_s[i].split(", ").filter(x => x).map(x => BigInt(x))
+            if (data.index && data.index[i]) {
+                const hexes = data.index[i].split(", ").filter(x => x)
                 hex(hexes)
             }
         },
@@ -106,9 +106,9 @@ perspective.worker().then(async (worker) => {
             let trailingTimer
             let lastArgs
             function fire(data, visibleIndices) {
-                if (data.h3_s) {
+                if (data.index) {
                     const allHexes = visibleIndices.flatMap(i =>
-                        data.h3_s[i] ? data.h3_s[i].split(", ").filter(x => x).map(x => BigInt(x)) : []
+                        data.index[i] ? data.index[i].split(", ").filter(x => x) : []
                     )
                     hex(allHexes, {only_fit: true, padding: 0})
                 }
