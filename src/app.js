@@ -95,7 +95,10 @@ perspective.init_client(fetch(PERSPECTIVE_CLIENT_WASM))
 
 perspective.worker().then(async (worker) => {
     const arrow_resp = await fetch('data/mapping_string.arrow')
-    const table = await worker.table(await arrow_resp.arrayBuffer())
+    const arrow_data_resp = await fetch('data/out_string_quantile.arrow') // todo: stop dumb duplication of effort. particularly, reuse the quantiles
+    const cartogram_table = await worker.table(await arrow_resp.arrayBuffer())
+    const data_table = await worker.table(await arrow_data_resp.arrayBuffer())
+    const table = await worker.join(cartogram_table, data_table, 'index')
     window.table = table
     console.log(table)
     ;(async () => {
@@ -123,9 +126,9 @@ perspective.worker().then(async (worker) => {
     // => weighted quantiles impossible? :(
     const sanity_check = (await (await table.view({
         // ideally ~150k pop per cell
-        expressions: {'wp': '"weight" * "population" / (150000 * 2)', '_code': '"code"/1000'}, // h3 gets truncated in to_columns otherwise. but need to hex it
-        columns: ['x', 'y', 'wp', '_code', 'label', 'index'],
-        aggregates: {'wp': 'sum', '_code': 'dominant', 'label': 'dominant', 'x': 'first', 'y': 'first', 'index': 'join'}, // something very weird going on here, x/y are not unique, lots of stuff gets shoved in 354/114. string join works but stringifies nulls
+        expressions: {'value_mean': '"weight" * "value"', 'wp': '"weight" * "population" / (150000 * 2)', '_code': '"code"/1000'}, // h3 gets truncated in to_columns otherwise. but need to hex it
+        columns: ['x', 'y', 'wp', '_code', 'label', 'index', 'value_mean'],
+        aggregates: {'value_mean': 'mean', 'wp': 'sum', '_code': 'dominant', 'label': 'dominant', 'x': 'first', 'y': 'first', 'index': 'join'}, // something very weird going on here, x/y are not unique, lots of stuff gets shoved in 354/114. string join works but stringifies nulls
         // isn't it extremely weird that group_by columns also need to be in the aggregate? but all their examples have it
         group_by: ['x', 'y'],
         group_rollup_mode: 'flat', // dunno what this does honestly. but it fixes the duplicate labels!! yey!
@@ -134,7 +137,7 @@ perspective.worker().then(async (worker) => {
     console.log(sanity_check) // nice. populations are around ~150k. this is working. 🚀
     sanity_check.code = sanity_check._code
     cartogramApi = render_cartogram('#cartogram', sanity_check, {
-        data_col: 'wp',
+        data_col: 'value_mean',
         onclick_callback: (data, event, i) => {
             if (data.index && data.index[i]) {
                 const hexes = data.index[i].split(", ").filter(x => x)
@@ -251,7 +254,7 @@ window.addEventListener("hashchange", () => {
 })
 
 const params = new URLSearchParams(window.location.search)
-const dataParam = params.get('data') || 'h3_data'
+const dataParam = params.get('data') || 'out_string_quantile.arrow'
 const dotIdx = dataParam.lastIndexOf('.')
 const ext = dotIdx >= 0 ? dataParam.slice(dotIdx + 1).toLowerCase() : 'csv'
 const format = FORMATS[ext] || FORMATS.csv
