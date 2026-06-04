@@ -21,7 +21,7 @@ export function render_cartogram(container, data, options = {}) {
         font_size = 8,
         font_face = "Iosevka", // todo: remember how fallbacks work for this
         text_color = "black",
-
+        
         // data
         data_col = 'code',
         
@@ -30,11 +30,14 @@ export function render_cartogram(container, data, options = {}) {
         onmove_callback = () => {},
     } = options
 
-    const xCol = data.x
-    const yCol = data.y
-    const codeCol = data.code
-    const dataCol = data[data_col]
-    const labelCol = data.label
+    let currentData = data
+    let currentDataCol = data_col
+
+    const xCol = currentData.x
+    const yCol = currentData.y
+    const codeCol = currentData.code
+    const dataCol = currentData[currentDataCol]
+    const labelCol = currentData.label
 
     if (!xCol || !yCol || !codeCol) {
         console.error("Missing required columns: x, y, or code.")
@@ -93,7 +96,7 @@ export function render_cartogram(container, data, options = {}) {
                             visible.push(i)
                         }
                     }
-                    onmove_callback(data, visible)
+                    onmove_callback(currentData, visible)
                 })
             }
         }
@@ -114,12 +117,12 @@ export function render_cartogram(container, data, options = {}) {
         .attr("y", i => getY(yCol[i]) - square_size / 2)
         .attr("width", square_size)
         .attr("height", square_size)
-        .attr("fill", i => get_color(dataCol[i]))
+        .attr("fill", i => get_color(currentData[currentDataCol][i]))
         .attr("stroke", draw_outline ? outline_color : "none")
         .attr("stroke-width", draw_outline ? outline_width : 0)
 
     // Simple interactivity
-    cells.on("click", (event, i) => onclick_callback(data, event, i))
+    cells.on("click", (event, i) => onclick_callback(currentData, event, i))
     // cells.on("mousedown", function(event, i) {
     //     d3.select(this)
     //         .attr("stroke", "orange")
@@ -197,6 +200,16 @@ export function render_cartogram(container, data, options = {}) {
     }
 
     return {
+        updateData: (newData, newDataCol) => {
+            currentData = newData
+            if (newDataCol !== undefined) currentDataCol = newDataCol
+            const col = currentData[currentDataCol]
+            if (!col) {
+                console.warn(`Column "${currentDataCol}" not found in updateData`)
+                return
+            }
+            cells.attr("fill", i => get_color(col[i]))
+        },
         fitToBounds: ([[x1, y1, x2, y2]], duration = 500) => {
             const left = getX(x1)
             const right = getX(x2)

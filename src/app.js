@@ -7,7 +7,7 @@ import {ParquetWasmLoader} from '@loaders.gl/parquet'
 import {load} from '@loaders.gl/core'
 import maplibregl from 'maplibre-gl'
 import * as d3 from 'd3'
-import {cellToBoundary, cellToLatLng, latLngToCell} from 'h3-js'
+import {cellToBoundary, cellToLatLng, latLngToCell, getResolution} from 'h3-js'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import * as observablehq from './vendor/observablehq' // from https://observablehq.com/@d3/color-legend
 import {getCitiesStartsWith} from 'tiny-geocoder'
@@ -88,106 +88,46 @@ function findClosestHex(targetLat, targetLng) {
     return best
 }
 
-console.log(perspective)
-
 perspective.init_server(fetch(PERSPECTIVE_SERVER_WASM))
 perspective.init_client(fetch(PERSPECTIVE_CLIENT_WASM))
 
-perspective.worker().then(async (worker) => {
+const ps = perspective.worker()
+
+const cartogramInit = (async () => {
+    const worker = await ps
     const arrow_resp = await fetch('data/mapping_string.arrow')
-    const arrow_data_resp = await fetch('data/out_string_quantile.arrow') // todo: stop dumb duplication of effort. particularly, reuse the quantiles
     const cartogram_table = await worker.table(await arrow_resp.arrayBuffer())
-    const data_table = await worker.table(await arrow_data_resp.arrayBuffer())
-    const table = await worker.join(cartogram_table, data_table, 'index')
-    window.table = table
-    console.log(table)
-    ;(async () => {
-        const rawView = await table.view({columns: ['index', 'x', 'y']})
-        const rawCols = await rawView.to_columns()
-        h3toXY = new Map()
-        for (let i = 0; i < rawCols.index.length; i++) {
-            const hex = rawCols.index[i]
-            const x = rawCols.x[i]
-            const y = rawCols.y[i]
-            const existing = h3toXY.get(hex)
-            if (existing) {
-                if (x < existing.xMin) existing.xMin = x
-                if (x > existing.xMax) existing.xMax = x
-                if (y < existing.yMin) existing.yMin = y
-                if (y > existing.yMax) existing.yMax = y
-            } else {
-                const [lat, lng] = cellToLatLng(hex)
-                h3toXY.set(hex, {xMin: x, xMax: x, yMin: y, yMax: y, lat, lng})
-            }
+
+    const rawView = await cartogram_table.view({columns: ['index', 'x', 'y']})
+    const rawCols = await rawView.to_columns()
+    rawView.delete()
+    h3toXY = new Map()
+    for (let i = 0; i < rawCols.index.length; i++) {
+        const hex = rawCols.index[i]
+        const x = rawCols.x[i]
+        const y = rawCols.y[i]
+        const existing = h3toXY.get(hex)
+        if (existing) {
+            if (x < existing.xMin) existing.xMin = x
+            if (x > existing.xMax) existing.xMax = x
+            if (y < existing.yMin) existing.yMin = y
+            if (y > existing.yMax) existing.yMax = y
+        } else {
+            const [lat, lng] = cellToLatLng(hex)
+            h3toXY.set(hex, {xMin: x, xMax: x, yMin: y, yMax: y, lat, lng})
         }
-        rawView.delete()
-    })()
-    // looks like aggregates can only operate on single columns so we need to do this in two steps
-    // => weighted quantiles impossible? :(
-    const sanity_check = (await (await table.view({
-        // ideally ~150k pop per cell
-        expressions: {'value_mean': '"weight" * "value"', 'wp': '"weight" * "population" / (150000 * 2)', '_code': '"code"/1000'}, // h3 gets truncated in to_columns otherwise. but need to hex it
-        columns: ['x', 'y', 'wp', '_code', 'label', 'index', 'value_mean'],
-        aggregates: {'value_mean': 'mean', 'wp': 'sum', '_code': 'dominant', 'label': 'dominant', 'x': 'first', 'y': 'first', 'index': 'join'}, // something very weird going on here, x/y are not unique, lots of stuff gets shoved in 354/114. string join works but stringifies nulls
-        // isn't it extremely weird that group_by columns also need to be in the aggregate? but all their examples have it
-        group_by: ['x', 'y'],
-        group_rollup_mode: 'flat', // dunno what this does honestly. but it fixes the duplicate labels!! yey!
-        //sort: [['wp', 'desc']], // this doesn't seem to do anything
-    })).to_columns())
-    console.log(sanity_check) // nice. populations are around ~150k. this is working. 🚀
-    sanity_check.code = sanity_check._code
-    cartogramApi = render_cartogram('#cartogram', sanity_check, {
-        draw_outline: false,
-        data_col: 'value_mean',
-        onclick_callback: (data, event, i) => {
-            if (data.index && data.index[i]) {
-                const hexes = data.index[i].split(", ").filter(x => x)
-                hex(hexes)
-            }
-            console.log(data.x[i], data.y[i])
-        },
-        onmove_callback: ((() => {
-            const throttle_ms = 1_000
-            let lastCall = 0
-            let trailingTimer
-            let lastArgs
-            function fire(data, visibleIndices) {
-                if (data.index) {
-                    const allHexes = visibleIndices.flatMap(i =>
-                        data.index[i] ? data.index[i].split(", ").filter(x => x) : []
-                    )
-                    hex(allHexes, {only_fit: true, padding: 0})
-                }
-            }
-            return (data, visibleIndices) => {
-                lastArgs = [data, visibleIndices]
-                const now = Date.now()
-                const elapsed = now - lastCall
-                if (elapsed >= throttle_ms) {
-                    lastCall = now
-                    clearTimeout(trailingTimer)
-                    trailingTimer = null
-                    fire(...lastArgs)
-                } else if (!trailingTimer) {
-                    trailingTimer = setTimeout(() => {
-                        trailingTimer = null
-                        lastCall = Date.now()
-                        fire(...lastArgs)
-                    }, throttle_ms - elapsed)
-                }
-            }
-        }))()
-    })
+    }
+
+    return {worker, cartogram_table}
     // next steps:
     // 0) debug why on earth labels are showing up in multiple places even though they are unique in mapping.arrow. ditto for country borders?
     // 1) draw the cartogram in a new pane with borders
-    // 3) link cartogram <-> map 
-    // (e.g. click on cartogram -> draw h3 that contribute to that cell * weight; 
+    // 3) link cartogram <-> map
+    // (e.g. click on cartogram -> draw h3 that contribute to that cell * weight;
     // zoom/move cartogram -> zoom/move map based on bbox of cartogram ... might be worth pre-computing lat/lon?)
     // 2) aggregate actual data into the cartogram. your current spec is index: string, which is incompatible with the cartogram spec of h3: uint64. so fix that first. then join and profit
     // worth doing a smell test on index[0] to see if it is resolution 5. for now, reject all other resolutions and don't show the cartogram. (which implies also: don't load perspective)
-    // probably easiest to demand strings in the input? but if we need to, "0x" + BigInt(h3s).toString(16) would work
-    // ... if perpsective doesn't support joins we are kind of buggered right?
+    // probably easiest to demand strings in the input? but if we need to, "0x" + BigInt(h3s).toString(16) would work ... if perpsective doesn't support joins we are kind of buggered right?
     // worker.join() exists https://perspective-dev.github.io/browser/classes/dist_wasm_perspective-js.d.ts.Client.html#join
     // left - The left source table (a [Table] instance or a table name string).
     // right - The right source table (a [Table] instance or a table name string).
@@ -201,7 +141,7 @@ perspective.worker().then(async (worker) => {
     // 7) try to work out why legend has flipped between the two
     // 8) add tooltip to cartogram cells
     // 9) make sure legend really applies to both cartogram and map. try with different data
-})
+})()
 
 const PARQUET_WASM_URL = './parquet_wasm_bg.wasm'
 
@@ -262,6 +202,7 @@ window.addEventListener("hashchange", () => {
 
 const params = new URLSearchParams(window.location.search)
 const dataParam = params.get('data') || 'out_string_quantile.arrow'
+// const dataParam = params.get('data') || 'h3_data'
 const dotIdx = dataParam.lastIndexOf('.')
 const ext = dotIdx >= 0 ? dataParam.slice(dotIdx + 1).toLowerCase() : 'csv'
 const format = FORMATS[ext] || FORMATS.csv
@@ -330,6 +271,116 @@ function bootstrap(meta = {}){
 
         const doQuantiles = settings.raw == undefined
         const trimFactor = settings.trimFactor ? settings.trimFactor : 0.01
+
+        if (format.layer === 'hex' && (ext === 'arrow' || ext === 'csv')) {
+            const {worker, cartogram_table} = await cartogramInit
+            const resp = await fetch(`${file_path}?v=${++reloadNum}`)
+            const buf = ext === 'csv' ? await resp.text() : await resp.arrayBuffer()
+            const userTable = await worker.table(buf)
+            const schema = await userTable.schema()
+
+            const hasWeight = schema.hasOwnProperty('weight')
+            const viewCols = ['index', 'value']
+            if (hasWeight) viewCols.push('weight')
+            const dataView = await userTable.view({columns: viewCols})
+            const dataCols = await dataView.to_columns()
+            dataView.delete()
+
+            const values = dataCols.value
+            const weights = hasWeight ? dataCols.weight : null
+            let valuekey = 'value'
+            let getvalueFn
+
+            if (doQuantiles) {
+                const [getquantile, getvalue] = ecdf(values, trimFactor, weights)
+                getvalueFn = getvalue
+                dataCols.quantile = values.map(v => getquantile(v))
+                valuekey = 'quantile'
+                makeLegend(getvalueFn)
+            } else {
+                makeLegend()
+            }
+
+            window._columnData = dataCols
+            window.raw_data = dataCols
+            const accessors = hexAccessors('column', 'index', valuekey, getColour)
+            const dataWrap = {src: dataCols, length: dataCols.value.length}
+            const deckLayer = new H3HexagonLayer({
+                id: 'H3HexagonLayer', data: dataWrap,
+                extruded: false, stroked: false, ...accessors, elevationScale: 20, pickable: true
+            })
+
+            if (schema.hasOwnProperty('index')) {
+                const firstIndex = dataCols.index[0]
+                const h3res = getResolution(String(firstIndex))
+
+                if (h3res === 5) {
+                    const hasPopulation = schema.hasOwnProperty('population')
+                    const enhancedTable = await worker.table(dataCols)
+                    const joinedTable = await worker.join(cartogram_table, enhancedTable, 'index')
+                    const expressions = {'_code': '"code"/1000'}
+                    const aggregates = {'_code': 'dominant', 'label': 'dominant', 'x': 'first', 'y': 'first', 'index': 'join'}
+                    const columns = ['x', 'y', '_code', 'label', 'index']
+                    const meanCol = valuekey === 'quantile' ? 'quantile_mean' : 'value_mean'
+
+                    if (hasWeight) {
+                        expressions[meanCol] = `"weight" * "${valuekey}"`
+                    } else {
+                        expressions[meanCol] = `"${valuekey}"`
+                    }
+                    aggregates[meanCol] = 'mean'
+                    columns.push(meanCol)
+
+                    if (hasWeight && hasPopulation) {
+                        expressions.wp = '"weight" * "population" / (150000 * 2)'
+                        aggregates.wp = 'sum'
+                        columns.push('wp')
+                    }
+
+                    const aggView = await joinedTable.view({expressions, columns, aggregates, group_by: ['x', 'y'], group_rollup_mode: 'flat'})
+                    const aggCols = await aggView.to_columns()
+                    aggView.delete()
+
+                    aggCols.code = aggCols._code
+                    if (!cartogramApi) {
+                        cartogramApi = render_cartogram('#cartogram', aggCols, {
+                            draw_outline: false,
+                            data_col: meanCol,
+                            onclick_callback: (data, event, i) => {
+                                if (data.index && data.index[i]) {
+                                    hex(data.index[i].split(", ").filter(x => x))
+                                }
+                            },
+                            onmove_callback: ((() => {
+                                const t = 1000
+                                let last = 0, timer = null, lastArgs
+                                function fire(data, visibleIndices) {
+                                    if (data.index) {
+                                        hex(visibleIndices.flatMap(i => data.index[i] ? data.index[i].split(", ").filter(x => x) : []), {only_fit: true, padding: 0})
+                                    }
+                                }
+                                return (data, visibleIndices) => {
+                                    lastArgs = [data, visibleIndices]
+                                    const now = Date.now()
+                                    if (now - last >= t) { last = now; clearTimeout(timer); timer = null; fire(...lastArgs) }
+                                    else if (!timer) { timer = setTimeout(() => { timer = null; last = Date.now(); fire(...lastArgs) }, t - (now - last)) }
+                                }
+                            }))()
+                        })
+                    } else {
+                        cartogramApi.updateData(aggCols, meanCol)
+                    }
+                    document.body.classList.add('cartogram-ready')
+
+                    joinedTable.delete()
+                    enhancedTable.delete()
+                }
+            }
+
+            userTable.delete()
+            return deckLayer
+        }
+
         let loaded
         if (format.layer === 'geojson') {
             const resp = await fetch(`${file_path}?v=${++reloadNum}`)
@@ -344,9 +395,7 @@ function bootstrap(meta = {}){
             const table = raw
             const fields = table.schema.fields.map(f => f.name)
             const columnar = {}
-            for (const field of fields) {
-                columnar[field] = []
-            }
+            for (const field of fields) columnar[field] = []
             for (const batch of table.batches) {
                 batch.data.children.forEach((child, i) => {
                     const name = fields[i]
@@ -395,13 +444,7 @@ function bootstrap(meta = {}){
                 // assign quantile to each feature
                 data = {
                     ...raw,
-                    features: raw.features.map(f => ({
-                        ...f,
-                        properties: {
-                            ...f.properties,
-                            quantile: getquantile(f.properties?.value ?? f.value ?? f.properties?.val)
-                        }
-                    }))
+                    features: raw.features.map(f => ({...f, properties: {...f.properties, quantile: getquantile(f.properties?.value ?? f.value ?? f.properties?.val)}}))
                 }
             }
             valuekey = 'quantile'
@@ -440,10 +483,7 @@ function bootstrap(meta = {}){
                 filled: true,
                 stroked: true,
                 getFillColor: getColor,
-                getLineColor: f => {
-                    const rgb = getColor(f);
-                    return [...rgb.slice(0,3), 255];
-                },
+                getLineColor: f => { const rgb = getColor(f); return [...rgb.slice(0,3), 255] },
                 getLineWidth: 1000,
                 lineWidthMinPixels: 1,
                 lineJointRounded: true,
@@ -477,7 +517,7 @@ function bootstrap(meta = {}){
     function getTooltip({object, index}) {
         if (index < 0) return null
         let row
-        if (format.kind === 'column' && window._columnData) {
+        if (window._columnData) {
             row = Object.fromEntries(
                 Object.keys(window._columnData).filter(k => k !== 'quantile').map(k => [k, window._columnData[k][index]])
             )
