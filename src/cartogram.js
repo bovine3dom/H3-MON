@@ -61,6 +61,7 @@ export function render_cartogram(container, data, options = {}) {
     const getY = (y) => height / 2 + (y - center_y) * square_size / 2
 
     d3.select(container).selectAll("svg").remove()
+    d3.select(container).selectAll(".cartogram-tooltip").remove()
 
     const svg = d3.select(container)
         .append("svg")
@@ -121,23 +122,46 @@ export function render_cartogram(container, data, options = {}) {
         .attr("stroke", draw_outline ? outline_color : "none")
         .attr("stroke-width", draw_outline ? outline_width : 0)
 
-    // Simple interactivity
+    // Tooltip
+    const tooltip = d3.select(container)
+        .append("div")
+        .attr("class", "cartogram-tooltip")
+        .style("display", "none")
+
+    function formatTooltip(i) {
+        const rows = []
+        for (const key of Object.keys(currentData)) {
+            const val = currentData[key][i]
+            let displayVal = val
+            if (key === 'index' && typeof val === 'string') {
+                const parts = val.split(", ").filter(x => x)
+                displayVal = parts.length > 3
+                    ? `${parts.slice(0, 3).join(", ")}, … (${parts.length})`
+                    : val
+            } else if (typeof val === 'number') {
+                displayVal = parseFloat(val.toPrecision(3)).toLocaleString()
+            }
+            if (displayVal != null && displayVal !== '') {
+                rows.push(`<div><strong>${key}:</strong> ${displayVal}</div>`)
+            }
+        }
+        return rows.join("")
+    }
+
     cells.on("click", (event, i) => onclick_callback(currentData, event, i))
-    // cells.on("mousedown", function(event, i) {
-    //     d3.select(this)
-    //         .attr("stroke", "orange")
-    //         .attr("stroke-width", 2)
-            
-    //     const labelText = labelCol ? labelCol[i] : null
-    //     // showTooltip(event, `${labelText || 'Unknown'} (Code: ${codeCol[i]})`)
-    //     console.log(event, labelText, codeCol[i])
-    // }) // todo: replace when clicking elsewhere
-    // .on("mouseout", function() {
-    //     d3.select(this)
-    //         .attr("stroke", draw_outline ? outline_color : "none")
-    //         .attr("stroke-width", draw_outline ? outline_width : 0)
-    //     // hideTooltip()
-    // })
+    cells.on("mouseenter", function(event, i) {
+        tooltip.html(formatTooltip(i))
+            .style("display", "block")
+            .style("left", (event.pageX + 12) + "px")
+            .style("top", (event.pageY - 12) + "px")
+    })
+    .on("mousemove", function(event) {
+        tooltip.style("left", (event.pageX + 12) + "px")
+            .style("top", (event.pageY - 12) + "px")
+    })
+    .on("mouseleave", function() {
+        tooltip.style("display", "none")
+    })
 
     if (draw_country_borders) {
         const borderLines = []
