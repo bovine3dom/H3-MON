@@ -286,6 +286,10 @@ function bootstrap(meta = {}){
             const dataCols = await dataView.to_columns()
             dataView.delete()
 
+            if (dataCols.index.length && String(dataCols.index[0]).startsWith('0')) {
+                dataCols.index = dataCols.index.map(h => String(h).slice(1))
+            }
+
             const values = dataCols.value
             const weights = hasWeight ? dataCols.weight : null
             let valuekey = 'value'
