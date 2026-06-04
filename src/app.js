@@ -41,6 +41,7 @@ let hex_flying = false
 let h3toXY = null
 let cartogramApi = null
 let cartoAggCols = null
+let cartoRes = 5
 
 function hex(hexes, options = {}) {
     const {fit = false, padding = 200, highlight = true} = options
@@ -98,12 +99,13 @@ const ps = perspective.worker()
 
 const cartogramInit = (async () => {
     const worker = await ps
-    const arrow_resp = await fetch('data/mapping_string.arrow')
+    const arrow_resp = await fetch('data/cartogram.arrow')
     const cartogram_table = await worker.table(await arrow_resp.arrayBuffer())
 
     const rawView = await cartogram_table.view({columns: ['index', 'x', 'y']})
     const rawCols = await rawView.to_columns()
     rawView.delete()
+    cartoRes = getResolution(rawCols.index[0])
     h3toXY = new Map()
     for (let i = 0; i < rawCols.index.length; i++) {
         const hex = rawCols.index[i]
@@ -331,7 +333,7 @@ function bootstrap(meta = {}){
                 cartoAggCols = null
                 let cartoDataCol = null
 
-                if (h3res === 5) {
+                if (h3res === cartoRes) {
                     const hasPopulation = schema.hasOwnProperty('population')
                     const enhancedTable = await worker.table(dataCols)
                     const joinedTable = await worker.join(cartogram_table, enhancedTable, 'index')
@@ -364,9 +366,9 @@ function bootstrap(meta = {}){
 
                     joinedTable.delete()
                     enhancedTable.delete()
-                } else if (h3res > 5) {
+                } else if (h3res > cartoRes) {
                     const hasPopulation = schema.hasOwnProperty('population')
-                    dataCols.parent = dataCols.index.map(h => cellToParent(h, 5))
+                    dataCols.parent = dataCols.index.map(h => cellToParent(h, cartoRes))
 
                     const aggExpr = {}
                     const aggAgg = {'parent': 'first'}
@@ -636,7 +638,7 @@ function bootstrap(meta = {}){
                 const h3Index = window._columnData.index[info.index]
                 hex([h3Index], {fit: false, highlight: true})
                 const res = getResolution(h3Index)
-                const parent = res === 5 ? h3Index : cellToParent(h3Index, 5)
+                const parent = res === cartoRes ? h3Index : cellToParent(h3Index, cartoRes)
                 const xy = h3toXY ? h3toXY.get(parent) : null
                 if (xy && cartogramApi && cartoAggCols) {
                     const rowIdx = cartoAggCols.x.findIndex((x, i) => x === xy.xMin && cartoAggCols.y[i] === xy.yMin)
@@ -823,7 +825,7 @@ function bootstrap(meta = {}){
         ]
         let xMin = Infinity, yMin = Infinity, xMax = -Infinity, yMax = -Infinity
         for (const c of corners) {
-            const h = latLngToCell(c.lat, c.lng, 5)
+            const h = latLngToCell(c.lat, c.lng, cartoRes)
             let pt = h3map.get(h)
             if (!pt) pt = findClosestHex(c.lat, c.lng)
             if (!pt) continue
