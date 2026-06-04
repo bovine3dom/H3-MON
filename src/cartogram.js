@@ -249,6 +249,10 @@ export function render_cartogram(container, data, options = {}) {
             }
             cells.attr("fill", i => get_color(col[i]))
         },
+        highlightCells: (indices) => {
+            cells.attr("stroke", i => indices.includes(i) ? "orange" : (draw_outline ? outline_color : "none"))
+                .attr("stroke-width", i => indices.includes(i) ? 1 : (draw_outline ? outline_width : 0))
+        },
         fitToBounds: ([[x1, y1, x2, y2]], duration = 500) => {
             const left = getX(x1)
             const right = getX(x2)

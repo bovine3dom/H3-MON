@@ -40,9 +40,10 @@ let renderLayers = null
 let hex_flying = false
 let h3toXY = null
 let cartogramApi = null
+let cartoAggCols = null
 
 function hex(hexes, options = {}) {
-    const {only_fit = false, padding = 200} = options
+    const {fit = false, padding = 200, highlight = true} = options
     if (!hexes || hexes.length === 0) {
         highlightLayer = null
         renderLayers && renderLayers()
@@ -53,7 +54,7 @@ function hex(hexes, options = {}) {
     //     if (typeof h === 'number') return BigInt(h).toString(16)
     //     return String(h)
     // })
-    if (!only_fit) {
+    if (highlight) {
         highlightLayer = new H3HexagonLayer({
             id: 'hex-highlight',
             data: hexes,
@@ -67,11 +68,13 @@ function hex(hexes, options = {}) {
         })
         renderLayers && renderLayers()
     }
-    const bounds = computeH3Bounds(hexes)
-    if (bounds) {
-        hex_flying = true
-        map.fitBounds(bounds, {padding})
-        map.once('moveend', () => { hex_flying = false })
+    if (fit) {
+        const bounds = computeH3Bounds(hexes)
+        if (bounds) {
+            hex_flying = true
+            map.fitBounds(bounds, {padding})
+            map.once('moveend', () => { hex_flying = false })
+        }
     }
 }
 
@@ -325,7 +328,7 @@ function bootstrap(meta = {}){
                 const firstIndex = dataCols.index[0]
                 const h3res = getResolution(String(firstIndex))
 
-                let cartoAggCols = null
+                cartoAggCols = null
                 let cartoDataCol = null
 
                 if (h3res === 5) {
@@ -428,6 +431,7 @@ function bootstrap(meta = {}){
                             include_outer_borders: true,
                             data_col: cartoDataCol,
                             onclick_callback: (data, event, i) => {
+                                if (cartogramApi) cartogramApi.highlightCells([])
                                 if (data.index && data.index[i]) {
                                     hex(data.index[i].split(", ").filter(x => x))
                                 }
@@ -437,7 +441,7 @@ function bootstrap(meta = {}){
                                 let last = 0, timer = null, lastArgs
                                 function fire(data, visibleIndices) {
                                     if (data.index) {
-                                        hex(visibleIndices.flatMap(i => data.index[i] ? data.index[i].split(", ").filter(x => x) : []), {only_fit: true, padding: 0})
+                                        hex(visibleIndices.flatMap(i => data.index[i] ? data.index[i].split(", ").filter(x => x) : []), {fit: true, padding: 0, highlight: false})
                                     }
                                 }
                                 return (data, visibleIndices) => {
@@ -449,6 +453,7 @@ function bootstrap(meta = {}){
                             }))()
                         })
                     } else {
+                        cartogramApi.highlightCells([])
                         cartogramApi.updateData(cartoAggCols, cartoDataCol)
                     }
                     document.body.classList.add('cartogram-ready')
@@ -627,8 +632,20 @@ function bootstrap(meta = {}){
     const mapOverlay = new MapboxOverlay({
         interleaved: false,
         onClick: (info, event) => {
-            if (info.layer && info.layer.id === 'H3HexagonLayer') {
-                console.log('Clicked H3 index:', info.object.index);
+            if (info.layer && info.layer.id === 'H3HexagonLayer' && info.index >= 0 && window._columnData) {
+                const h3Index = window._columnData.index[info.index]
+                hex([h3Index], {fit: false, highlight: true})
+                const res = getResolution(h3Index)
+                const parent = res === 5 ? h3Index : cellToParent(h3Index, 5)
+                const xy = h3toXY ? h3toXY.get(parent) : null
+                if (xy && cartogramApi && cartoAggCols) {
+                    const rowIdx = cartoAggCols.x.findIndex((x, i) => x === xy.xMin && cartoAggCols.y[i] === xy.yMin)
+                    if (rowIdx >= 0) {
+                        cartogramApi.highlightCells([rowIdx])
+                        const padding = 20
+                        cartogramApi.fitToBounds([[xy.xMin - padding, xy.yMin - padding, xy.xMin + padding, xy.yMin + padding]])
+                    }
+                }
             }
         },
         getTooltip,
