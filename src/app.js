@@ -7,7 +7,7 @@ import {ParquetWasmLoader} from '@loaders.gl/parquet'
 import {load} from '@loaders.gl/core'
 import maplibregl from 'maplibre-gl'
 import * as d3 from 'd3'
-import {cellToBoundary, cellToLatLng, latLngToCell, getResolution} from 'h3-js'
+import {cellToBoundary, cellToLatLng, latLngToCell, getResolution, cellToParent} from 'h3-js'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import * as observablehq from './vendor/observablehq' // from https://observablehq.com/@d3/color-legend
 import {getCitiesStartsWith} from 'tiny-geocoder'
@@ -318,6 +318,9 @@ function bootstrap(meta = {}){
                 const firstIndex = dataCols.index[0]
                 const h3res = getResolution(String(firstIndex))
 
+                let cartoAggCols = null
+                let cartoDataCol = null
+
                 if (h3res === 5) {
                     const hasPopulation = schema.hasOwnProperty('population')
                     const enhancedTable = await worker.table(dataCols)
@@ -346,10 +349,76 @@ function bootstrap(meta = {}){
                     aggView.delete()
 
                     aggCols.code = aggCols._code
+                    cartoAggCols = aggCols
+                    cartoDataCol = meanCol
+
+                    joinedTable.delete()
+                    enhancedTable.delete()
+                } else if (h3res > 5) {
+                    const hasPopulation = schema.hasOwnProperty('population')
+                    dataCols.parent = dataCols.index.map(h => cellToParent(h, 5))
+
+                    const aggExpr = {}
+                    const aggAgg = {'parent': 'first'}
+                    const aggCols2 = ['parent']
+                    const parentMeanCol = valuekey === 'quantile' ? 'quantile_mean' : 'value_mean'
+
+                    if (hasWeight) {
+                        aggExpr[parentMeanCol] = `"weight" * "${valuekey}"`
+                    } else {
+                        aggExpr[parentMeanCol] = `"${valuekey}"`
+                    }
+                    aggAgg[parentMeanCol] = 'mean'
+                    aggCols2.push(parentMeanCol)
+
+                    if (hasWeight && hasPopulation) {
+                        aggExpr.wp = '"weight" * "population" / (150000 * 2)'
+                        aggAgg.wp = 'sum'
+                        aggCols2.push('wp')
+                    }
+
+                    const parentTable = await worker.table(dataCols)
+                    const groupView = await parentTable.view({expressions: aggExpr, columns: aggCols2, aggregates: aggAgg, group_by: ['parent'], group_rollup_mode: 'flat'})
+                    const grouped = await groupView.to_columns()
+                    groupView.delete()
+                    parentTable.delete()
+
+                    delete grouped.__ROW_PATH__
+                    grouped.index = grouped.parent
+                    delete grouped.parent
+                    delete dataCols.parent
+
+                    const enhancedTable = await worker.table(grouped)
+                    const joinedTable = await worker.join(cartogram_table, enhancedTable, 'index')
+                    const expressions = {'_code': '"code"/1000'}
+                    const aggregates = {'_code': 'dominant', 'label': 'dominant', 'x': 'first', 'y': 'first', 'index': 'join'}
+                    const columns = ['x', 'y', '_code', 'label', 'index']
+
+                    aggregates[parentMeanCol] = 'mean'
+                    columns.push(parentMeanCol)
+
+                    if (hasWeight && hasPopulation) {
+                        aggregates.wp = 'sum'
+                        columns.push('wp')
+                    }
+
+                    const aggView = await joinedTable.view({expressions, columns, aggregates, group_by: ['x', 'y'], group_rollup_mode: 'flat'})
+                    const aggCols = await aggView.to_columns()
+                    aggView.delete()
+
+                    aggCols.code = aggCols._code
+                    cartoAggCols = aggCols
+                    cartoDataCol = parentMeanCol
+
+                    joinedTable.delete()
+                    enhancedTable.delete()
+                }
+
+                if (cartoAggCols) {
                     if (!cartogramApi) {
-                        cartogramApi = render_cartogram('#cartogram', aggCols, {
+                        cartogramApi = render_cartogram('#cartogram', cartoAggCols, {
                             draw_outline: false,
-                            data_col: meanCol,
+                            data_col: cartoDataCol,
                             onclick_callback: (data, event, i) => {
                                 if (data.index && data.index[i]) {
                                     hex(data.index[i].split(", ").filter(x => x))
@@ -372,12 +441,9 @@ function bootstrap(meta = {}){
                             }))()
                         })
                     } else {
-                        cartogramApi.updateData(aggCols, meanCol)
+                        cartogramApi.updateData(cartoAggCols, cartoDataCol)
                     }
                     document.body.classList.add('cartogram-ready')
-
-                    joinedTable.delete()
-                    enhancedTable.delete()
                 }
             }
 
