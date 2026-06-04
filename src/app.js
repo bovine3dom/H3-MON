@@ -156,6 +156,8 @@ const cartogramInit = (async () => {
     // 6) change opacity of cells with bad 'wp' (london etc seems totally wrong useless)
     // 9) make legend respect flip, etc.
     // 10) make tooltip look up quantiles in legend so they're pretty printed?
+    // 11) investigate random extra stuff in the legend. stop dividing code by 1000?
+    // 12) reinstate 'wp' from cartogram.arrow
 })()
 
 const PARQUET_WASM_URL = './parquet_wasm_bg.wasm'
@@ -347,7 +349,7 @@ function bootstrap(meta = {}){
                     const meanCol = valuekey === 'quantile' ? 'quantile_mean' : 'value_mean'
                     const expressions = {'_code': '"code"/1000'}
                     const aggregates = {'_code': 'dominant', 'label': 'dominant', 'x': 'first', 'y': 'first', 'index': 'join'}
-                    const columns = ['x', 'y', '_code', 'label', 'index', 'weight_mean']
+                    const columns = ['x', 'y', '_code', 'label', 'index' ]
                     expressions[meanCol] = `"${valuekey}"`
                     aggregates[meanCol] = ['weighted mean', ['weight_mean']] // syntax: {aggegates: {value_col: ['weighted mean', ['weight_col']]}}
                     columns.push(meanCol)
