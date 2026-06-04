@@ -133,14 +133,15 @@ const cartogramInit = (async () => {
     // right - The right source table (a [Table] instance or a table name string).
     // on - The column name to join on. Must exist in both tables with the same type.
     // options - Optional join configuration: { join_type?: "inner" | "left" | "outer", name?: string }.
-    // done ^
-    //
     // 4) reduce duplication of effort: reuse quantiles, data. _probably_ best to use perspective's .to_arrow()?
     // 5) investigate aggregation of non-h3 5 data. sum/mean/median? exercise for reader
-    // 6) change opacity of cells with bad 'wp' (london etc seems totally wrong useless)
     // 7) try to work out why legend has flipped between the two
     // 8) add tooltip to cartogram cells
-    // 9) make sure legend really applies to both cartogram and map. try with different data
+    // done ^
+    //
+    // 6) change opacity of cells with bad 'wp' (london etc seems totally wrong useless)
+    // 9) make legend respect flip, etc.
+    // 10) make tooltip look up quantiles in legend so they're pretty printed?
 })()
 
 const PARQUET_WASM_URL = './parquet_wasm_bg.wasm'
@@ -153,7 +154,13 @@ const FORMATS = {
 }
 
 //const STYLE = "http://localhost:1983/toner_ofm_moderatlist.json"
-const STYLE = {version: 8, sources: {}, layers: [], glyphs: 'https://fonts.openmaptiles.org/{fontstack}/{range}.pbf'} // blank style for debugging on metered connection. swap with url for basemap
+const STYLE = {version: 8, sources: {
+    basemap: {type: 'geojson', data: 'ne_basemap/basemap.geojson'}
+}, layers: [
+    {id: 'background', type: 'background', paint: {'background-color': '#e8f4f8'}},
+    //{id: 'basemap-fill', type: 'fill', source: 'basemap', paint: {'fill-color': '#f5f5f5'}},
+    {id: 'basemap-outline', type: 'line', source: 'basemap', paint: {'line-color': '#000', 'line-width': 2}},
+], glyphs: 'https://fonts.openmaptiles.org/{fontstack}/{range}.pbf'}
 
 const start_pos = {...{x: 0.45, y: 51.47, z: 4}, ...Object.fromEntries(new URLSearchParams(window.location.hash.slice(1)))}
 const map = new maplibregl.Map({
