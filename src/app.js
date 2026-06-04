@@ -92,6 +92,17 @@ function findClosestHex(targetLat, targetLng) {
     return best
 }
 
+function getH3Bounds(entry) {
+    let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity
+    for (const [x, y] of entry.cells) {
+        if (x < xMin) xMin = x
+        if (x > xMax) xMax = x
+        if (y < yMin) yMin = y
+        if (y > yMax) yMax = y
+    }
+    return {xMin, xMax, yMin, yMax}
+}
+
 perspective.init_server(fetch(PERSPECTIVE_SERVER_WASM))
 perspective.init_client(fetch(PERSPECTIVE_CLIENT_WASM))
 
@@ -113,13 +124,10 @@ const cartogramInit = (async () => {
         const y = rawCols.y[i]
         const existing = h3toXY.get(hex)
         if (existing) {
-            if (x < existing.xMin) existing.xMin = x
-            if (x > existing.xMax) existing.xMax = x
-            if (y < existing.yMin) existing.yMin = y
-            if (y > existing.yMax) existing.yMax = y
+            existing.cells.push([x, y])
         } else {
             const [lat, lng] = cellToLatLng(hex)
-            h3toXY.set(hex, {xMin: x, xMax: x, yMin: y, yMax: y, lat, lng})
+            h3toXY.set(hex, {cells: [[x, y]], lat, lng})
         }
     }
 
@@ -641,11 +649,18 @@ function bootstrap(meta = {}){
                 const parent = res === cartoRes ? h3Index : cellToParent(h3Index, cartoRes)
                 const xy = h3toXY ? h3toXY.get(parent) : null
                 if (xy && cartogramApi && cartoAggCols) {
-                    const rowIdx = cartoAggCols.x.findIndex((x, i) => x === xy.xMin && cartoAggCols.y[i] === xy.yMin)
-                    if (rowIdx >= 0) {
-                        cartogramApi.highlightCells([rowIdx])
+                    const cellSet = new Set(xy.cells.map(([x, y]) => `${x},${y}`))
+                    const rowIndices = []
+                    for (let i = 0; i < cartoAggCols.x.length; i++) {
+                        if (cellSet.has(`${cartoAggCols.x[i]},${cartoAggCols.y[i]}`)) {
+                            rowIndices.push(i)
+                        }
+                    }
+                    if (rowIndices.length > 0) {
+                        cartogramApi.highlightCells(rowIndices)
+                        const b = getH3Bounds(xy)
                         const padding = 20
-                        cartogramApi.fitToBounds([[xy.xMin - padding, xy.yMin - padding, xy.xMin + padding, xy.yMin + padding]])
+                        cartogramApi.fitToBounds([[b.xMin - padding, b.yMin - padding, b.xMax + padding, b.yMax + padding]])
                     }
                 }
             }
@@ -829,10 +844,11 @@ function bootstrap(meta = {}){
             let pt = h3map.get(h)
             if (!pt) pt = findClosestHex(c.lat, c.lng)
             if (!pt) continue
-            if (pt.xMin < xMin) xMin = pt.xMin
-            if (pt.yMin < yMin) yMin = pt.yMin
-            if (pt.xMax > xMax) xMax = pt.xMax
-            if (pt.yMax > yMax) yMax = pt.yMax
+            const b = getH3Bounds(pt)
+            if (b.xMin < xMin) xMin = b.xMin
+            if (b.yMin < yMin) yMin = b.yMin
+            if (b.xMax > xMax) xMax = b.xMax
+            if (b.yMax > yMax) yMax = b.yMax
         }
         if (xMin === Infinity) return
         api.fitToBounds([[xMin, yMin, xMax, yMax]])
