@@ -188,6 +188,21 @@ export function render_cartogram(container, data, options = {}) {
                     x2: cx + square_size / 2, y2: cy + square_size / 2
                 })
             }
+
+            if (include_outer_borders) {
+                if (cellMap.get(`${x - coord_step},${y}`) === undefined) {
+                    borderLines.push({
+                        x1: cx - square_size / 2, y1: cy - square_size / 2,
+                        x2: cx - square_size / 2, y2: cy + square_size / 2
+                    })
+                }
+                if (cellMap.get(`${x},${y - coord_step}`) === undefined) {
+                    borderLines.push({
+                        x1: cx - square_size / 2, y1: cy - square_size / 2,
+                        x2: cx + square_size / 2, y2: cy - square_size / 2
+                    })
+                }
+            }
         }
 
         g.selectAll(".country-border")

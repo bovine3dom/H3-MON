@@ -425,6 +425,7 @@ function bootstrap(meta = {}){
                     if (!cartogramApi) {
                         cartogramApi = render_cartogram('#cartogram', cartoAggCols, {
                             draw_outline: false,
+                            include_outer_borders: true,
                             data_col: cartoDataCol,
                             onclick_callback: (data, event, i) => {
                                 if (data.index && data.index[i]) {
