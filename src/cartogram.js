@@ -71,12 +71,14 @@ export function render_cartogram(container, data, options = {}) {
         .attr("preserveAspectRatio", "xMidYMid slice")
 
     const g = svg.append("g")
+    const labelsG = svg.append("g")
 
     let movePending = false
     let latestTransform = null
     let fitToBoundsActive = false
     const zoom = d3.zoom().scaleExtent([0.5, 100]).on("zoom", (e) => {
         g.attr("transform", e.transform)
+        labelsG.attr("transform", e.transform)
         if (fitToBoundsActive) return
         if (onmove_callback) {
             latestTransform = e.transform
@@ -223,7 +225,7 @@ export function render_cartogram(container, data, options = {}) {
             return label !== null && label !== undefined && label !== ""
         })
 
-        g.selectAll(".label")
+        labelsG.selectAll(".label")
             .data(labeledIndices)
             .join("text")
             .attr("class", "label")
@@ -252,6 +254,10 @@ export function render_cartogram(container, data, options = {}) {
         highlightCells: (indices) => {
             cells.attr("stroke", i => indices.includes(i) ? "orange" : (draw_outline ? outline_color : "none"))
                 .attr("stroke-width", i => indices.includes(i) ? 1 : (draw_outline ? outline_width : 0))
+            indices.forEach(i => {
+                const node = cells.nodes()[i]
+                if (node) node.parentNode.appendChild(node)
+            })
         },
         fitToBounds: ([[x1, y1, x2, y2]], duration = 500) => {
             const left = getX(x1)
