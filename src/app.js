@@ -110,7 +110,8 @@ const ps = perspective.worker()
 
 const cartogramInit = (async () => {
     const worker = await ps
-    const arrow_resp = await fetch('data/cartogram.arrow')
+    window.ps = worker
+    const arrow_resp = await fetch('data/cartogram_weights.arrow')
     const cartogram_table = await worker.table(await arrow_resp.arrayBuffer())
 
     const rawView = await cartogram_table.view({columns: ['index', 'x', 'y']})
@@ -341,41 +342,32 @@ function bootstrap(meta = {}){
                 cartoAggCols = null
                 let cartoDataCol = null
 
-                if (h3res === cartoRes) {
-                    const hasPopulation = schema.hasOwnProperty('population')
-                    const enhancedTable = await worker.table(dataCols)
-                    const joinedTable = await worker.join(cartogram_table, enhancedTable, 'index')
+                async function groupCartogram(sourceTable) {
+                    const joinedTable = await worker.join(cartogram_table, sourceTable, 'index')
+                    const meanCol = valuekey === 'quantile' ? 'quantile_mean' : 'value_mean'
                     const expressions = {'_code': '"code"/1000'}
                     const aggregates = {'_code': 'dominant', 'label': 'dominant', 'x': 'first', 'y': 'first', 'index': 'join'}
-                    const columns = ['x', 'y', '_code', 'label', 'index']
-                    const meanCol = valuekey === 'quantile' ? 'quantile_mean' : 'value_mean'
-
-                    if (hasWeight) {
-                        expressions[meanCol] = `"weight" * "${valuekey}"`
-                    } else {
-                        expressions[meanCol] = `"${valuekey}"`
-                    }
-                    aggregates[meanCol] = 'mean'
+                    const columns = ['x', 'y', '_code', 'label', 'index', 'weight_mean']
+                    expressions[meanCol] = `"${valuekey}"`
+                    aggregates[meanCol] = ['weighted mean', ['weight_mean']] // syntax: {aggegates: {value_col: ['weighted mean', ['weight_col']]}}
                     columns.push(meanCol)
-
-                    if (hasWeight && hasPopulation) {
-                        expressions.wp = '"weight" * "population" / (150000 * 2)'
-                        aggregates.wp = 'sum'
-                        columns.push('wp')
-                    }
 
                     const aggView = await joinedTable.view({expressions, columns, aggregates, group_by: ['x', 'y'], group_rollup_mode: 'flat'})
                     const aggCols = await aggView.to_columns()
                     aggView.delete()
+                    joinedTable.delete()
 
                     aggCols.code = aggCols._code
-                    cartoAggCols = aggCols
-                    cartoDataCol = meanCol
+                    return {aggCols, meanCol}
+                }
 
-                    joinedTable.delete()
+                if (h3res === cartoRes) {
+                    const enhancedTable = await worker.table(dataCols)
+                    const result = await groupCartogram(enhancedTable)
+                    cartoAggCols = result.aggCols
+                    cartoDataCol = result.meanCol
                     enhancedTable.delete()
                 } else if (h3res > cartoRes) {
-                    const hasPopulation = schema.hasOwnProperty('population')
                     dataCols.parent = dataCols.index.map(h => cellToParent(h, cartoRes))
 
                     const aggExpr = {}
@@ -383,23 +375,20 @@ function bootstrap(meta = {}){
                     const aggCols2 = ['parent']
                     const parentMeanCol = valuekey === 'quantile' ? 'quantile_mean' : 'value_mean'
 
-                    if (hasWeight) {
-                        aggExpr[parentMeanCol] = `"weight" * "${valuekey}"`
-                    } else {
-                        aggExpr[parentMeanCol] = `"${valuekey}"`
-                    }
+                    // todo: support weights for the data (not the cartogram) again :(
+                    // if (hasWeight) {
+                    //     aggExpr[parentMeanCol] = `"weight" * "${valuekey}"`
+                    // } else {
+                    aggExpr[parentMeanCol] = `"${valuekey}"`
+                    // }
                     aggAgg[parentMeanCol] = 'mean'
                     aggCols2.push(parentMeanCol)
-
-                    if (hasWeight && hasPopulation) {
-                        aggExpr.wp = '"weight" * "population" / (150000 * 2)'
-                        aggAgg.wp = 'sum'
-                        aggCols2.push('wp')
-                    }
 
                     const parentTable = await worker.table(dataCols)
                     const groupView = await parentTable.view({expressions: aggExpr, columns: aggCols2, aggregates: aggAgg, group_by: ['parent'], group_rollup_mode: 'flat'})
                     const grouped = await groupView.to_columns()
+                    grouped[valuekey] = grouped[parentMeanCol]
+                    delete grouped[parentMeanCol]
                     groupView.delete()
                     parentTable.delete()
 
@@ -409,28 +398,9 @@ function bootstrap(meta = {}){
                     delete dataCols.parent
 
                     const enhancedTable = await worker.table(grouped)
-                    const joinedTable = await worker.join(cartogram_table, enhancedTable, 'index')
-                    const expressions = {'_code': '"code"/1000'}
-                    const aggregates = {'_code': 'dominant', 'label': 'dominant', 'x': 'first', 'y': 'first', 'index': 'join'}
-                    const columns = ['x', 'y', '_code', 'label', 'index']
-
-                    aggregates[parentMeanCol] = 'mean'
-                    columns.push(parentMeanCol)
-
-                    if (hasWeight && hasPopulation) {
-                        aggregates.wp = 'sum'
-                        columns.push('wp')
-                    }
-
-                    const aggView = await joinedTable.view({expressions, columns, aggregates, group_by: ['x', 'y'], group_rollup_mode: 'flat'})
-                    const aggCols = await aggView.to_columns()
-                    aggView.delete()
-
-                    aggCols.code = aggCols._code
-                    cartoAggCols = aggCols
-                    cartoDataCol = parentMeanCol
-
-                    joinedTable.delete()
+                    const result = await groupCartogram(enhancedTable)
+                    cartoAggCols = result.aggCols
+                    cartoDataCol = result.meanCol
                     enhancedTable.delete()
                 }
 
