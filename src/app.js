@@ -654,7 +654,7 @@ function bootstrap(meta = {}){
         if (!div) return
         const lat = parseFloat(div.dataset.lat)
         const lng = parseFloat(div.dataset.lng)
-        map.flyTo({center: [lng, lat], zoom: 10})
+        map.flyTo({center: [lng, lat], zoom: 7})
         searchInput.value = div.textContent
         resultsDiv.style.display = 'none'
         highlightedIdx = -1
