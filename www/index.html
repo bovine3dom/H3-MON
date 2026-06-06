@@ -16,8 +16,8 @@
 }
 #attribution {
     position: absolute;
-    z-index: 1; /* Ensure it appears above the map */
-    padding: 0em 1.5em 0.5em 1.5em; /* top right bottom left */
+    z-index: 1;
+    padding: 0em 1.5em 0.5em 1.5em;
     background-color: rgba(255, 255, 255, 0.9);
     color: rgba(0, 0, 0, 0.6);
     bottom: 0;
@@ -28,13 +28,48 @@
     border-radius: 0px;
     max-width: 350px;
 }
-
-
+#search-container {
+    position: absolute;
+    z-index: 1;
+    top: 10px;
+    left: 10px;
+    font-family: "Helvetica Neue", "sans-serif";
+}
+#city-search {
+    width: 250px;
+    padding: 8px 12px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 14px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+}
+#city-results {
+    background: white;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    max-height: 300px;
+    overflow-y: auto;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+    display: none;
+}
+#city-results div {
+    padding: 6px 12px;
+    cursor: pointer;
+    font-size: 13px;
+}
+#city-results div:hover,
+#city-results div.highlighted {
+    background: #f0f0f0;
+}
         </style>
 <!-- #legend { position: absolute; z-index: 1; background-color: rgba(255, 255, 255, 0.6); color: rgba(0, 0, 0, 0.6); top: 0; right: 0; font-family: "Helvetica Neue", "sans-serif"; font-size: 8pt; border-radius: 0px; } #legend text { stroke: white; stroke-width: 2px; paint-order: stroke; } -->
     </head>
     <body>
         <div id="map">
+            <div id="search-container">
+                <input type="text" id="city-search" placeholder="Jump to a city..." autocomplete="off" />
+                <div id="city-results"></div>
+            </div>
             <div id="legend"></div>
             <div id="attribution"></div>
         </div>

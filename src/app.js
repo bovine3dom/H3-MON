@@ -9,6 +9,7 @@ import maplibregl from 'maplibre-gl'
 import * as d3 from 'd3'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import * as observablehq from './vendor/observablehq' // from https://observablehq.com/@d3/color-legend
+import {getCitiesStartsWith} from 'tiny-geocoder'
 
 const PARQUET_WASM_URL = './parquet_wasm_bg.wasm'
 
@@ -311,6 +312,73 @@ function bootstrap(meta = {}){
 
     map.addControl(mapOverlay)
     map.addControl(new maplibregl.NavigationControl())
+
+    const searchInput = document.getElementById('city-search')
+    const resultsDiv = document.getElementById('city-results')
+    let highlightedIdx = -1
+
+    function selectCity(div) {
+        if (!div) return
+        const lat = parseFloat(div.dataset.lat)
+        const lng = parseFloat(div.dataset.lng)
+        map.flyTo({center: [lng, lat], zoom: 10})
+        searchInput.value = div.textContent
+        resultsDiv.style.display = 'none'
+        highlightedIdx = -1
+    }
+
+    function highlightItem(idx) {
+        Array.from(resultsDiv.children).forEach((el, i) => el.classList.toggle('highlighted', i === idx))
+    }
+
+    searchInput.addEventListener('input', () => {
+        const query = searchInput.value.trim()
+        if (query.length < 2) {
+            resultsDiv.style.display = 'none'
+            return
+        }
+        const cities = getCitiesStartsWith(query, 10, true)
+        if (cities.length === 0) {
+            resultsDiv.style.display = 'none'
+            return
+        }
+        highlightedIdx = -1
+        resultsDiv.innerHTML = cities.map(c =>
+            `<div data-lat="${c.latitude}" data-lng="${c.longitude}">${c.name} (population: ${Number((c.population ?? 0).toPrecision(2)).toLocaleString()})</div>`
+        ).join('')
+        resultsDiv.style.display = 'block'
+    })
+
+    searchInput.addEventListener('keydown', e => {
+        const items = resultsDiv.children
+        if (items.length === 0) return
+        if (e.key === 'ArrowDown') {
+            e.preventDefault()
+            highlightedIdx = (highlightedIdx + 1) % items.length
+            highlightItem(highlightedIdx)
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault()
+            highlightedIdx = highlightedIdx <= 0 ? items.length - 1 : highlightedIdx - 1
+            highlightItem(highlightedIdx)
+        } else if (e.key === 'Enter') {
+            e.preventDefault()
+            const idx = highlightedIdx >= 0 ? highlightedIdx : 0
+            selectCity(items[idx])
+        } else if (e.key === 'Escape') {
+            resultsDiv.style.display = 'none'
+            highlightedIdx = -1
+        }
+    })
+
+    resultsDiv.addEventListener('click', e => {
+        selectCity(e.target.closest('div'))
+    })
+    document.addEventListener('click', e => {
+        if (!e.target.closest('#search-container')) {
+            resultsDiv.style.display = 'none'
+            highlightedIdx = -1
+        }
+    })
 
     const update = () => {
         getHexData().then(x=>{
