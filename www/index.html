@@ -19,6 +19,7 @@
     transition: flex-basis 0.2s ease;
     display: flex;
     flex-direction: column;
+    position: relative;
 }
 #cartogram {
     flex: 1;
@@ -33,22 +34,33 @@
 body.pane-open #side-pane {
     flex: 0 0 50%;
 }
-#toggle-pane {
+body.pane-full #side-pane {
+    flex: 0 0 100%;
+}
+body.pane-full #map {
+    display: none;
+}
+#rightExpand, #leftExpand {
     position: absolute;
     top: 0.5em;
-    left: 0.5em;
     z-index: 2;
     width: 1.8em;
     height: 1.8em;
     border: 1px solid rgba(0, 0, 0, 0.2);
     border-radius: 0.25em;
-    background: rgba(255, 255, 255, 0.9);
+    background: #fff;
     cursor: pointer;
     font: 14px/1 sans-serif;
     padding: 0;
 }
-#toggle-pane:hover {
-    background: #fff;
+#rightExpand:hover, #leftExpand:hover {
+    background: #f5f5f5;
+}
+#rightExpand {
+    right: 0.5em;
+}
+#leftExpand {
+    left: 0.5em;
 }
 @media (orientation: landscape) {
     #layout { flex-direction: row; }
@@ -106,13 +118,13 @@ body.pane-open #side-pane {
 #city-results div.highlighted {
     background: #f0f0f0;
 }
-#side-pane, #toggle-pane {
+#side-pane, #leftExpand {
     display: none;
 }
 body.cartogram-ready #side-pane {
     display: flex;
 }
-body.cartogram-ready #toggle-pane {
+body.cartogram-ready #leftExpand {
     display: block;
 }
 .cartogram-tooltip {
@@ -142,9 +154,9 @@ body.cartogram-ready #toggle-pane {
     </head>
     <body>
         <div id="layout">
-            <aside id="side-pane"><div id="cartogram"></div></aside>
+            <aside id="side-pane"><button id="rightExpand" type="button" aria-label="Expand side pane to full">›</button><div id="cartogram"></div></aside>
             <div id="map">
-                <button id="toggle-pane" type="button" aria-label="Close side pane">‹</button>
+                <button id="leftExpand" type="button" aria-label="Close side pane">‹</button>
                 <div id="search-container">
                     <input type="text" id="city-search" placeholder="Jump to a city..." autocomplete="off" />
                     <div id="city-results"></div>

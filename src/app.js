@@ -190,17 +190,29 @@ const map = new maplibregl.Map({
 
 window.m = map
 
-const toggleBtn = document.getElementById('toggle-pane')
+const leftExpand = document.getElementById('leftExpand')
+const rightExpand = document.getElementById('rightExpand')
 const mql = window.matchMedia('(orientation: portrait)')
 const isPortrait = () => mql.matches
 const setPane = (open) => {
     document.body.classList.toggle('pane-open', open)
-    toggleBtn.textContent = isPortrait() ? (open ? '˄' : '˅') : (open ? '‹' : '›')
-    toggleBtn.setAttribute('aria-label', open ? 'Close side pane' : 'Open side pane')
+    if (!open) document.body.classList.remove('pane-full')
+    leftExpand.textContent = isPortrait() ? (open ? '˄' : '˅') : (open ? '‹' : '›')
+    leftExpand.setAttribute('aria-label', open ? 'Close side pane' : 'Open side pane')
+    requestAnimationFrame(() => map.resize())
+}
+const setFull = (full) => {
+    document.body.classList.toggle('pane-full', full)
+    if (full) document.body.classList.add('pane-open')
+    rightExpand.textContent = isPortrait() ? (full ? '˄' : '˅') : (full ? '‹' : '›')
+    rightExpand.setAttribute('aria-label', full ? 'Collapse side pane' : 'Expand side pane to full')
     requestAnimationFrame(() => map.resize())
 }
 setPane(true)
-toggleBtn.addEventListener('click', () => setPane(!document.body.classList.contains('pane-open')))
+rightExpand.textContent = isPortrait() ? '˅' : '›'
+rightExpand.setAttribute('aria-label', 'Expand side pane to full')
+leftExpand.addEventListener('click', () => setPane(!document.body.classList.contains('pane-open')))
+rightExpand.addEventListener('click', () => setFull(!document.body.classList.contains('pane-full')))
 mql.addEventListener('change', () => setPane(document.body.classList.contains('pane-open')))
 window.addEventListener('resize', () => map.resize())
 window.addEventListener('orientationchange', () => map.resize())
