@@ -169,14 +169,14 @@ const FORMATS = {
     geojson: {kind: 'row',            layer: 'geojson'},
 }
 
-//const STYLE = "http://localhost:1983/toner_ofm_moderatlist.json"
-const STYLE = {version: 8, sources: {
-    basemap: {type: 'geojson', data: 'ne_basemap/basemap.geojson'}
-}, layers: [
-    {id: 'background', type: 'background', paint: {'background-color': '#e8f4f8'}},
-    //{id: 'basemap-fill', type: 'fill', source: 'basemap', paint: {'fill-color': '#f5f5f5'}},
-    {id: 'basemap-outline', type: 'line', source: 'basemap', paint: {'line-color': '#000', 'line-width': 2}},
-], glyphs: 'https://fonts.openmaptiles.org/{fontstack}/{range}.pbf'}
+const STYLE = "./toner_ofm_moderatlist.json"
+//const STYLE = {version: 8, sources: {
+//    basemap: {type: 'geojson', data: 'ne_basemap/basemap.geojson'}
+//}, layers: [
+//    {id: 'background', type: 'background', paint: {'background-color': '#e8f4f8'}},
+//    //{id: 'basemap-fill', type: 'fill', source: 'basemap', paint: {'fill-color': '#f5f5f5'}},
+//    {id: 'basemap-outline', type: 'line', source: 'basemap', paint: {'line-color': '#000', 'line-width': 2}},
+//], glyphs: 'https://fonts.openmaptiles.org/{fontstack}/{range}.pbf'}
 
 const start_pos = {...{x: 0.45, y: 51.47, z: 4}, ...Object.fromEntries(new URLSearchParams(window.location.hash.slice(1)))}
 const map = new maplibregl.Map({
