@@ -457,7 +457,7 @@ function bootstrap(meta = {}){
         humanMoved = true
         const pos = map.getCenter()
         const z = map.getZoom()
-        window.location.hash = `x=${pos.lng.toFixed(4)}&y=${pos.lat.toFixed(4)}&z=${z.toFixed(4)}`
+        history.replaceState(null, '', `#x=${pos.lng.toFixed(4)}&y=${pos.lat.toFixed(4)}&z=${z.toFixed(4)}`)
     })
 
     function ecdf(array, trimFactor=0.01, weights=null) {
