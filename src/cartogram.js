@@ -19,7 +19,7 @@ export function render_cartogram(container, data, options = {}) {
         
         // label styling
         font_size = 8,
-        font_face = "Iosevka", // todo: remember how fallbacks work for this
+        font_face = "Iosevka, monospace",
         text_color = "black",
         
         // data
