@@ -236,6 +236,10 @@ export function render_cartogram(container, data, options = {}) {
             .attr("font-size", `${font_size}px`)
             .attr("font-family", font_face)
             .attr("fill", text_color)
+            .attr("stroke", "white")
+            .attr("stroke-width", "2")
+            .attr("stroke-linejoin", "round")
+            .attr("paint-order", "stroke fill")
             .text(i => labelCol[i])
             .style("pointer-events", "none")
     }
