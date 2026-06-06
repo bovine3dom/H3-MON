@@ -395,6 +395,9 @@ function bootstrap(meta = {}){
                     cartoDataCol = result.meanCol
                     enhancedTable.delete()
                 } else if (h3res > cartoRes) {
+                    // hmm so currently we do data h3 cell -> parent -> aggregate
+                    // but if we did cartogram h3 cells -> children -> join -> aggregate, we could have default values for missing h3 in the data
+                    // 0 would probably make sense as a default but null/missing would be good to have as an option in the metadata
                     dataCols.parent = dataCols.index.map(h => cellToParent(h, cartoRes))
 
                     const aggExpr = {}
