@@ -214,6 +214,19 @@ rightExpand.setAttribute('aria-label', 'Expand side pane to full')
 leftExpand.addEventListener('click', () => setPane(!document.body.classList.contains('pane-open')))
 rightExpand.addEventListener('click', () => setFull(!document.body.classList.contains('pane-full')))
 mql.addEventListener('change', () => setPane(document.body.classList.contains('pane-open')))
+
+const helpBtn = document.getElementById('helpBtn')
+const helpPopup = document.getElementById('helpPopup')
+const helpClose = document.getElementById('helpClose')
+helpBtn.addEventListener('click', () => {
+    helpPopup.classList.toggle('open')
+})
+helpClose.addEventListener('click', () => helpPopup.classList.remove('open'))
+document.addEventListener('click', (e) => {
+    if (!helpPopup.classList.contains('open')) return
+    if (helpPopup.contains(e.target) || helpBtn.contains(e.target)) return
+    helpPopup.classList.remove('open')
+})
 window.addEventListener('resize', () => map.resize())
 window.addEventListener('orientationchange', () => map.resize())
 

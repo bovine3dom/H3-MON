@@ -4,6 +4,17 @@
         <meta charset='UTF-8' />
         <title>H3-MON: THE MOST POWERFUL MON(itor) IN THE UNIVERSE</title>
         <style>
+:root {
+    --btn-border: 1px solid rgba(0,0,0,0.2);
+    --btn-radius: 0.25em;
+    --btn-bg: #fff;
+    --btn-hover: #f5f5f5;
+    --btn-size: 1.8em;
+    --btn-font: 14px/1 sans-serif;
+    --search-border: 1px solid #ccc;
+    --search-radius: 4px;
+    --search-shadow: 0 2px 4px rgba(0,0,0,0.2);
+}
 #layout {
     position: fixed;
     top: 0;
@@ -21,15 +32,15 @@
     flex-direction: column;
     position: relative;
 }
-#cartogram {
-    flex: 1;
-    min-height: 0;
-}
 #map {
     flex: 1 1 auto;
     min-width: 0;
     min-height: 0;
     position: relative;
+}
+#cartogram {
+    flex: 1;
+    min-height: 0;
 }
 body.pane-open #side-pane {
     flex: 0 0 50%;
@@ -40,27 +51,73 @@ body.pane-full #side-pane {
 body.pane-full #map {
     display: none;
 }
-#rightExpand, #leftExpand {
+.pane-btn {
     position: absolute;
     top: 0.5em;
     z-index: 2;
-    width: 1.8em;
-    height: 1.8em;
-    border: 1px solid rgba(0, 0, 0, 0.2);
-    border-radius: 0.25em;
-    background: #fff;
+    width: var(--btn-size);
+    height: var(--btn-size);
+    border: var(--btn-border);
+    border-radius: var(--btn-radius);
+    background: var(--btn-bg);
     cursor: pointer;
-    font: 14px/1 sans-serif;
+    font: var(--btn-font);
     padding: 0;
 }
-#rightExpand:hover, #leftExpand:hover {
-    background: #f5f5f5;
+.pane-btn:hover {
+    background: var(--btn-hover);
 }
 #rightExpand {
     right: 0.5em;
 }
 #leftExpand {
     left: 0.5em;
+}
+#helpBtn {
+    left: 0.5em;
+    font-weight: bold;
+}
+.help-popup {
+    display: none;
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 10;
+    background: rgb(255,255,255);
+    padding: 3em 3em 3em;
+    font-family: sans-serif;
+    font-size: 13px;
+    line-height: 1.6;
+    overflow-y: auto;
+    max-width: 350px;
+    text-align: justify;
+    hyphens: auto;
+}
+.help-popup.open {
+    display: block;
+}
+.help-popup p {
+    margin: 0 0 1em;
+}
+#helpClose {
+    position: absolute;
+    top: 0.5em;
+    right: 0.5em;
+    width: var(--btn-size);
+    height: var(--btn-size);
+    border: none;
+    border-radius: var(--btn-radius);
+    background: none;
+    cursor: pointer;
+    font: 18px/1 sans-serif;
+    padding: 0;
+    color: #666;
+}
+#helpClose:hover {
+    background: rgba(0,0,0,0.05);
+    color: #000;
 }
 @media (orientation: landscape) {
     #layout { flex-direction: row; }
@@ -79,7 +136,7 @@ body.pane-full #map {
     color: rgba(0, 0, 0, 0.6);
     bottom: 0;
     right: 0;
-    font-family: "Helvetica Neue", "sans-serif";
+    font-family: "Helvetica Neue", sans-serif;
     text-align: right;
     font-size: 8pt;
     border-radius: 0px;
@@ -90,23 +147,23 @@ body.pane-full #map {
     z-index: 1;
     top: 10px;
     right: 10px;
-    font-family: "Helvetica Neue", "sans-serif";
+    font-family: "Helvetica Neue", sans-serif;
 }
 #city-search {
     width: 250px;
     padding: 8px 12px;
-    border: 1px solid #ccc;
-    border-radius: 4px;
+    border: var(--search-border);
+    border-radius: var(--search-radius);
     font-size: 14px;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+    box-shadow: var(--search-shadow);
 }
 #city-results {
     background: white;
-    border: 1px solid #ccc;
-    border-radius: 4px;
+    border: var(--search-border);
+    border-radius: var(--search-radius);
     max-height: 300px;
     overflow-y: auto;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+    box-shadow: var(--search-shadow);
     display: none;
 }
 #city-results div {
@@ -154,9 +211,25 @@ body.cartogram-ready #leftExpand {
     </head>
     <body>
         <div id="layout">
-            <aside id="side-pane"><button id="rightExpand" type="button" aria-label="Expand side pane to full">›</button><div id="cartogram"></div></aside>
+            <aside id="side-pane">
+                <button id="helpBtn" class="pane-btn" type="button" aria-label="What is a cartogram?">?</button>
+                <div id="helpPopup" class="help-popup">
+                    <h2>What is this?</h2>
+                    <p>This is a web app for visualising spatial data spatially and as humans experience it. It can simultanously display cartograms and geograhic maps.</p>
+                    <p>A cartogram is a map where the size of each cell is proportional to a variable (e.g. population) rather than its geographic area.</p>
+                    <p>Here, we have a population cartogram where the cells have been paired with physical locations using a matching algorithm such that each cell has roughly equal population (around 150k) while preserving the spatial coherence of the locations as far as possible.</p>
+                    <p>Each cell is coloured according to the data displayed on the right hand side, aggregated by the weighted mean of the hexagonal cells according to the contribution of each hexagon to the total population of the cartogram cell.</p>
+                    <p>All that is a complicated way of saying that the left hand side of this page displays data as experienced by people, and the right hand side displays the same data as experienced by land.</p>
+                    <p>The mapping between the cartogram and geographic map can be counter-intuitive, but you can see exactly which geographic cells contribute to which cartogram cells, and vice versa, by clicking on them.</p>
+                    <p>The original cartogram was created by Max Roser for <a href="https://archive.ourworldindata.org/20260518-083815/world-population-cartogram.html">Our World in Data</a>; our routines for matching between the cartogram and geographic locations can be found on <a href="https://github.com/bovine3dom/population-cartogram-projection/">GitHub</a> alongside the <a href="https://github.com/bovine3dom/H3-MON">source code for this application.</a></p>
+                    <p>Both the cartogram matching and this app itself were made by bovine3dom, who can usually be found hanging out on <a href="https://masto.ai/@bovine3dom">Mastodon</a>.</p>
+                    <button id="helpClose" type="button" aria-label="Close">×</button>
+                </div>
+                <button id="rightExpand" class="pane-btn" type="button" aria-label="Expand side pane to full">›</button>
+                <div id="cartogram"></div>
+            </aside>
             <div id="map">
-                <button id="leftExpand" type="button" aria-label="Close side pane">‹</button>
+                <button id="leftExpand" class="pane-btn" type="button" aria-label="Close side pane">‹</button>
                 <div id="search-container">
                     <input type="text" id="city-search" placeholder="Jump to a city..." autocomplete="off" />
                     <div id="city-results"></div>
