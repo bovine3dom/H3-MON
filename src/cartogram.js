@@ -231,6 +231,7 @@ export function render_cartogram(container, data, options = {}) {
             .attr("class", "label")
             .attr("x", i => getX(xCol[i]))
             .attr("y", i => getY(yCol[i]))
+            .attr("transform", i => `rotate(${(Math.random() * 90) - 45}, ${getX(xCol[i])}, ${getY(yCol[i])})`)
             .attr("text-anchor", "middle")
             .attr("dominant-baseline", "central")
             .attr("font-size", `${font_size}px`)
