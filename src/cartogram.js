@@ -25,7 +25,7 @@ export function render_cartogram(container, data, options = {}) {
         // data
         data_col = 'code',
         
-        get_color = (z) => d3.scaleSequential(d3.interpolateSpectral).domain([0,1])(z),
+        get_color = (z) => d3.scaleSequential(d3.interpolateSpectral).domain([0,1])(z) ?? 'rgba(255,255,255,0)',
         onclick_callback = console.log,
         onmove_callback = () => {},
     } = options

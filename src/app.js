@@ -370,7 +370,7 @@ function bootstrap(meta = {}){
                 let cartoDataCol = null
 
                 async function groupCartogram(sourceTable) {
-                    const joinedTable = await worker.join(cartogram_table, sourceTable, 'index')
+                    const joinedTable = await worker.join(cartogram_table, sourceTable, 'index', {join_type: 'left'})
                     const meanCol = valuekey === 'quantile' ? 'quantile_mean' : 'value_mean'
                     const expressions = {'_code': '"code"/1000'}
                     const aggregates = {'_code': 'dominant', 'label': 'dominant', 'x': 'first', 'y': 'first', 'index': 'join'}
