@@ -7,7 +7,7 @@ import {ParquetWasmLoader} from '@loaders.gl/parquet'
 import {load} from '@loaders.gl/core'
 import maplibregl from 'maplibre-gl'
 import * as d3 from 'd3'
-import {cellToBoundary, cellToLatLng, latLngToCell, getResolution, cellToParent} from 'h3-js'
+import {cellToBoundary, cellToLatLng, latLngToCell, getResolution, cellToParent, cellToChildren} from 'h3-js'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import * as observablehq from './vendor/observablehq' // from https://observablehq.com/@d3/color-legend
 import {getCitiesStartsWith} from 'tiny-geocoder'
@@ -370,12 +370,13 @@ function bootstrap(meta = {}){
                 let cartoDataCol = null
 
                 async function groupCartogram(sourceTable) {
+                    const defaultValue = settings.defaultValue ?? null // in metadata json, specify defaultValue for missing data aggregation into cartogram
                     const joinedTable = await worker.join(cartogram_table, sourceTable, 'index', {join_type: 'left'})
                     const meanCol = valuekey === 'quantile' ? 'quantile_mean' : 'value_mean'
                     const expressions = {'_code': '"code"/1000'}
                     const aggregates = {'_code': 'dominant', 'label': 'dominant', 'x': 'first', 'y': 'first', 'index': 'join'}
                     const columns = ['x', 'y', '_code', 'label', 'index' ]
-                    expressions[meanCol] = `"${valuekey}"`
+                    expressions[meanCol] = `coalesce("${valuekey}", float(${defaultValue}))`
                     aggregates[meanCol] = ['weighted mean', ['weight_mean']] // syntax: {aggegates: {value_col: ['weighted mean', ['weight_col']]}}
                     columns.push(meanCol)
 
@@ -395,38 +396,33 @@ function bootstrap(meta = {}){
                     cartoDataCol = result.meanCol
                     enhancedTable.delete()
                 } else if (h3res > cartoRes) {
-                    // hmm so currently we do data h3 cell -> parent -> aggregate
-                    // but if we did cartogram h3 cells -> children -> join -> aggregate, we could have default values for missing h3 in the data
-                    // 0 would probably make sense as a default but null/missing would be good to have as an option in the metadata
-                    dataCols.parent = dataCols.index.map(h => cellToParent(h, cartoRes))
-
-                    const aggExpr = {}
-                    const aggAgg = {'parent': 'first'}
-                    const aggCols2 = ['parent']
-                    const parentMeanCol = valuekey === 'quantile' ? 'quantile_mean' : 'value_mean'
-
-                    // todo: support weights for the data (not the cartogram) again :(
-                    // if (hasWeight) {
-                    //     aggExpr[parentMeanCol] = `"weight" * "${valuekey}"`
-                    // } else {
-                    aggExpr[parentMeanCol] = `"${valuekey}"`
-                    // }
-                    aggAgg[parentMeanCol] = 'mean'
-                    aggCols2.push(parentMeanCol)
-
-                    const parentTable = await worker.table(dataCols)
-                    const groupView = await parentTable.view({expressions: aggExpr, columns: aggCols2, aggregates: aggAgg, group_by: ['parent'], group_rollup_mode: 'flat'})
+                    const defaultValue = settings.defaultValue ?? null // in metadata json, specify defaultValue for missing data aggregation into cartogram
+                    const cartoH3s = Array.from(h3toXY.keys())
+                    const childPairs = cartoH3s.flatMap(h =>
+                        cellToChildren(h, h3res).map(child => ({child, cartoH3: h}))
+                    )
+                    const childTable = await worker.table(childPairs)
+                    const dataSubset = {child: dataCols.index, [valuekey]: dataCols[valuekey]}
+                    const dataTable = await worker.table(dataSubset)
+                    const joined = await worker.join(childTable, dataTable, 'child', {join_type: 'left'})
+                    const fillExpr = {["_" + valuekey]: `coalesce("${valuekey}", float(${defaultValue}))`}
+                    const groupView = await joined.view({
+                        expressions: fillExpr,
+                        columns: ['cartoH3', "_" + valuekey],
+                        aggregates: {["_" + valuekey]: 'mean', "cartoH3": 'first'},
+                        group_by: ['cartoH3'],
+                        group_rollup_mode: 'flat'
+                    })
                     const grouped = await groupView.to_columns()
-                    grouped[valuekey] = grouped[parentMeanCol]
-                    delete grouped[parentMeanCol]
                     groupView.delete()
-                    parentTable.delete()
-
+                    joined.delete()
+                    childTable.delete()
+                    dataTable.delete()
                     delete grouped.__ROW_PATH__
-                    grouped.index = grouped.parent
-                    delete grouped.parent
-                    delete dataCols.parent
-
+                    grouped.index = grouped.cartoH3
+                    delete grouped.cartoH3
+                    grouped[valuekey] = grouped["_" + valuekey]
+                    delete grouped["_" + valuekey]
                     const enhancedTable = await worker.table(grouped)
                     const result = await groupCartogram(enhancedTable)
                     cartoAggCols = result.aggCols
