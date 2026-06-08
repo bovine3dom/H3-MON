@@ -434,6 +434,7 @@ function bootstrap(meta = {}){
                     if (!cartogramApi) {
                         cartogramApi = render_cartogram('#cartogram', cartoAggCols, {
                             draw_outline: false,
+                            get_color: z => colourRamp(z) ?? 'rgba(255,255,255,0)',
                             include_outer_borders: true,
                             data_col: cartoDataCol,
                             onclick_callback: (data, event, i) => {
