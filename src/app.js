@@ -328,9 +328,7 @@ function bootstrap(meta = {}){
             const schema = await userTable.schema()
 
             const hasWeight = schema.hasOwnProperty('weight')
-            const viewCols = ['index', 'value']
-            if (hasWeight) viewCols.push('weight')
-            const dataView = await userTable.view({columns: viewCols})
+            const dataView = await userTable.view()
             const dataCols = await dataView.to_columns()
             dataView.delete()
 
