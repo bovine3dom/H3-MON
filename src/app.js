@@ -792,30 +792,23 @@ function bootstrap(meta = {}){
     }
 
 
-    try {
-        const socket = new WebSocket(`ws://${window.location.hostname}:1990`)
-        socket.addEventListener("open", (event) => {
-            socket.send("ping")
-            socket.send(`watch:${file_name}`)
-        })
-        // Update whenever you get a message (even if the message is "do not update")
-        // nb: this means that the "pong" message is important
-        socket.addEventListener("message", (event) => {
-            console.log("Message from server:", event.data)
-            if (event.data.startsWith("change") || event.data.startsWith("watching")) {
-                setTimeout(update, 100) // give file some time to be written
-            }
-        })
-    } catch (e) {
-        // // fall back to polling
-        // // not sure i actually want to do this, it seems like a bad idea
-        // console.log("Warning: websocket failed " + e + ", falling back to poll")
-        // const update2 = () => {
-        //     update()
-        //     return setTimeout(update2, 5000)
-        // }
-        // update2()
-    }
+    const socket = new WebSocket(`ws://${window.location.hostname}:1990`)
+    socket.addEventListener("error", (event) => {
+        console.warn("WebSocket error, automatic updates disabled")
+        update()
+    })
+    socket.addEventListener("open", (event) => {
+        socket.send("ping")
+        socket.send(`watch:${file_name}`)
+    })
+    // Update whenever you get a message (even if the message is "do not update")
+    // nb: this means that the "pong" message is important
+    socket.addEventListener("message", (event) => {
+        console.log("Message from server:", event.data)
+        if (event.data.startsWith("change") || event.data.startsWith("watching")) {
+            setTimeout(update, 100) // give file some time to be written
+        }
+    })
 
     map.on('moveend', () => {
         humanMoved = true
