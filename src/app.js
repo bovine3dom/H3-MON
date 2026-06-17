@@ -876,9 +876,18 @@ function bootstrap(meta = {}){
     })
 
     function ecdf(array, trimFactor=0.01, weights=null) {
-        const sampleSize = Math.min(8192, array.length)
-        const indices = Array.from({length: sampleSize}, () => Math.floor(Math.random()*array.length))
-        const pairs = indices.map(i => [array[i], weights ? weights[i] : 1])
+        const valid = []
+        const validWeights = []
+        for (let i = 0; i < array.length; i++) {
+            if (array[i] != null) {
+                valid.push(array[i])
+                if (weights) validWeights.push(weights[i])
+            }
+        }
+        const sampleSize = Math.min(8192, valid.length)
+        if (sampleSize === 0) return [() => null, () => null]
+        const indices = Array.from({length: sampleSize}, () => Math.floor(Math.random()*valid.length))
+        const pairs = indices.map(i => [valid[i], validWeights.length ? validWeights[i] : 1])
         pairs.sort((a, b) => a[0] - b[0])
         const mini_array = pairs.map(([v]) => v)
         const sortedWeights = pairs.map(([, w]) => w)
@@ -886,6 +895,6 @@ function bootstrap(meta = {}){
         const totalW = sortedWeights.reduce((s, w) => s + w, 0)
         const quantile = sortedWeights.map(w => { cumW += w; return cumW / totalW })
         
-        return [target => quantile[mini_array.findIndex(v => v > target)] ?? 1, target => (mini_array[quantile.findIndex(v => Math.min(Math.max(trimFactor,v),1-trimFactor) > target)] ?? mini_array.slice(-1)[0])]
+        return [target => target == null ? null : quantile[mini_array.findIndex(v => v > target)] ?? 1, target => target == null ? null : (mini_array[quantile.findIndex(v => Math.min(Math.max(trimFactor,v),1-trimFactor) > target)] ?? mini_array.slice(-1)[0])]
     }
 }
