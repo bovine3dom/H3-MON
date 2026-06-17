@@ -319,6 +319,7 @@ function bootstrap(meta = {}){
 
         const doQuantiles = settings.raw == undefined
         const trimFactor = settings.trimFactor ? settings.trimFactor : 0.01
+        const useCartogramQuantiles = settings.quantileSource === 'cartogram'
 
         if (format.layer === 'hex' && (ext === 'arrow' || ext === 'csv')) {
             const {worker, cartogram_table} = await cartogramInit
@@ -341,24 +342,28 @@ function bootstrap(meta = {}){
             let valuekey = 'value'
             let getvalueFn
 
-            if (doQuantiles) {
+            if (doQuantiles && !useCartogramQuantiles) {
                 const [getquantile, getvalue] = ecdf(values, trimFactor, weights)
                 getvalueFn = getvalue
                 dataCols.quantile = values.map(v => getquantile(v))
                 valuekey = 'quantile'
                 makeLegend(getvalueFn)
-            } else {
+            } else if (!doQuantiles) {
                 makeLegend()
             }
 
             window._columnData = dataCols
             window.raw_data = dataCols
-            const accessors = hexAccessors('column', 'index', valuekey, getColour)
-            const dataWrap = {src: dataCols, length: dataCols.value.length}
-            const deckLayer = new H3HexagonLayer({
-                id: 'H3HexagonLayer', data: dataWrap,
-                extruded: false, stroked: false, ...accessors, elevationScale: 20, pickable: true
-            })
+            let deckLayer
+
+            if (!useCartogramQuantiles || !doQuantiles) {
+                const accessors = hexAccessors('column', 'index', valuekey, getColour)
+                const dataWrap = {src: dataCols, length: dataCols.value.length}
+                deckLayer = new H3HexagonLayer({
+                    id: 'H3HexagonLayer', data: dataWrap,
+                    extruded: false, stroked: false, ...accessors, elevationScale: 20, pickable: true
+                })
+            }
 
             if (schema.hasOwnProperty('index')) {
                 const firstIndex = dataCols.index[0]
@@ -429,6 +434,17 @@ function bootstrap(meta = {}){
                 }
 
                 if (cartoAggCols) {
+                    if (useCartogramQuantiles && doQuantiles) {
+                        const cartoValues = cartoAggCols[cartoDataCol]
+                        const [getquantile, getvalue] = ecdf(cartoValues, trimFactor)
+                        getvalueFn = getvalue
+                        dataCols.quantile = values.map(v => getquantile(v))
+                        cartoAggCols['carto_quantile'] = cartoValues.map(v => getquantile(v))
+                        cartoDataCol = 'carto_quantile'
+                        valuekey = 'quantile'
+                        makeLegend(getvalueFn)
+                    }
+
                     if (!cartogramApi) {
                         cartogramApi = render_cartogram('#cartogram', cartoAggCols, {
                             draw_outline: false,
@@ -463,6 +479,23 @@ function bootstrap(meta = {}){
                     }
                     document.body.classList.add('cartogram-ready')
                 }
+            }
+
+            if (!cartoAggCols && useCartogramQuantiles && doQuantiles) {
+                const [getquantile, getvalue] = ecdf(values, trimFactor, weights)
+                getvalueFn = getvalue
+                dataCols.quantile = values.map(v => getquantile(v))
+                valuekey = 'quantile'
+                makeLegend(getvalueFn)
+            }
+
+            if (!deckLayer) {
+                const accessors = hexAccessors('column', 'index', valuekey, getColour)
+                const dataWrap = {src: dataCols, length: dataCols.value.length}
+                deckLayer = new H3HexagonLayer({
+                    id: 'H3HexagonLayer', data: dataWrap,
+                    extruded: false, stroked: false, ...accessors, elevationScale: 20, pickable: true
+                })
             }
 
             userTable.delete()
