@@ -934,8 +934,7 @@ map.on('movestart', (event) => {
     })
 })
 
-const dataParam = params.get('data') || 'out_string_quantile.arrow'
-// const dataParam = params.get('data') || 'h3_data'
+const dataParam = params.get('data') || 'h3_data'
 const dotIdx = dataParam.lastIndexOf('.')
 const ext = dotIdx >= 0 ? dataParam.slice(dotIdx + 1).toLowerCase() : 'csv'
 const format = FORMATS[ext] || FORMATS.csv
