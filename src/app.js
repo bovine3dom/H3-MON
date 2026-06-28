@@ -21,6 +21,7 @@ function flagEnabled(name) {
     return params.has(name) && !['0', 'false', 'off', 'no'].includes((params.get(name) || '').toLowerCase())
 }
 const perfEnabled = flagEnabled('perf')
+const svgPerfEnabled = flagEnabled('svgperf')
 const syncDebugEnabled = flagEnabled('sync') || perfEnabled
 function syncLog(label, details) {
     if (syncDebugEnabled) console.info(`[sync] ${label}`, details || {})
@@ -867,6 +868,7 @@ const mapContainer = map.getContainer()
 let mapGestureStarted = false
 let mapGestureMoved = false
 let mapWheelResetTimer = null
+let mapProgrammaticSyncReason = null
 
 function eventStartedInMap(event) {
     const target = event && event.target
@@ -881,6 +883,13 @@ function markMapGestureStart(event) {
 
 function clearInactiveMapGesture() {
     if (!mapGestureMoved) mapGestureStarted = false
+}
+
+function syncCartogramAfterNextMapMove(reason) {
+    hexFlyToken++
+    map.stop()
+    hex_flying = false
+    mapProgrammaticSyncReason = reason
 }
 
 mapContainer.addEventListener('pointerdown', markMapGestureStart, {capture: true, passive: true})
@@ -907,6 +916,7 @@ window.addEventListener("hashchange", () => {
     const longitude = pos.x ? pos.x : 0.45
     const latitude = pos.y ? pos.y : 51.47
     const zoom = pos.z ? pos.z : 4
+    syncCartogramAfterNextMapMove('hashchange')
     map.flyTo({
         center: [longitude, latitude],
         zoom: zoom,
@@ -1203,6 +1213,7 @@ function bootstrap(meta = {}){
                         const doneRenderCartogram = perfTimer('cartogram.render.call', {rows: cartoAggCols.x.length})
                         cartogramApi = render_cartogram('#cartogram', cartoAggCols, {
                             perf: perfEnabled,
+                            svgPerf: svgPerfEnabled,
                             debug: syncDebugEnabled,
                             draw_outline: false,
                             get_color: z => colourRamp(z) ?? 'rgba(255,255,255,0)',
@@ -1514,6 +1525,7 @@ function bootstrap(meta = {}){
         if (!div) return
         const lat = parseFloat(div.dataset.lat)
         const lng = parseFloat(div.dataset.lng)
+        syncCartogramAfterNextMapMove('city-search')
         map.flyTo({center: [lng, lat], zoom: 7})
         searchInput.value = div.textContent
         resultsDiv.style.display = 'none'
@@ -1735,9 +1747,11 @@ function bootstrap(meta = {}){
     map.on('moveend', (event) => {
         const original = event && event.originalEvent
         const originalInMap = eventStartedInMap(original)
-        const shouldSyncCartogram = mapGestureMoved || originalInMap
+        const programmaticSyncReason = mapProgrammaticSyncReason
+        const shouldSyncCartogram = mapGestureMoved || originalInMap || !!programmaticSyncReason
         mapGestureStarted = false
         mapGestureMoved = false
+        mapProgrammaticSyncReason = null
         clearTimeout(mapWheelResetTimer)
         humanMoved = true
         const pos = map.getCenter()
@@ -1746,6 +1760,7 @@ function bootstrap(meta = {}){
         syncLog('map.moveend', {
             originalEventType: original ? original.type : null,
             originalInMap,
+            programmaticSyncReason,
             shouldSyncCartogram,
             hex_flying,
             center: {lng: pos.lng, lat: pos.lat},

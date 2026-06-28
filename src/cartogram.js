@@ -25,6 +25,7 @@ export function render_cartogram(container, data, options = {}) {
         // data
         data_col = 'code',
         perf = false,
+        svgPerf = false,
         debug = false,
         
         get_color = (z) => d3.scaleSequential(d3.interpolateSpectral).domain([0,1])(z) ?? 'rgba(255,255,255,0)',
@@ -48,6 +49,9 @@ export function render_cartogram(container, data, options = {}) {
     }
     function debugLog(label, details) {
         if (debug) console.info(`[sync] cartogram.${label}`, details || {})
+    }
+    function svgPerfLog(label, details) {
+        if (svgPerf) console.info(`[svgperf] cartogram.${label}`, details || {})
     }
 
     let currentData = data
@@ -102,6 +106,176 @@ export function render_cartogram(container, data, options = {}) {
     let fitToBoundsActive = false
     let cartogramGestureActive = false
     let cartogramGestureMoved = false
+    let borderNodeCount = 0
+    let borderSegmentCount = 0
+    let labelNodeCount = 0
+    let svgPerfGestureId = 0
+    let svgPerfGesture = null
+    let svgPerfFrameRaf = null
+    let pendingTransform = null
+    let transformRaf = null
+
+    function transformDetails(transform) {
+        return transform ? {x: transform.x, y: transform.y, k: transform.k} : null
+    }
+
+    function svgPerfFrame() {
+        if (!svgPerfGesture) {
+            svgPerfFrameRaf = null
+            return
+        }
+        const now = perfNow()
+        const gap = now - svgPerfGesture.lastFrameTime
+        svgPerfGesture.frameCount++
+        svgPerfGesture.frameTotalMs += gap
+        if (gap > svgPerfGesture.maxFrameGapMs) svgPerfGesture.maxFrameGapMs = gap
+        if (gap > 16.7) svgPerfGesture.frameGapsOver16ms++
+        if (gap > 32) svgPerfGesture.frameGapsOver32ms++
+        if (gap > 50) svgPerfGesture.frameGapsOver50ms++
+        svgPerfGesture.lastFrameTime = now
+        svgPerfFrameRaf = requestAnimationFrame(svgPerfFrame)
+    }
+
+    function startSvgPerfGesture(event, transform) {
+        if (!svgPerf) return
+        if (svgPerfGesture) endSvgPerfGesture({interrupted: true})
+        const now = perfNow()
+        svgPerfGesture = {
+            id: ++svgPerfGestureId,
+            startTime: now,
+            lastFrameTime: now,
+            sourceEventType: event && event.sourceEvent ? event.sourceEvent.type : null,
+            sourceEventTarget: event && event.sourceEvent && event.sourceEvent.target ? event.sourceEvent.target.tagName : null,
+            userGesture: !!(event && event.sourceEvent),
+            fitToBoundsActiveAtStart: fitToBoundsActive,
+            initialTransform: transformDetails(transform),
+            zoomEvents: 0,
+            transformWrites: 0,
+            handlerTotalMs: 0,
+            maxHandlerMs: 0,
+            frameCount: 0,
+            frameTotalMs: 0,
+            maxFrameGapMs: 0,
+            frameGapsOver16ms: 0,
+            frameGapsOver32ms: 0,
+            frameGapsOver50ms: 0,
+            tooltipEvents: {mouseenter: 0, mousemove: 0, mouseleave: 0, suppressed: 0},
+            longTasks: 0,
+            longTaskTotalMs: 0,
+            maxLongTaskMs: 0,
+        }
+        if (typeof requestAnimationFrame === 'function') svgPerfFrameRaf = requestAnimationFrame(svgPerfFrame)
+    }
+
+    function recordSvgPerfZoom(handlerMs) {
+        if (!svgPerfGesture) return
+        svgPerfGesture.zoomEvents++
+        svgPerfGesture.handlerTotalMs += handlerMs
+        if (handlerMs > svgPerfGesture.maxHandlerMs) svgPerfGesture.maxHandlerMs = handlerMs
+    }
+
+    function recordSvgPerfTooltip(kind) {
+        if (svgPerfGesture && svgPerfGesture.tooltipEvents[kind] !== undefined) svgPerfGesture.tooltipEvents[kind]++
+    }
+
+    function endSvgPerfGesture(extra = {}) {
+        if (!svgPerfGesture) return
+        const now = perfNow()
+        const gesture = svgPerfGesture
+        svgPerfGesture = null
+        if (svgPerfFrameRaf !== null && typeof cancelAnimationFrame === 'function') {
+            cancelAnimationFrame(svgPerfFrameRaf)
+            svgPerfFrameRaf = null
+        }
+        const elapsedMs = now - gesture.startTime
+        const avgFrameGapMs = gesture.frameCount ? gesture.frameTotalMs / gesture.frameCount : 0
+        svgPerfLog('gesture', {
+            id: gesture.id,
+            elapsedMs,
+            sourceEventType: gesture.sourceEventType,
+            endSourceEventType: extra.endSourceEventType || null,
+            sourceEventTarget: gesture.sourceEventTarget,
+            userGesture: gesture.userGesture,
+            fitToBoundsActiveAtStart: gesture.fitToBoundsActiveAtStart,
+            moved: extra.moved,
+            interrupted: !!extra.interrupted,
+            zoomEvents: gesture.zoomEvents,
+            transformWrites: gesture.transformWrites,
+            handlerTotalMs: gesture.handlerTotalMs,
+            avgHandlerMs: gesture.zoomEvents ? gesture.handlerTotalMs / gesture.zoomEvents : 0,
+            maxHandlerMs: gesture.maxHandlerMs,
+            frameCount: gesture.frameCount,
+            avgFrameGapMs,
+            approxFps: avgFrameGapMs ? 1000 / avgFrameGapMs : null,
+            maxFrameGapMs: gesture.maxFrameGapMs,
+            frameGapsOver16ms: gesture.frameGapsOver16ms,
+            frameGapsOver32ms: gesture.frameGapsOver32ms,
+            frameGapsOver50ms: gesture.frameGapsOver50ms,
+            tooltipEvents: gesture.tooltipEvents,
+            longTasks: gesture.longTasks,
+            longTaskTotalMs: gesture.longTaskTotalMs,
+            maxLongTaskMs: gesture.maxLongTaskMs,
+            initialTransform: gesture.initialTransform,
+            finalTransform: transformDetails(latestTransform),
+            nodes: {
+                cells: numRows,
+                borders: borderNodeCount,
+                borderSegments: borderSegmentCount,
+                labels: labelNodeCount,
+                total: 1 + 2 + numRows + borderNodeCount + labelNodeCount,
+                cellEventListeners: 0,
+                delegatedEventListeners: 4,
+            },
+        })
+    }
+
+    if (svgPerf && typeof PerformanceObserver !== 'undefined') {
+        try {
+            const observer = new PerformanceObserver((list) => {
+                if (!svgPerfGesture) return
+                for (const entry of list.getEntries()) {
+                    svgPerfGesture.longTasks++
+                    svgPerfGesture.longTaskTotalMs += entry.duration
+                    if (entry.duration > svgPerfGesture.maxLongTaskMs) svgPerfGesture.maxLongTaskMs = entry.duration
+                }
+            })
+            observer.observe({entryTypes: ['longtask']})
+        } catch (e) {
+            svgPerfLog('longtask_observer_unavailable', {message: e && e.message})
+        }
+    }
+
+    function writeTransform(transform) {
+        g.attr("transform", transform)
+        labelsG.attr("transform", transform)
+        if (svgPerfGesture) svgPerfGesture.transformWrites++
+    }
+
+    function applyPendingTransform() {
+        transformRaf = null
+        if (!pendingTransform) return
+        const transform = pendingTransform
+        pendingTransform = null
+        writeTransform(transform)
+    }
+
+    function scheduleTransform(transform) {
+        latestTransform = transform
+        pendingTransform = transform
+        if (typeof requestAnimationFrame !== 'function') {
+            applyPendingTransform()
+            return
+        }
+        if (transformRaf === null) transformRaf = requestAnimationFrame(applyPendingTransform)
+    }
+
+    function flushTransform() {
+        if (transformRaf !== null && typeof cancelAnimationFrame === 'function') {
+            cancelAnimationFrame(transformRaf)
+            transformRaf = null
+        }
+        applyPendingTransform()
+    }
 
     function visibleViewport() {
         const node = svg.node()
@@ -155,15 +329,23 @@ export function render_cartogram(container, data, options = {}) {
             const svgNode = svg.node()
             cartogramGestureActive = !!source && !!svgNode && svgNode.contains(source.target)
             cartogramGestureMoved = false
+            hideTooltip()
+            startSvgPerfGesture(e, e.transform)
         })
         .on("zoom", (e) => {
-            g.attr("transform", e.transform)
-            labelsG.attr("transform", e.transform)
-            latestTransform = e.transform
+            const handlerStart = svgPerf ? perfNow() : 0
+            scheduleTransform(e.transform)
+            if (svgPerf) recordSvgPerfZoom(perfNow() - handlerStart)
             if (fitToBoundsActive) return
             if (cartogramGestureActive && e.sourceEvent) cartogramGestureMoved = true
         })
         .on("end", (e) => {
+            flushTransform()
+            const gestureMoved = cartogramGestureMoved
+            endSvgPerfGesture({
+                endSourceEventType: e.sourceEvent ? e.sourceEvent.type : null,
+                moved: gestureMoved,
+            })
             if (!fitToBoundsActive && onmove_callback && cartogramGestureActive && cartogramGestureMoved && latestTransform) {
                 const visible = visibleIndices(latestTransform)
                 debugLog('zoom.end', {
@@ -179,9 +361,11 @@ export function render_cartogram(container, data, options = {}) {
     svg.call(zoom)
 
     const cellMap = new Map()
+    const cellKey = (x, y) => `${x},${y}`
     const doneCellMap = perfTimer('cell_map.build', {rows: numRows})
     for (let i = 0; i < numRows; i++) {
-        cellMap.set(`${xCol[i]},${yCol[i]}`, codeCol[i])
+        const key = cellKey(xCol[i], yCol[i])
+        cellMap.set(key, codeCol[i])
     }
     doneCellMap({cells: cellMap.size})
 
@@ -226,19 +410,56 @@ export function render_cartogram(container, data, options = {}) {
         return rows.join("")
     }
 
-    cells.on("click", (event, i) => onclick_callback(currentData, event, i))
-    cells.on("mouseenter", function(event, i) {
+    function cellTargetFromEvent(event) {
+        const target = event.target && event.target.closest ? event.target.closest('.cell') : null
+        const svgNode = svg.node()
+        return target && svgNode && svgNode.contains(target) ? target : null
+    }
+
+    function cellIndexFromEvent(event) {
+        const target = cellTargetFromEvent(event)
+        return target ? d3.select(target).datum() : null
+    }
+
+    function hideTooltip() {
+        tooltip.style("display", "none")
+    }
+
+    svg.on("click.cell", (event) => {
+        if (event.defaultPrevented) return
+        const i = cellIndexFromEvent(event)
+        if (i != null) onclick_callback(currentData, event, i)
+    })
+    svg.on("mouseover.cell", (event) => {
+        const target = cellTargetFromEvent(event)
+        if (!target || (event.relatedTarget && target.contains(event.relatedTarget))) return
+        if (cartogramGestureActive || fitToBoundsActive) {
+            recordSvgPerfTooltip('suppressed')
+            hideTooltip()
+            return
+        }
+        const i = d3.select(target).datum()
+        recordSvgPerfTooltip('mouseenter')
         tooltip.html(formatTooltip(i))
             .style("display", "block")
             .style("left", (event.pageX + 12) + "px")
             .style("top", (event.pageY - 12) + "px")
     })
-    .on("mousemove", function(event) {
+    svg.on("mousemove.cell", (event) => {
+        if (!cellTargetFromEvent(event)) return
+        if (cartogramGestureActive || fitToBoundsActive) {
+            recordSvgPerfTooltip('suppressed')
+            return
+        }
+        recordSvgPerfTooltip('mousemove')
         tooltip.style("left", (event.pageX + 12) + "px")
             .style("top", (event.pageY - 12) + "px")
     })
-    .on("mouseleave", function() {
-        tooltip.style("display", "none")
+    svg.on("mouseout.cell", (event) => {
+        const target = cellTargetFromEvent(event)
+        if (!target || (event.relatedTarget && target.contains(event.relatedTarget))) return
+        recordSvgPerfTooltip('mouseleave')
+        hideTooltip()
     })
 
     if (draw_country_borders) {
@@ -252,7 +473,7 @@ export function render_cartogram(container, data, options = {}) {
             const cx = getX(x)
             const cy = getY(y)
 
-            const rCode = cellMap.get(`${x + coord_step},${y}`)
+            const rCode = cellMap.get(cellKey(x + coord_step, y))
             if (rCode !== code && (include_outer_borders || rCode !== undefined)) {
                 borderLines.push({
                     x1: cx + square_size / 2, y1: cy - square_size / 2,
@@ -260,7 +481,7 @@ export function render_cartogram(container, data, options = {}) {
                 })
             }
 
-            const bCode = cellMap.get(`${x},${y + coord_step}`)
+            const bCode = cellMap.get(cellKey(x, y + coord_step))
             if (bCode !== code && (include_outer_borders || bCode !== undefined)) {
                 borderLines.push({
                     x1: cx - square_size / 2, y1: cy + square_size / 2,
@@ -269,13 +490,13 @@ export function render_cartogram(container, data, options = {}) {
             }
 
             if (include_outer_borders) {
-                if (cellMap.get(`${x - coord_step},${y}`) === undefined) {
+                if (cellMap.get(cellKey(x - coord_step, y)) === undefined) {
                     borderLines.push({
                         x1: cx - square_size / 2, y1: cy - square_size / 2,
                         x2: cx - square_size / 2, y2: cy + square_size / 2
                     })
                 }
-                if (cellMap.get(`${x},${y - coord_step}`) === undefined) {
+                if (cellMap.get(cellKey(x, y - coord_step)) === undefined) {
                     borderLines.push({
                         x1: cx - square_size / 2, y1: cy - square_size / 2,
                         x2: cx + square_size / 2, y2: cy - square_size / 2
@@ -285,15 +506,15 @@ export function render_cartogram(container, data, options = {}) {
         }
 
         g.selectAll(".country-border")
-            .data(borderLines)
-            .join("line")
+            .data(borderLines.length ? [borderLines] : [])
+            .join("path")
             .attr("class", "country-border")
-            .attr("x1", d => d.x1)
-            .attr("y1", d => d.y1)
-            .attr("x2", d => d.x2)
-            .attr("y2", d => d.y2)
+            .attr("d", lines => lines.map(d => `M${d.x1},${d.y1}L${d.x2},${d.y2}`).join(''))
+            .attr("fill", "none")
             .attr("stroke", country_border_color)
             .attr("stroke-width", country_border_width)
+        borderSegmentCount = borderLines.length
+        borderNodeCount = borderLines.length ? 1 : 0
         doneBorders({borders: borderLines.length})
     }
 
@@ -322,10 +543,20 @@ export function render_cartogram(container, data, options = {}) {
             .attr("paint-order", "stroke fill")
             .text(i => labelCol[i])
             .style("pointer-events", "none")
+        labelNodeCount = labeledIndices.length
         doneLabels({labels: labeledIndices.length})
     }
 
     doneRender()
+    svgPerfLog('nodes', {
+        cells: numRows,
+        borders: borderNodeCount,
+        borderSegments: borderSegmentCount,
+        labels: labelNodeCount,
+        total: 1 + 2 + numRows + borderNodeCount + labelNodeCount,
+        cellEventListeners: 0,
+        delegatedEventListeners: 4,
+    })
 
     return {
         updateData: (newData, newDataCol) => {
@@ -343,8 +574,9 @@ export function render_cartogram(container, data, options = {}) {
         },
         highlightCells: (indices) => {
             const doneHighlight = perfTimer('highlight_cells', {rows: numRows, highlighted: indices.length})
-            cells.attr("stroke", i => indices.includes(i) ? "orange" : (draw_outline ? outline_color : "none"))
-                .attr("stroke-width", i => indices.includes(i) ? 1 : (draw_outline ? outline_width : 0))
+            const highlighted = new Set(indices)
+            cells.attr("stroke", i => highlighted.has(i) ? "orange" : (draw_outline ? outline_color : "none"))
+                .attr("stroke-width", i => highlighted.has(i) ? 1 : (draw_outline ? outline_width : 0))
             indices.forEach(i => {
                 const node = cells.nodes()[i]
                 if (node) node.parentNode.appendChild(node)
