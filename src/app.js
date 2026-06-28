@@ -19,11 +19,287 @@ import {render_cartogram} from './cartogram'
 const params = new URLSearchParams(window.location.search)
 const perfEnabled = params.has('perf') && !['0', 'false', 'off', 'no'].includes((params.get('perf') || '').toLowerCase())
 const now = () => (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now())
+const loadProgress = {
+    root: document.getElementById('load-progress'),
+    bar: document.getElementById('load-progress-bar'),
+    label: document.getElementById('load-progress-label'),
+    percent: document.getElementById('load-progress-percent'),
+    value: 0,
+    completedWork: 0,
+    totalWork: 0,
+    active: new Map(),
+    nextTaskId: 1,
+    timer: null,
+    estimates: {},
+    complete: false,
+}
+
+const LOAD_PROGRESS_ESTIMATE_KEY = 'h3mon-load-progress-estimates-v1'
+const LOAD_PROGRESS_DEFAULTS = {
+    'cartogram.weights.fetch': 35,
+    'cartogram.weights.arrayBuffer': 1000,
+    'cartogram.weights.arrow_parse': 5,
+    'cartogram.weights.column.x': 2,
+    'cartogram.weights.column.y': 2,
+    'cartogram.weights.column.code': 2,
+    'cartogram.weights.column.weight': 2,
+    'cartogram.weights.column.weight_mean': 2,
+    'cartogram.cells.precompute': 250,
+    'data.fetch': 20,
+    'data.read_arrayBuffer': 220,
+    'data.read_text': 80,
+    'data.arrow_parse': 10,
+    'data.arrow_column.median': 2,
+    'data.arrow_column.index': 320,
+    'data.arrow_column.value': 2,
+    'data.user_table': 650,
+    'data.schema': 5,
+    'data.view': 120,
+    'data.to_columns': 450,
+    'data.quantile.ecdf': 15,
+    'data.quantile.assign': 25,
+    'cartogram.js_group.data_map': 100,
+    'cartogram.js_group.accumulate': 650,
+    'cartogram.js_group.output': 5,
+    'cartogram.child_pairs.build': 500,
+    'cartogram.child_table': 500,
+    'cartogram.child_data_table': 500,
+    'cartogram.child_join': 1000,
+    'cartogram.child_group.view': 1000,
+    'cartogram.child_group.to_columns': 300,
+    'cartogram.child_group.normalize': 50,
+    'cartogram.h3_to_xy.build': 950,
+    'cartogram.quantile.ecdf': 15,
+    'cartogram.quantile.assign_data': 25,
+    'cartogram.quantile.assign_cartogram': 10,
+    'cartogram.render.call': 750,
+    'deck.hex_layer.create': 5,
+    'deck.geojson_layer.create': 20,
+    'deck.set_layers': 5,
+    'deck.after_render': 650,
+}
+const LOAD_PROGRESS_DEFAULT_PROFILE = [
+    'cartogram.weights.fetch',
+    'cartogram.weights.arrayBuffer',
+    'cartogram.weights.arrow_parse',
+    'cartogram.weights.column.x',
+    'cartogram.weights.column.y',
+    'cartogram.weights.column.code',
+    'cartogram.weights.column.weight',
+    'cartogram.weights.column.weight_mean',
+    'cartogram.cells.precompute',
+    'data.fetch',
+    'data.read_arrayBuffer',
+    'data.arrow_parse',
+    'data.arrow_column.median',
+    'data.arrow_column.index',
+    'data.arrow_column.value',
+    'data.quantile.ecdf',
+    'data.quantile.assign',
+    'cartogram.js_group.data_map',
+    'cartogram.js_group.accumulate',
+    'cartogram.js_group.output',
+    'cartogram.h3_to_xy.build',
+    'cartogram.quantile.ecdf',
+    'cartogram.quantile.assign_data',
+    'cartogram.quantile.assign_cartogram',
+    'cartogram.render.call',
+    'deck.hex_layer.create',
+    'deck.set_layers',
+    'deck.after_render',
+]
+const LOAD_PROGRESS_LABELS = {
+    'cartogram.weights.fetch': 'Loading cartogram weights',
+    'cartogram.weights.arrayBuffer': 'Downloading cartogram weights',
+    'cartogram.weights.arrow_parse': 'Parsing cartogram weights',
+    'cartogram.weights.column.x': 'Reading cartogram coordinates',
+    'cartogram.weights.column.y': 'Reading cartogram coordinates',
+    'cartogram.weights.column.code': 'Reading cartogram borders',
+    'cartogram.weights.column.weight': 'Reading cartogram weights',
+    'cartogram.weights.column.weight_mean': 'Reading cartogram weights',
+    'cartogram.cells.precompute': 'Preparing cartogram cells',
+    'data.fetch': 'Loading data',
+    'data.read_arrayBuffer': 'Downloading data',
+    'data.read_text': 'Downloading data',
+    'data.arrow_parse': 'Parsing data',
+    'data.arrow_column.median': 'Reading data columns',
+    'data.arrow_column.index': 'Decoding H3 indexes',
+    'data.arrow_column.value': 'Reading values',
+    'data.user_table': 'Parsing data',
+    'data.schema': 'Inspecting data schema',
+    'data.view': 'Reading data table',
+    'data.to_columns': 'Converting data columns',
+    'data.quantile.ecdf': 'Calculating quantiles',
+    'data.quantile.assign': 'Assigning quantiles',
+    'cartogram.js_group.data_map': 'Indexing data by H3',
+    'cartogram.js_group.accumulate': 'Aggregating cartogram cells',
+    'cartogram.js_group.output': 'Preparing cartogram values',
+    'cartogram.child_pairs.build': 'Expanding cartogram H3 cells',
+    'cartogram.child_table': 'Preparing child H3 table',
+    'cartogram.child_data_table': 'Preparing child data table',
+    'cartogram.child_join': 'Joining child H3 cells',
+    'cartogram.child_group.view': 'Grouping child H3 cells',
+    'cartogram.child_group.to_columns': 'Reading grouped child cells',
+    'cartogram.child_group.normalize': 'Preparing grouped child cells',
+    'cartogram.h3_to_xy.build': 'Preparing map/cartogram links',
+    'cartogram.quantile.ecdf': 'Calculating cartogram quantiles',
+    'cartogram.quantile.assign_data': 'Assigning map colours',
+    'cartogram.quantile.assign_cartogram': 'Assigning cartogram colours',
+    'cartogram.render.call': 'Drawing cartogram',
+    'deck.hex_layer.create': 'Preparing map layer',
+    'deck.geojson_layer.create': 'Preparing GeoJSON layer',
+    'deck.set_layers': 'Rendering map',
+    'deck.after_render': 'Drawing H3 layer',
+}
+
+function loadProgressEstimates() {
+    try {
+        return {...LOAD_PROGRESS_DEFAULTS, ...JSON.parse(localStorage.getItem(LOAD_PROGRESS_ESTIMATE_KEY) || '{}')}
+    } catch (_) {
+        return {...LOAD_PROGRESS_DEFAULTS}
+    }
+}
+
+function saveProgressEstimate(label, elapsed) {
+    if (!LOAD_PROGRESS_DEFAULTS[label]) return
+    const old = loadProgress.estimates[label] || LOAD_PROGRESS_DEFAULTS[label]
+    loadProgress.estimates[label] = Math.max(1, old * 0.75 + elapsed * 0.25)
+    try {
+        localStorage.setItem(LOAD_PROGRESS_ESTIMATE_KEY, JSON.stringify(loadProgress.estimates))
+    } catch (_) {}
+}
+
+function configureLoadProgress(labels = LOAD_PROGRESS_DEFAULT_PROFILE) {
+    loadProgress.estimates = loadProgressEstimates()
+    loadProgress.completedWork = 0
+    loadProgress.active.clear()
+    loadProgress.totalWork = labels.reduce((sum, label) => sum + (loadProgress.estimates[label] || LOAD_PROGRESS_DEFAULTS[label] || 0), 0)
+}
+
+function nextPaint() {
+    if (typeof requestAnimationFrame === 'undefined') return Promise.resolve()
+    return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+}
+
+async function yieldToPaint(label) {
+    setLoadStage(label)
+    await nextPaint()
+}
+
+function setLoadProgress(value, label) {
+    if (!loadProgress.root) return
+    loadProgress.value = Math.max(loadProgress.value, Math.min(100, Math.max(0, value)))
+    const rounded = loadProgress.value >= 100 ? 100 : Math.floor(loadProgress.value)
+    if (label) loadProgress.label.textContent = label
+    loadProgress.percent.textContent = `${rounded}%`
+    loadProgress.bar.style.width = `${loadProgress.value}%`
+    loadProgress.root.setAttribute('aria-valuenow', String(rounded))
+    if (label) loadProgress.root.setAttribute('aria-label', label)
+    document.body.classList.remove('load-complete')
+}
+
+function setLoadStage(label) {
+    if (!loadProgress.root || !label) return
+    loadProgress.label.textContent = label
+    loadProgress.root.setAttribute('aria-label', label)
+    document.body.classList.remove('load-complete')
+}
+
+function renderLoadProgress(label) {
+    if (!loadProgress.root || !loadProgress.totalWork) return
+    const activeWork = [...loadProgress.active.values()].reduce((sum, task) => {
+        const elapsed = now() - task.startedAt
+        return sum + Math.min(task.estimate * 0.95, elapsed)
+    }, 0)
+    const value = Math.min(99, ((loadProgress.completedWork + activeWork) / loadProgress.totalWork) * 100)
+    setLoadProgress(value, label)
+}
+
+function startLoadTask(label) {
+    if (!loadProgress.root || loadProgress.complete || !LOAD_PROGRESS_LABELS[label]) return null
+    const id = loadProgress.nextTaskId++
+    const estimate = loadProgress.estimates[label] || LOAD_PROGRESS_DEFAULTS[label] || 1
+    loadProgress.active.set(id, {label, estimate, startedAt: now()})
+    setLoadStage(LOAD_PROGRESS_LABELS[label])
+    renderLoadProgress(LOAD_PROGRESS_LABELS[label])
+    if (!loadProgress.timer) {
+        loadProgress.timer = setInterval(() => renderLoadProgress(), 100)
+    }
+    return id
+}
+
+function finishLoadTask(id, elapsed) {
+    if (!id) return
+    const task = loadProgress.active.get(id)
+    if (!task) return
+    loadProgress.active.delete(id)
+    loadProgress.completedWork += task.estimate
+    saveProgressEstimate(task.label, elapsed)
+    if (loadProgress.active.size === 0 && loadProgress.timer) {
+        clearInterval(loadProgress.timer)
+        loadProgress.timer = null
+    }
+    renderLoadProgress(LOAD_PROGRESS_LABELS[task.label])
+}
+
+function resetLoadProgress(label = 'Loading…') {
+    if (!loadProgress.root) return
+    loadProgress.value = 0
+    configureLoadProgress()
+    loadProgress.complete = false
+    loadProgress.bar.style.width = '0%'
+    loadProgress.percent.textContent = '0%'
+    loadProgress.label.textContent = label
+    loadProgress.root.setAttribute('aria-valuenow', '0')
+    loadProgress.root.setAttribute('aria-label', label)
+    document.body.classList.remove('load-complete')
+}
+
+function finishLoadProgress() {
+    if (!loadProgress.root) return
+    if (loadProgress.timer) {
+        clearInterval(loadProgress.timer)
+        loadProgress.timer = null
+    }
+    loadProgress.active.clear()
+    loadProgress.completedWork = loadProgress.totalWork
+    loadProgress.complete = true
+    setLoadStage('Finishing render')
+    loadProgress.bar.style.width = '100%'
+
+    let settled = false
+    const markReady = () => {
+        if (settled) return
+        settled = true
+        loadProgress.bar.removeEventListener('transitionend', onTransitionEnd)
+        loadProgress.value = 100
+        loadProgress.percent.textContent = '100%'
+        loadProgress.label.textContent = 'Ready'
+        loadProgress.root.setAttribute('aria-valuenow', '100')
+        loadProgress.root.setAttribute('aria-label', 'Ready')
+        setTimeout(() => {
+            if (loadProgress.complete) document.body.classList.add('load-complete')
+        }, 700)
+    }
+    const onTransitionEnd = event => {
+        if (event.target === loadProgress.bar && event.propertyName === 'width') markReady()
+    }
+    loadProgress.bar.addEventListener('transitionend', onTransitionEnd)
+    setTimeout(markReady, 400)
+}
+
+async function waitWithLoadProgress(promise, label) {
+    setLoadStage(label)
+    return promise
+}
+
 function perfTimer(label, details) {
-    if (!perfEnabled) return () => {}
+    const progressTask = startLoadTask(label)
     const start = now()
     return (extra) => {
         const elapsed = now() - start
+        finishLoadTask(progressTask, elapsed)
+        if (!perfEnabled) return
         const merged = {...(details || {}), ...(extra || {})}
         if (Object.keys(merged).length) {
             console.info(`[perf] ${label}: ${elapsed.toFixed(1)}ms`, merged)
@@ -62,7 +338,10 @@ function columnLength(column) {
 async function materializeArrowColumn(table, name, labelPrefix) {
     const column = table.getChild(name)
     if (!column) return null
-    return measurePerf(`${labelPrefix}.${name}`, {rows: column.length}, () => column.toArray())
+    const label = `${labelPrefix}.${name}`
+    const estimate = loadProgress.estimates[label] || LOAD_PROGRESS_DEFAULTS[label] || 0
+    if (estimate > 50) await yieldToPaint(LOAD_PROGRESS_LABELS[label])
+    return measurePerf(label, {rows: column.length}, () => column.toArray())
 }
 
 async function materializeArrowColumns(table, names, labelPrefix) {
@@ -296,10 +575,14 @@ async function getPerspectiveWorker() {
     return worker
 }
 
+configureLoadProgress()
+
 const cartogramInit = (async () => {
     const doneInit = perfTimer('cartogram.init.total')
+    setLoadStage('Loading cartogram weights')
     const arrow_resp = await measurePerf('cartogram.weights.fetch', () => fetch('data/cartogram_weights.arrow'))
     const arrow_buf = await measurePerf('cartogram.weights.arrayBuffer', () => arrow_resp.arrayBuffer())
+    setLoadStage('Parsing cartogram weights')
     const rawTable = await parseArrowTable(arrow_buf, 'cartogram.weights.arrow_parse', {bytes: arrow_buf.byteLength})
     const rawCols = {
         x: await materializeArrowColumn(rawTable, 'x', 'cartogram.weights.column'),
@@ -312,7 +595,9 @@ const cartogramInit = (async () => {
     }
     cartoRes = getResolution(toStringValue(columnValue(rawCols.index, 0)))
     cartogramRawCols = rawCols
+    await yieldToPaint('Preparing cartogram cells')
     cartogramAgg = buildCartogramAggregation(rawCols)
+    setLoadStage('Cartogram weights ready')
     doneInit({rows: columnLength(rawCols.index), cells: cartogramAgg.x.length, cartoRes})
 
     return {}
@@ -565,6 +850,8 @@ function bootstrap(meta = {}){
     let reloadNum = 0
     const getHexData = async () => {
         const doneGetHexData = perfTimer('data.reload.total', {file: file_name, ext, layer: format.layer})
+        if (!loadProgress.totalWork) configureLoadProgress()
+        setLoadStage('Loading data')
 
         const doQuantiles = settings.raw == undefined
         const trimFactor = settings.trimFactor ? settings.trimFactor : 0.01
@@ -575,6 +862,7 @@ function bootstrap(meta = {}){
             const reload = ++reloadNum
             const resp = await measurePerf('data.fetch', {file: file_path, reload}, () => fetch(`${file_path}?v=${reload}`))
             const buf = await measurePerf(ext === 'csv' ? 'data.read_text' : 'data.read_arrayBuffer', () => ext === 'csv' ? resp.text() : resp.arrayBuffer())
+            setLoadStage('Parsing data')
             let userTable = null
             let dataCols
             let schema
@@ -591,6 +879,7 @@ function bootstrap(meta = {}){
                 dataCols = await measurePerf('data.to_columns', () => dataView.to_columns())
                 dataView.delete()
             }
+            setLoadStage('Data parsed')
 
             const hasWeight = schema.hasOwnProperty('weight')
 
@@ -606,6 +895,7 @@ function bootstrap(meta = {}){
             let getvalueFn
 
             if (doQuantiles && !useCartogramQuantiles) {
+                setLoadStage('Calculating quantiles')
                 const doneEcdf = perfTimer('data.quantile.ecdf', {rows: values.length, weighted: !!weights})
                 const [getquantile, getvalue] = ecdf(values, trimFactor, weights)
                 doneEcdf()
@@ -615,6 +905,7 @@ function bootstrap(meta = {}){
                 doneQuantileAssign()
                 valuekey = 'quantile'
                 makeLegend(getvalueFn)
+                setLoadStage('Quantiles ready')
             } else if (!doQuantiles) {
                 makeLegend()
             }
@@ -635,7 +926,8 @@ function bootstrap(meta = {}){
             }
 
             if (schema.hasOwnProperty('index')) {
-                await cartogramReady
+                await waitWithLoadProgress(cartogramReady, 'Waiting for cartogram weights')
+                await yieldToPaint('Aggregating cartogram')
                 const firstIndex = dataCols.index[0]
                 const h3res = getResolution(String(firstIndex))
 
@@ -686,7 +978,9 @@ function bootstrap(meta = {}){
                 }
 
                 if (cartoAggCols) {
+                    await yieldToPaint('Preparing map/cartogram links')
                     const h3map = await measurePerf('cartogram.h3_to_xy.await_render', () => ensureH3ToXY())
+                    setLoadStage('Preparing cartogram colours')
 
                     if (useCartogramQuantiles && doQuantiles) {
                         const cartoValues = cartoAggCols[cartoDataCol]
@@ -706,6 +1000,7 @@ function bootstrap(meta = {}){
                     }
 
                     if (!cartogramApi) {
+                        await yieldToPaint('Drawing cartogram')
                         const doneRenderCartogram = perfTimer('cartogram.render.call', {rows: cartoAggCols.x.length})
                         cartogramApi = render_cartogram('#cartogram', cartoAggCols, {
                             perf: perfEnabled,
@@ -736,18 +1031,22 @@ function bootstrap(meta = {}){
                             }))()
                         })
                         doneRenderCartogram()
+                        setLoadStage('Fitting cartogram to map')
                         fitCartogramToMapBounds(cartogramApi, h3map)
                     } else {
+                        setLoadStage('Updating cartogram')
                         const doneUpdateCartogram = perfTimer('cartogram.update.call', {rows: cartoAggCols.x.length})
                         cartogramApi.highlightCells([])
                         cartogramApi.updateData(cartoAggCols, cartoDataCol)
                         doneUpdateCartogram()
                     }
                     document.body.classList.add('cartogram-ready')
+                    setLoadStage('Rendering map')
                 }
             }
 
             if (!cartoAggCols && useCartogramQuantiles && doQuantiles) {
+                setLoadStage('Calculating map quantiles')
                 const doneEcdf = perfTimer('data.quantile.ecdf', {rows: values.length, weighted: !!weights, fallback: 'no-cartogram'})
                 const [getquantile, getvalue] = ecdf(values, trimFactor, weights)
                 doneEcdf()
@@ -760,6 +1059,7 @@ function bootstrap(meta = {}){
             }
 
             if (!deckLayer) {
+                setLoadStage('Preparing map layer')
                 const doneDeckLayer = perfTimer('deck.hex_layer.create', {rows: dataCols.value.length})
                 const accessors = hexAccessors('column', 'index', valuekey, getColour)
                 const dataWrap = {src: dataCols, length: dataCols.value.length}
@@ -785,8 +1085,10 @@ function bootstrap(meta = {}){
         }
         let raw = loaded.data
         window.raw_data = raw
+        setLoadStage('Data loaded')
 
         if (raw && raw.batches && raw.schema) {
+            setLoadStage('Converting data columns')
             const table = raw
             const fields = table.schema.fields.map(f => f.name)
             const columnar = {}
@@ -819,6 +1121,7 @@ function bootstrap(meta = {}){
         let data
         let valuekey = 'value'
         if (doQuantiles && (format.layer === 'hex' || format.layer === 'geojson')) {
+            setLoadStage('Calculating quantiles')
             let values, weights
             if (format.layer === 'hex') {
                 values = extractValues(raw, format.kind)
@@ -850,12 +1153,14 @@ function bootstrap(meta = {}){
             }
             valuekey = 'quantile'
             makeLegend(getvalue)
+            setLoadStage('Quantiles ready')
         } else {
             data = raw
             makeLegend()
         }
 
         if (format.layer === 'hex') {
+            setLoadStage('Preparing map layer')
             const accessors = hexAccessors(format.kind, 'index', valuekey, getColour)
             const dataWrap = format.kind === 'column'
                 ? {src: data, length: data.value.length}
@@ -878,6 +1183,7 @@ function bootstrap(meta = {}){
         }
 
         if (format.layer === 'geojson') {
+            setLoadStage('Preparing GeoJSON layer')
             const randomColour = () => [Math.random()*255, Math.random()*255, Math.random()*255, 200]
             const getColor = f => {
                 const v = valuekey === 'quantile' ? f.properties?.quantile : (f.properties?.value ?? f.value ?? f.properties?.val)
@@ -1060,6 +1366,29 @@ function bootstrap(meta = {}){
     })
 
     let mainLayers = []
+    let deckRenderWaiters = []
+
+    function onDeckAfterRender() {
+        const waiters = deckRenderWaiters
+        deckRenderWaiters = []
+        for (const resolve of waiters) resolve()
+    }
+
+    function waitForNextDeckRender(timeout = 5000) {
+        const done = perfTimer('deck.after_render')
+        return new Promise(resolve => {
+            let settled = false
+            const finish = () => {
+                if (settled) return
+                settled = true
+                clearTimeout(timer)
+                done()
+                resolve()
+            }
+            const timer = setTimeout(finish, timeout)
+            deckRenderWaiters.push(finish)
+        })
+    }
 
     renderLayers = () => {
         const layers = [...mainLayers]
@@ -1067,16 +1396,26 @@ function bootstrap(meta = {}){
         if (settings.trains) {
             layers.push(choochoo)
         }
+        const rendered = waitForNextDeckRender()
         const doneSetLayers = perfTimer('deck.set_layers', {layers: layers.length})
-        mapOverlay.setProps({layers})
+        mapOverlay.setProps({layers, onAfterRender: onDeckAfterRender})
         doneSetLayers()
+        return rendered
     }
 
     const update = () => {
-        getHexData().then(x => {
-            mainLayers = [x]
-            renderLayers()
-        })
+        if (loadProgress.complete) resetLoadProgress('Reloading data')
+        getHexData()
+            .then(async x => {
+                mainLayers = [x]
+                await renderLayers()
+                finishLoadProgress()
+            })
+            .catch(e => {
+                console.error(e)
+                setLoadProgress(100, 'Load failed')
+                loadProgress.complete = true
+            })
     }
 
     window.d3 = d3

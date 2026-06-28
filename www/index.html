@@ -177,6 +177,59 @@ body.pane-full #map {
 #city-results div.highlighted {
     background: #f0f0f0;
 }
+#load-progress {
+    position: fixed;
+    z-index: 20;
+    top: 0.75rem;
+    left: 50%;
+    transform: translateX(-50%);
+    width: min(28rem, calc(100vw - 2rem));
+    padding: 0.75rem 0.85rem 0.8rem;
+    border: 1px solid rgba(0,0,0,0.18);
+    border-radius: 0.45rem;
+    background: rgba(255,255,255,0.94);
+    box-shadow: 0 4px 18px rgba(0,0,0,0.18);
+    color: #222;
+    font-family: "Helvetica Neue", sans-serif;
+    pointer-events: none;
+    opacity: 1;
+    transition: opacity 0.25s ease, visibility 0.25s ease;
+}
+.load-progress-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 1rem;
+    margin-bottom: 0.45rem;
+    font-size: 0.85rem;
+}
+#load-progress-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+#load-progress-percent {
+    flex: 0 0 auto;
+    font-variant-numeric: tabular-nums;
+    color: rgba(0,0,0,0.62);
+}
+.load-progress-track {
+    height: 0.45rem;
+    overflow: hidden;
+    border-radius: 999px;
+    background: rgba(0,0,0,0.12);
+}
+#load-progress-bar {
+    width: 0%;
+    height: 100%;
+    border-radius: inherit;
+    background: linear-gradient(90deg, #222, #777);
+    transition: width 0.2s ease;
+}
+body.load-complete #load-progress {
+    visibility: hidden;
+    opacity: 0;
+}
 #side-pane, #leftExpand {
     display: none;
 }
@@ -213,6 +266,13 @@ body.cartogram-ready #leftExpand {
     </head>
     <body>
         <div id="layout">
+            <div id="load-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                <div class="load-progress-row">
+                    <span id="load-progress-label">Starting…</span>
+                    <span id="load-progress-percent">0%</span>
+                </div>
+                <div class="load-progress-track"><div id="load-progress-bar"></div></div>
+            </div>
             <aside id="side-pane">
                 <button id="helpBtn" class="pane-btn" type="button" aria-label="What is a cartogram?">?</button>
                 <div id="helpPopup" class="help-popup">
