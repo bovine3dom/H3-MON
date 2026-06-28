@@ -4,16 +4,13 @@ import {BitmapLayer, GeoJsonLayer} from '@deck.gl/layers'
 import {CSVLoader} from '@loaders.gl/csv'
 import {ArrowLoader} from '@loaders.gl/arrow'
 import {ParquetWasmLoader} from '@loaders.gl/parquet'
-import {load} from '@loaders.gl/core'
+import {load, parse} from '@loaders.gl/core'
 import maplibregl from 'maplibre-gl'
 import * as d3 from 'd3'
 import {cellToBoundary, cellToLatLng, latLngToCell, getResolution, cellToParent, cellToChildren} from 'h3-js'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import * as observablehq from './vendor/observablehq' // from https://observablehq.com/@d3/color-legend
 import {getCitiesStartsWith} from 'tiny-geocoder'
-import perspective from '@perspective-dev/client'
-import PERSPECTIVE_SERVER_WASM from "@perspective-dev/server/dist/wasm/perspective-server.wasm"
-import PERSPECTIVE_CLIENT_WASM from "@perspective-dev/client/dist/wasm/perspective-js.wasm"
 import {render_cartogram} from './cartogram'
 
 const params = new URLSearchParams(window.location.search)
@@ -57,25 +54,19 @@ const LOAD_PROGRESS_DEFAULTS = {
     'data.read_arrayBuffer': 220,
     'data.read_text': 80,
     'data.arrow_parse': 10,
+    'data.csv_parse': 80,
+    'data.csv_to_columns': 50,
     'data.arrow_column.median': 2,
     'data.arrow_column.index': 320,
     'data.arrow_column.value': 2,
-    'data.user_table': 650,
-    'data.schema': 5,
-    'data.view': 120,
-    'data.to_columns': 450,
     'data.quantile.ecdf': 15,
     'data.quantile.assign': 25,
     'cartogram.js_group.data_map': 100,
     'cartogram.js_group.accumulate': 650,
     'cartogram.js_group.output': 5,
-    'cartogram.child_pairs.build': 500,
-    'cartogram.child_table': 500,
-    'cartogram.child_data_table': 500,
-    'cartogram.child_join': 1000,
-    'cartogram.child_group.view': 1000,
-    'cartogram.child_group.to_columns': 300,
-    'cartogram.child_group.normalize': 50,
+    'cartogram.child_rollup.data_map': 200,
+    'cartogram.child_rollup.accumulate': 1500,
+    'cartogram.child_rollup.output': 10,
     'cartogram.h3_to_xy.build': 950,
     'cartogram.quantile.ecdf': 15,
     'cartogram.quantile.assign_data': 25,
@@ -130,25 +121,19 @@ const LOAD_PROGRESS_LABELS = {
     'data.read_arrayBuffer': 'Downloading data',
     'data.read_text': 'Downloading data',
     'data.arrow_parse': 'Parsing data',
+    'data.csv_parse': 'Parsing CSV data',
+    'data.csv_to_columns': 'Converting CSV columns',
     'data.arrow_column.median': 'Reading data columns',
     'data.arrow_column.index': 'Decoding H3 indexes',
     'data.arrow_column.value': 'Reading values',
-    'data.user_table': 'Parsing data',
-    'data.schema': 'Inspecting data schema',
-    'data.view': 'Reading data table',
-    'data.to_columns': 'Converting data columns',
     'data.quantile.ecdf': 'Calculating quantiles',
     'data.quantile.assign': 'Assigning quantiles',
     'cartogram.js_group.data_map': 'Indexing data by H3',
     'cartogram.js_group.accumulate': 'Aggregating cartogram cells',
     'cartogram.js_group.output': 'Preparing cartogram values',
-    'cartogram.child_pairs.build': 'Expanding cartogram H3 cells',
-    'cartogram.child_table': 'Preparing child H3 table',
-    'cartogram.child_data_table': 'Preparing child data table',
-    'cartogram.child_join': 'Joining child H3 cells',
-    'cartogram.child_group.view': 'Grouping child H3 cells',
-    'cartogram.child_group.to_columns': 'Reading grouped child cells',
-    'cartogram.child_group.normalize': 'Preparing grouped child cells',
+    'cartogram.child_rollup.data_map': 'Indexing child H3 data',
+    'cartogram.child_rollup.accumulate': 'Rolling up child H3 cells',
+    'cartogram.child_rollup.output': 'Preparing child rollup values',
     'cartogram.h3_to_xy.build': 'Preparing map/cartogram links',
     'cartogram.quantile.ecdf': 'Calculating cartogram quantiles',
     'cartogram.quantile.assign_data': 'Assigning map colours',
@@ -333,6 +318,31 @@ async function measurePerf(label, details, fn) {
 async function parseArrowTable(buf, label, details = {}) {
     const table = await measurePerf(label, details, () => ArrowLoader.parseSync(buf, {arrow: {shape: 'arrow-table'}}))
     return table.data
+}
+
+async function parseCsvRows(text) {
+    const parsed = await measurePerf('data.csv_parse', {bytes: text.length}, () => parse(text, CSVLoader))
+    return parsed.data || parsed
+}
+
+function rowsToColumns(rows) {
+    const fields = []
+    const seen = new Set()
+    for (const row of rows) {
+        for (const field of Object.keys(row)) {
+            if (!seen.has(field)) {
+                seen.add(field)
+                fields.push(field)
+            }
+        }
+    }
+    const cols = {}
+    for (const field of fields) cols[field] = new Array(rows.length)
+    for (let i = 0; i < rows.length; i++) {
+        const row = rows[i]
+        for (const field of fields) cols[field][i] = row[field] === '' ? null : (row[field] ?? null)
+    }
+    return cols
 }
 
 function columnValue(column, i) {
@@ -729,18 +739,6 @@ function getH3Bounds(entry) {
     return {xMin, xMax, yMin, yMax}
 }
 
-let perspectiveWorkerPromise = null
-async function getPerspectiveWorker() {
-    if (!perspectiveWorkerPromise) {
-        perspective.init_server(fetch(PERSPECTIVE_SERVER_WASM))
-        perspective.init_client(fetch(PERSPECTIVE_CLIENT_WASM))
-        perspectiveWorkerPromise = perspective.worker()
-    }
-    const worker = await measurePerf('perspective.worker.ready', () => perspectiveWorkerPromise)
-    window.ps = worker
-    return worker
-}
-
 configureLoadProgress()
 
 const cartogramInit = (async () => {
@@ -774,14 +772,8 @@ const cartogramInit = (async () => {
     // (e.g. click on cartogram -> draw h3 that contribute to that cell * weight;
     // zoom/move cartogram -> zoom/move map based on bbox of cartogram ... might be worth pre-computing lat/lon?)
     // 2) aggregate actual data into the cartogram. your current spec is index: string, which is incompatible with the cartogram spec of h3: uint64. so fix that first. then join and profit
-    // worth doing a smell test on index[0] to see if it is resolution 5. for now, reject all other resolutions and don't show the cartogram. (which implies also: don't load perspective)
-    // probably easiest to demand strings in the input? but if we need to, "0x" + BigInt(h3s).toString(16) would work ... if perpsective doesn't support joins we are kind of buggered right?
-    // worker.join() exists https://perspective-dev.github.io/browser/classes/dist_wasm_perspective-js.d.ts.Client.html#join
-    // left - The left source table (a [Table] instance or a table name string).
-    // right - The right source table (a [Table] instance or a table name string).
-    // on - The column name to join on. Must exist in both tables with the same type.
-    // options - Optional join configuration: { join_type?: "inner" | "left" | "outer", name?: string }.
-    // 4) reduce duplication of effort: reuse quantiles, data. _probably_ best to use perspective's .to_arrow()?
+    // high-resolution H3 data is rolled up into cartogram-resolution parents before aggregation.
+    // 4) reduce duplication of effort: reuse quantiles and data.
     // 5) investigate aggregation of non-h3 5 data. sum/mean/median? exercise for reader
     // 7) try to work out why legend has flipped between the two
     // 8) add tooltip to cartogram cells
@@ -1056,6 +1048,50 @@ function bootstrap(meta = {}){
         return {aggCols, meanCol}
     }
 
+    async function rollupChildrenToCartoParents(dataCols, sourceValueKey, h3res) {
+        const defaultValue = getDefaultValue()
+        const sourceIndex = dataCols.index
+        const sourceValues = dataCols[sourceValueKey]
+        const sourceRows = columnLength(sourceIndex)
+
+        const doneDataMap = perfTimer('cartogram.child_rollup.data_map', {rows: sourceRows})
+        const valuesByChild = new Map()
+        for (let i = 0; i < sourceRows; i++) {
+            valuesByChild.set(String(columnValue(sourceIndex, i)), columnValue(sourceValues, i))
+        }
+        doneDataMap({entries: valuesByChild.size})
+
+        const h3map = await ensureH3ToXY()
+        const cartoH3s = Array.from(h3map.keys())
+        const parentIndexes = new Array(cartoH3s.length)
+        const parentValues = new Array(cartoH3s.length)
+
+        const doneAccum = perfTimer('cartogram.child_rollup.accumulate', {cartoH3s: cartoH3s.length, cartoRes, h3res})
+        let childRows = 0
+        for (let i = 0; i < cartoH3s.length; i++) {
+            const parent = cartoH3s[i]
+            parentIndexes[i] = parent
+            let sum = 0
+            let count = 0
+            const children = cellToChildren(parent, h3res)
+            childRows += children.length
+            for (const child of children) {
+                let value = valuesByChild.get(child)
+                if (value == null) value = defaultValue
+                if (value == null) continue
+                sum += toNumber(value)
+                count++
+            }
+            parentValues[i] = count ? sum / count : null
+        }
+        doneAccum({childRows})
+
+        const doneOutput = perfTimer('cartogram.child_rollup.output', {rows: parentIndexes.length})
+        const grouped = {index: parentIndexes, [sourceValueKey]: parentValues}
+        doneOutput()
+        return grouped
+    }
+
     let reloadNum = 0
     const getHexData = async () => {
         const doneGetHexData = perfTimer('data.reload.total', {file: file_name, ext, layer: format.layer})
@@ -1072,7 +1108,6 @@ function bootstrap(meta = {}){
             const resp = await measurePerf('data.fetch', {file: file_path, reload}, () => fetch(`${file_path}?v=${reload}`))
             const buf = await measurePerf(ext === 'csv' ? 'data.read_text' : 'data.read_arrayBuffer', () => ext === 'csv' ? resp.text() : resp.arrayBuffer())
             setLoadStage('Parsing data')
-            let userTable = null
             let dataCols
             let schema
             if (ext === 'arrow') {
@@ -1081,12 +1116,9 @@ function bootstrap(meta = {}){
                 dataCols = await materializeArrowColumns(dataTable, fields, 'data.arrow_column')
                 schema = dataCols
             } else {
-                const worker = await getPerspectiveWorker()
-                userTable = await measurePerf('data.user_table', {bytes: buf.length}, () => worker.table(buf))
-                schema = await measurePerf('data.schema', () => userTable.schema())
-                const dataView = await measurePerf('data.view', () => userTable.view())
-                dataCols = await measurePerf('data.to_columns', () => dataView.to_columns())
-                dataView.delete()
+                const rows = await parseCsvRows(buf)
+                dataCols = await measurePerf('data.csv_to_columns', {rows: rows.length}, () => rowsToColumns(rows))
+                schema = dataCols
             }
             setLoadStage('Data parsed')
 
@@ -1148,39 +1180,7 @@ function bootstrap(meta = {}){
                     cartoAggCols = result.aggCols
                     cartoDataCol = result.meanCol
                 } else if (h3res > cartoRes) {
-                    const defaultValue = getDefaultValue()
-                    const worker = await getPerspectiveWorker()
-                    const h3map = await ensureH3ToXY()
-                    const cartoH3s = Array.from(h3map.keys())
-                    const doneChildPairs = perfTimer('cartogram.child_pairs.build', {cartoH3s: cartoH3s.length, cartoRes, h3res})
-                    const childPairs = cartoH3s.flatMap(h =>
-                        cellToChildren(h, h3res).map(child => ({child, cartoH3: h}))
-                    )
-                    doneChildPairs({rows: childPairs.length})
-                    const childTable = await measurePerf('cartogram.child_table', {rows: childPairs.length}, () => worker.table(childPairs))
-                    const dataSubset = {child: dataCols.index, [valuekey]: dataCols[valuekey]}
-                    const dataTable = await measurePerf('cartogram.child_data_table', {rows: dataCols.index.length}, () => worker.table(dataSubset))
-                    const joined = await measurePerf('cartogram.child_join', {childRows: childPairs.length, dataRows: dataCols.index.length}, () => worker.join(childTable, dataTable, 'child', {join_type: 'left'}))
-                    const fillExpr = {["_" + valuekey]: `coalesce("${valuekey}", float(${defaultValue}))`}
-                    const groupView = await measurePerf('cartogram.child_group.view', () => joined.view({
-                        expressions: fillExpr,
-                        columns: ['cartoH3', "_" + valuekey],
-                        aggregates: {["_" + valuekey]: 'mean', "cartoH3": 'first'},
-                        group_by: ['cartoH3'],
-                        group_rollup_mode: 'flat'
-                    }))
-                    const grouped = await measurePerf('cartogram.child_group.to_columns', () => groupView.to_columns())
-                    groupView.delete()
-                    joined.delete()
-                    childTable.delete()
-                    dataTable.delete()
-                    const doneChildGroupNormalize = perfTimer('cartogram.child_group.normalize', {rows: grouped.cartoH3.length})
-                    delete grouped.__ROW_PATH__
-                    grouped.index = grouped.cartoH3
-                    delete grouped.cartoH3
-                    grouped[valuekey] = grouped["_" + valuekey]
-                    delete grouped["_" + valuekey]
-                    doneChildGroupNormalize()
+                    const grouped = await rollupChildrenToCartoParents(dataCols, valuekey, h3res)
                     const result = groupCartogramWithMap(grouped, valuekey, {source: 'child-rollup', rows: grouped.index.length})
                     cartoAggCols = result.aggCols
                     cartoDataCol = result.meanCol
@@ -1289,7 +1289,6 @@ function bootstrap(meta = {}){
                 doneDeckLayer()
             }
 
-            if (userTable) userTable.delete()
             doneGetHexData({rows: dataCols.value.length, cartogramRows: cartoAggCols ? cartoAggCols.x.length : 0})
             return deckLayer
         }
