@@ -546,6 +546,17 @@ function toNumber(value) {
     return typeof value === 'bigint' ? Number(value) : value
 }
 
+function toFiniteNumber(value) {
+    if (value == null) return null
+    if (typeof value === 'string') {
+        value = value.trim()
+        if (value === '') return null
+    }
+    if (!['bigint', 'number', 'string'].includes(typeof value)) return null
+    const number = Number(value)
+    return Number.isFinite(number) ? number : null
+}
+
 function toStringValue(value) {
     return typeof value === 'bigint' ? value.toString() : String(value)
 }
@@ -934,6 +945,12 @@ fetch(`data/${meta_name}`).then(r => r.json()).then(meta => {
 
 function bootstrap(meta = {}){
     const settings = Object.assign({}, meta, Object.fromEntries(params.entries()))
+    const settingEnabled = (value, fallback = false) => {
+        if (value == null) return fallback
+        if (typeof value === 'boolean') return value
+        return !['0', 'false', 'off', 'no'].includes(String(value).toLowerCase())
+    }
+    const infill = settingEnabled(settings.infill, false)
     const doCyclical = settings.cyclical != undefined
     const flip = settings.flip != undefined
     const colourRamp = d3.scaleSequential(doCyclical ? d3.interpolateRainbow : d3.interpolateSpectral).domain(flip ? [1,0] : [0,1])
@@ -998,6 +1015,7 @@ function bootstrap(meta = {}){
     function groupCartogramWithMap(sourceCols, sourceValueKey, perfDetails = {}) {
         const doneGroup = perfTimer('cartogram.js_group.total', perfDetails)
         const defaultValue = getDefaultValue()
+        const defaultNumber = toFiniteNumber(defaultValue)
         const meanCol = sourceValueKey === 'quantile' ? 'quantile_mean' : 'value_mean'
         const sourceIndex = sourceCols.index
         const sourceValues = sourceCols[sourceValueKey]
@@ -1005,34 +1023,82 @@ function bootstrap(meta = {}){
         const sourceRows = columnLength(sourceIndex)
         const doneDataMap = perfTimer('cartogram.js_group.data_map', {rows: sourceRows})
         const valuesByH3 = new Map()
+        let sourceObserved = 0
+        let sourceMissing = 0
         for (let i = 0; i < sourceRows; i++) {
-            valuesByH3.set(String(columnValue(sourceIndex, i)), columnValue(sourceValues, i))
+            const value = toFiniteNumber(columnValue(sourceValues, i))
+            valuesByH3.set(String(columnValue(sourceIndex, i)), value)
+            if (value == null) sourceMissing++
+            else sourceObserved++
         }
-        doneDataMap({entries: valuesByH3.size})
+        doneDataMap({entries: valuesByH3.size, sourceObserved, sourceMissing})
 
         const cellCount = cartogramAgg.x.length
         const numerator = new Float64Array(cellCount)
         const denominator = new Float64Array(cellCount)
+        const observedByCell = new Uint8Array(cellCount)
         const weights = cartogramAgg.weights
         const cartogramRows = columnLength(cartogramAgg.h3ByRow)
         const doneAccum = perfTimer('cartogram.js_group.accumulate', {rows: cartogramRows, cells: cellCount})
+        let h3Observed = 0
+        let h3Missing = 0
+        let h3Defaulted = 0
+        let h3ValuesUsed = 0
+        let invalidWeights = 0
+        let cellsWithObservedData = 0
         for (let i = 0; i < cartogramRows; i++) {
-            let value = valuesByH3.get(String(columnValue(cartogramAgg.h3ByRow, i)))
-            if (value == null) value = defaultValue
-            if (value == null) continue
-            value = toNumber(value)
-            const weight = weights ? toNumber(weights[i]) : 1
-            if (weight == null) continue
+            const value = valuesByH3.get(String(columnValue(cartogramAgg.h3ByRow, i)))
+            if (value == null) {
+                h3Missing++
+                continue
+            }
             const cellIndex = cartogramAgg.rowCell[i]
+            if (!observedByCell[cellIndex]) {
+                observedByCell[cellIndex] = 1
+                cellsWithObservedData++
+            }
+            h3Observed++
+        }
+        for (let i = 0; i < cartogramRows; i++) {
+            const cellIndex = cartogramAgg.rowCell[i]
+            let value = valuesByH3.get(String(columnValue(cartogramAgg.h3ByRow, i)))
+            if (value == null) {
+                if (defaultNumber == null || (!infill && !observedByCell[cellIndex])) continue
+                value = defaultNumber
+                h3Defaulted++
+            }
+            const weight = weights ? toFiniteNumber(weights[i]) : 1
+            if (weight == null) {
+                invalidWeights++
+                continue
+            }
             numerator[cellIndex] += value * weight
             denominator[cellIndex] += weight
+            h3ValuesUsed++
         }
-        doneAccum()
+        doneAccum({
+            infill,
+            defaultValue: defaultNumber,
+            cellsWithObservedData,
+            h3Observed,
+            h3Missing,
+            h3Defaulted,
+            h3ValuesUsed,
+            invalidWeights,
+        })
 
         const doneOutput = perfTimer('cartogram.js_group.output', {cells: cellCount})
         const values = new Array(cellCount)
+        let cellsWithData = 0
+        let cellsMissing = 0
         for (let i = 0; i < cellCount; i++) {
-            values[i] = denominator[i] ? numerator[i] / denominator[i] : null
+            if (denominator[i]) {
+                values[i] = numerator[i] / denominator[i]
+                cellsWithData++
+            } else {
+                values[i] = null
+                cellsMissing++
+            }
         }
         const aggCols = {
             x: cartogramAgg.x,
@@ -1044,22 +1110,28 @@ function bootstrap(meta = {}){
             [meanCol]: values,
         }
         doneOutput()
-        doneGroup({rows: cellCount, defaultValue})
+        doneGroup({rows: cellCount, defaultValue: defaultNumber, infill, cellsWithData, cellsMissing, cellsWithObservedData})
         return {aggCols, meanCol}
     }
 
     async function rollupChildrenToCartoParents(dataCols, sourceValueKey, h3res) {
         const defaultValue = getDefaultValue()
+        const defaultNumber = toFiniteNumber(defaultValue)
         const sourceIndex = dataCols.index
         const sourceValues = dataCols[sourceValueKey]
         const sourceRows = columnLength(sourceIndex)
 
         const doneDataMap = perfTimer('cartogram.child_rollup.data_map', {rows: sourceRows})
         const valuesByChild = new Map()
+        let sourceObserved = 0
+        let sourceMissing = 0
         for (let i = 0; i < sourceRows; i++) {
-            valuesByChild.set(String(columnValue(sourceIndex, i)), columnValue(sourceValues, i))
+            const value = toFiniteNumber(columnValue(sourceValues, i))
+            valuesByChild.set(String(columnValue(sourceIndex, i)), value)
+            if (value == null) sourceMissing++
+            else sourceObserved++
         }
-        doneDataMap({entries: valuesByChild.size})
+        doneDataMap({entries: valuesByChild.size, sourceObserved, sourceMissing})
 
         const h3map = await ensureH3ToXY()
         const cartoH3s = Array.from(h3map.keys())
@@ -1068,23 +1140,54 @@ function bootstrap(meta = {}){
 
         const doneAccum = perfTimer('cartogram.child_rollup.accumulate', {cartoH3s: cartoH3s.length, cartoRes, h3res})
         let childRows = 0
+        let parentsWithObservedData = 0
+        let parentsWithData = 0
+        let parentsMissing = 0
+        let childValuesObserved = 0
+        let childValuesDefaulted = 0
+        let childValuesUsed = 0
         for (let i = 0; i < cartoH3s.length; i++) {
             const parent = cartoH3s[i]
             parentIndexes[i] = parent
             let sum = 0
             let count = 0
+            let observedChildren = 0
+            let missingChildren = 0
             const children = cellToChildren(parent, h3res)
             childRows += children.length
             for (const child of children) {
-                let value = valuesByChild.get(child)
-                if (value == null) value = defaultValue
-                if (value == null) continue
-                sum += toNumber(value)
+                const value = valuesByChild.get(child)
+                if (value == null) {
+                    missingChildren++
+                    continue
+                }
+                sum += value
                 count++
+                observedChildren++
+                childValuesObserved++
             }
+            if (missingChildren && defaultNumber != null && (infill || count > 0)) {
+                sum += defaultNumber * missingChildren
+                count += missingChildren
+                childValuesDefaulted += missingChildren
+            }
+            if (observedChildren) parentsWithObservedData++
+            if (count) parentsWithData++
+            else parentsMissing++
+            childValuesUsed += count
             parentValues[i] = count ? sum / count : null
         }
-        doneAccum({childRows})
+        doneAccum({
+            childRows,
+            infill,
+            defaultValue: defaultNumber,
+            parentsWithData,
+            parentsMissing,
+            parentsWithObservedData,
+            childValuesObserved,
+            childValuesDefaulted,
+            childValuesUsed,
+        })
 
         const doneOutput = perfTimer('cartogram.child_rollup.output', {rows: parentIndexes.length})
         const grouped = {index: parentIndexes, [sourceValueKey]: parentValues}
