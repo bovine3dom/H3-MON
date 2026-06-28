@@ -17,7 +17,14 @@ import PERSPECTIVE_CLIENT_WASM from "@perspective-dev/client/dist/wasm/perspecti
 import {render_cartogram} from './cartogram'
 
 const params = new URLSearchParams(window.location.search)
-const perfEnabled = params.has('perf') && !['0', 'false', 'off', 'no'].includes((params.get('perf') || '').toLowerCase())
+function flagEnabled(name) {
+    return params.has(name) && !['0', 'false', 'off', 'no'].includes((params.get(name) || '').toLowerCase())
+}
+const perfEnabled = flagEnabled('perf')
+const syncDebugEnabled = flagEnabled('sync') || perfEnabled
+function syncLog(label, details) {
+    if (syncDebugEnabled) console.info(`[sync] ${label}`, details || {})
+}
 const now = () => (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now())
 const loadProgress = {
     root: document.getElementById('load-progress'),
@@ -353,28 +360,153 @@ async function materializeArrowColumns(table, names, labelPrefix) {
     return cols
 }
 
-function computeH3Bounds(indices) {
-    let minLat = 90, maxLat = -90, minLng = 180, maxLng = -180
+function normalizeLng360(lng) {
+    return ((lng % 360) + 360) % 360
+}
+
+function wrappedLngBounds(longitudes, referenceLng = 0) {
+    longitudes.sort((a, b) => a - b)
+
+    let largestGap = longitudes[0] + 360 - longitudes[longitudes.length - 1]
+    let gapStart = longitudes.length - 1
+    for (let i = 0; i < longitudes.length - 1; i++) {
+        const gap = longitudes[i + 1] - longitudes[i]
+        if (gap > largestGap) {
+            largestGap = gap
+            gapStart = i
+        }
+    }
+
+    let west
+    let east
+    if (gapStart === longitudes.length - 1) {
+        west = longitudes[0]
+        east = longitudes[longitudes.length - 1]
+    } else {
+        west = longitudes[gapStart + 1]
+        east = longitudes[gapStart] + 360
+    }
+
+    const center = (west + east) / 2
+    const shift = Math.round((referenceLng - center) / 360) * 360
+    return [west + shift, east + shift]
+}
+
+function unwrapLng(lng, referenceLng = 0) {
+    return lng + Math.round((referenceLng - lng) / 360) * 360
+}
+
+function percentile(values, p) {
+    values.sort((a, b) => a - b)
+    const i = Math.min(values.length - 1, Math.max(0, Math.floor((values.length - 1) * p)))
+    return values[i]
+}
+
+function computeH3Bounds(indices, options = {}) {
+    if (typeof options === 'number') options = {referenceLng: options}
+    const referenceLng = options.referenceLng || 0
+    const trim = Math.min(Math.max(options.trim || 0, 0), 0.49)
+    const centersByH3 = new Map()
+    const centerRows = []
+    let invalidCount = 0
+    let emptyCount = 0
+
     for (const idx of indices) {
+        if (!idx) {
+            emptyCount++
+            continue
+        }
+        let center = centersByH3.get(idx)
+        if (center === undefined) {
+            try {
+                const [lat, lng] = cellToLatLng(idx)
+                center = {lat, lng, unwrappedLng: unwrapLng(lng, referenceLng)}
+            } catch (e) {
+                invalidCount++
+                center = null
+                console.warn('Invalid H3 index:', idx, e)
+            }
+            centersByH3.set(idx, center)
+        }
+        if (center) centerRows.push({h: idx, ...center})
+    }
+
+    if (!centerRows.length) return null
+
+    let candidateH3 = new Set()
+    for (const [h, center] of centersByH3) {
+        if (center) candidateH3.add(h)
+    }
+
+    let trimMeta = null
+    if (trim > 0 && centerRows.length > 2) {
+        const minLatTrim = percentile(centerRows.map(r => r.lat), trim)
+        const maxLatTrim = percentile(centerRows.map(r => r.lat), 1 - trim)
+        const minLngTrim = percentile(centerRows.map(r => r.unwrappedLng), trim)
+        const maxLngTrim = percentile(centerRows.map(r => r.unwrappedLng), 1 - trim)
+        const trimmedCandidates = new Set()
+        let keptRows = 0
+        for (const row of centerRows) {
+            if (row.lat < minLatTrim || row.lat > maxLatTrim ||
+                row.unwrappedLng < minLngTrim || row.unwrappedLng > maxLngTrim) continue
+            trimmedCandidates.add(row.h)
+            keptRows++
+        }
+        if (trimmedCandidates.size) {
+            candidateH3 = trimmedCandidates
+            trimMeta = {
+                trim,
+                centerRows: centerRows.length,
+                keptRows,
+                trimmedRows: centerRows.length - keptRows,
+                keptUniqueH3: candidateH3.size,
+                centerLngSpan: maxLngTrim - minLngTrim,
+                centerLatSpan: maxLatTrim - minLatTrim,
+                centerBounds: [[minLngTrim, minLatTrim], [maxLngTrim, maxLatTrim]],
+            }
+        }
+    }
+
+    let minLat = 90, maxLat = -90
+    const longitudes = []
+    let boundaryInvalidCount = 0
+    for (const idx of candidateH3) {
         try {
             const boundary = cellToBoundary(idx, true)
-            for (const [lat, lng] of boundary) {
+            for (const [lng, lat] of boundary) {
                 if (lat < minLat) minLat = lat
                 if (lat > maxLat) maxLat = lat
-                if (lng < minLng) minLng = lng
-                if (lng > maxLng) maxLng = lng
+                longitudes.push(normalizeLng360(lng))
             }
         } catch (e) {
+            boundaryInvalidCount++
             console.warn('Invalid H3 index:', idx, e)
         }
     }
-    if (minLat === 90) return null
-    return [[minLat, minLng], [maxLat, maxLng]]
+    if (minLat === 90 || !longitudes.length) return null
+    const [minLng, maxLng] = wrappedLngBounds(longitudes, referenceLng)
+    const bounds = [[minLng, minLat], [maxLng, maxLat]]
+    return {
+        bounds,
+        meta: {
+            inputH3: indices.length,
+            uniqueH3: centersByH3.size - invalidCount,
+            fitUniqueH3: candidateH3.size,
+            emptyH3: emptyCount,
+            invalidH3: invalidCount + boundaryInvalidCount,
+            vertices: longitudes.length,
+            referenceLng,
+            lngSpan: maxLng - minLng,
+            latSpan: maxLat - minLat,
+            ...trimMeta,
+        },
+    }
 }
 
 let highlightLayer = null
 let renderLayers = null
 let hex_flying = false
+let hexFlyToken = 0
 let h3toXY = null
 let cartogramApi = null
 let cartoAggCols = null
@@ -422,6 +554,7 @@ function buildCartogramAggregation(rawCols) {
     const code = []
     const label = []
     const index = []
+    const anchorIndex = []
     const codeCounts = []
     const labelCounts = []
 
@@ -451,6 +584,7 @@ function buildCartogramAggregation(rawCols) {
         code.push(dominant(codeCounts[i]))
         label.push(dominant(labelCounts[i]))
         index.push('')
+        anchorIndex.push('')
     }
 
     done({cells: x.length, strategy: 'numeric-xy-key'})
@@ -463,6 +597,7 @@ function buildCartogramAggregation(rawCols) {
         code,
         label,
         index,
+        anchorIndex,
     }
 }
 
@@ -481,7 +616,11 @@ function buildH3ToXY(rawCols) {
         } else {
             map.set(hex, {cells: [[x, y]]})
         }
-        if (indexParts) indexParts[cartogramAgg.rowCell[i]].push(hex)
+        if (indexParts) {
+            const cellIndex = cartogramAgg.rowCell[i]
+            indexParts[cellIndex].push(hex)
+            if (!cartogramAgg.anchorIndex[cellIndex]) cartogramAgg.anchorIndex[cellIndex] = hex
+        }
     }
     if (indexParts) {
         for (let i = 0; i < indexParts.length; i++) cartogramAgg.index[i] = indexParts[i].join(', ')
@@ -499,7 +638,7 @@ async function ensureH3ToXY() {
 }
 
 function hex(hexes, options = {}) {
-    const {fit = false, padding = 200, highlight = true} = options
+    const {fit = false, padding = 200, highlight = true, fitTrim = 0} = options
     if (!hexes || hexes.length === 0) {
         highlightLayer = null
         renderLayers && renderLayers()
@@ -525,11 +664,37 @@ function hex(hexes, options = {}) {
         renderLayers && renderLayers()
     }
     if (fit) {
-        const bounds = computeH3Bounds(hexes)
-        if (bounds) {
+        const centerBefore = map.getCenter()
+        const zoomBefore = map.getZoom()
+        const computedBounds = computeH3Bounds(hexes, {referenceLng: centerBefore.lng, trim: fitTrim})
+        if (computedBounds) {
+            const {bounds, meta} = computedBounds
+            const camera = typeof map.cameraForBounds === 'function' ? map.cameraForBounds(bounds, {padding}) : null
+            syncLog('cartogram->map.fit.request', {
+                ...meta,
+                bounds,
+                padding,
+                centerBefore: {lng: centerBefore.lng, lat: centerBefore.lat},
+                zoomBefore,
+                camera: camera ? {center: camera.center, zoom: camera.zoom} : null,
+            })
+            const flyToken = ++hexFlyToken
             hex_flying = true
+            map.stop()
             map.fitBounds(bounds, {padding})
-            map.once('moveend', () => { hex_flying = false })
+            map.once('moveend', () => {
+                const centerAfter = map.getCenter()
+                syncLog('cartogram->map.fit.moveend', {
+                    flyToken,
+                    currentFlyToken: hexFlyToken,
+                    accepted: flyToken === hexFlyToken,
+                    centerAfter: {lng: centerAfter.lng, lat: centerAfter.lat},
+                    zoomAfter: map.getZoom(),
+                })
+                if (flyToken === hexFlyToken) hex_flying = false
+            })
+        } else {
+            syncLog('cartogram->map.fit.skip_no_bounds', {inputH3: hexes.length})
         }
     }
 }
@@ -697,6 +862,40 @@ document.addEventListener('click', (e) => {
 })
 window.addEventListener('resize', () => map.resize())
 window.addEventListener('orientationchange', () => map.resize())
+
+const mapContainer = map.getContainer()
+let mapGestureStarted = false
+let mapGestureMoved = false
+let mapWheelResetTimer = null
+
+function eventStartedInMap(event) {
+    const target = event && event.target
+    return !!target && mapContainer.contains(target)
+}
+
+function markMapGestureStart(event) {
+    if (!eventStartedInMap(event)) return
+    if (!mapGestureStarted) mapGestureMoved = false
+    mapGestureStarted = true
+}
+
+function clearInactiveMapGesture() {
+    if (!mapGestureMoved) mapGestureStarted = false
+}
+
+mapContainer.addEventListener('pointerdown', markMapGestureStart, {capture: true, passive: true})
+mapContainer.addEventListener('wheel', (event) => {
+    markMapGestureStart(event)
+    clearTimeout(mapWheelResetTimer)
+    mapWheelResetTimer = setTimeout(clearInactiveMapGesture, 250)
+}, {capture: true, passive: true})
+window.addEventListener('pointerup', clearInactiveMapGesture, {capture: true, passive: true})
+window.addEventListener('pointercancel', clearInactiveMapGesture, {capture: true, passive: true})
+
+map.on('movestart', (event) => {
+    const original = event && event.originalEvent
+    if (mapGestureStarted || eventStartedInMap(original)) mapGestureMoved = true
+})
 
 let humanMoved = false
 window.addEventListener("hashchange", () => {
@@ -1004,6 +1203,7 @@ function bootstrap(meta = {}){
                         const doneRenderCartogram = perfTimer('cartogram.render.call', {rows: cartoAggCols.x.length})
                         cartogramApi = render_cartogram('#cartogram', cartoAggCols, {
                             perf: perfEnabled,
+                            debug: syncDebugEnabled,
                             draw_outline: false,
                             get_color: z => colourRamp(z) ?? 'rgba(255,255,255,0)',
                             include_outer_borders: true,
@@ -1014,21 +1214,29 @@ function bootstrap(meta = {}){
                                     hex(data.index[i].split(", ").filter(x => x))
                                 }
                             },
-                            onmove_callback: ((() => {
-                                const t = 1000
-                                let last = 0, timer = null, lastArgs
-                                function fire(data, visibleIndices) {
-                                    if (data.index) {
-                                        hex(visibleIndices.flatMap(i => data.index[i] ? data.index[i].split(", ").filter(x => x) : []), {fit: true, padding: 0, highlight: false})
-                                    }
+                            onmove_callback: (data, visibleIndices) => {
+                                if (data.index) {
+                                    const contributorH3 = visibleIndices.flatMap(i => data.index[i] ? data.index[i].split(", ").filter(x => x) : [])
+                                    const anchorH3 = cartogramAgg && cartogramAgg.anchorIndex
+                                        ? visibleIndices.map(i => cartogramAgg.anchorIndex[i]).filter(x => x)
+                                        : []
+                                    const fitH3 = anchorH3.length ? anchorH3 : contributorH3
+                                    syncLog('cartogram->map.visible', {
+                                        visibleRows: visibleIndices.length,
+                                        contributorH3Refs: contributorH3.length,
+                                        contributorUniqueH3: new Set(contributorH3).size,
+                                        anchorH3Refs: anchorH3.length,
+                                        anchorUniqueH3: new Set(anchorH3).size,
+                                        fitMode: anchorH3.length ? 'anchors' : 'contributors',
+                                        fitH3Refs: fitH3.length,
+                                        fitUniqueH3: new Set(fitH3).size,
+                                        firstRows: visibleIndices.slice(0, 10),
+                                        firstContributorH3: contributorH3.slice(0, 10),
+                                        firstAnchorH3: anchorH3.slice(0, 10),
+                                    })
+                                    hex(fitH3, {fit: true, padding: 0, highlight: false, fitTrim: 0.01})
                                 }
-                                return (data, visibleIndices) => {
-                                    lastArgs = [data, visibleIndices]
-                                    const now = Date.now()
-                                    if (now - last >= t) { last = now; clearTimeout(timer); timer = null; fire(...lastArgs) }
-                                    else if (!timer) { timer = setTimeout(() => { timer = null; last = Date.now(); fire(...lastArgs) }, t - (now - last)) }
-                                }
-                            }))()
+                            }
                         })
                         doneRenderCartogram()
                         setLoadStage('Fitting cartogram to map')
@@ -1474,10 +1682,19 @@ function bootstrap(meta = {}){
     })
 
     function fitCartogramToMapBounds(api = cartogramApi, h3map = h3toXY) {
-        if (hex_flying) return
-        if (!h3map || !api) return
+        if (hex_flying) {
+            syncLog('map->cartogram.skip_hex_flying')
+            return
+        }
+        if (!h3map || !api) {
+            syncLog('map->cartogram.skip_missing_state', {hasH3Map: !!h3map, hasApi: !!api})
+            return
+        }
         const bounds = map.getBounds()
-        if (!bounds) return
+        if (!bounds) {
+            syncLog('map->cartogram.skip_no_bounds')
+            return
+        }
         const corners = [
             bounds.getNorthWest(),
             bounds.getNorthEast(),
@@ -1485,27 +1702,56 @@ function bootstrap(meta = {}){
             bounds.getSouthEast(),
         ]
         let xMin = Infinity, yMin = Infinity, xMax = -Infinity, yMax = -Infinity
+        const cornerMatches = []
         for (const c of corners) {
             const h = latLngToCell(c.lat, c.lng, cartoRes)
             let pt = h3map.get(h)
-            if (!pt) pt = findClosestHex(c.lat, c.lng, h3map)
+            let fallback = false
+            if (!pt) {
+                pt = findClosestHex(c.lat, c.lng, h3map)
+                fallback = true
+            }
             if (!pt) continue
             const b = getH3Bounds(pt)
+            cornerMatches.push({lat: c.lat, lng: c.lng, h, fallback, cells: pt.cells.length, bounds: b})
             if (b.xMin < xMin) xMin = b.xMin
             if (b.yMin < yMin) yMin = b.yMin
             if (b.xMax > xMax) xMax = b.xMax
             if (b.yMax > yMax) yMax = b.yMax
         }
-        if (xMin === Infinity) return
-        api.fitToBounds([[xMin, yMin, xMax, yMax]])
+        if (xMin === Infinity) {
+            syncLog('map->cartogram.skip_no_corner_matches', {mapBounds: bounds.toArray ? bounds.toArray() : null})
+            return
+        }
+        const cartogramBounds = [[xMin, yMin, xMax, yMax]]
+        syncLog('map->cartogram.fit.request', {
+            mapBounds: bounds.toArray ? bounds.toArray() : null,
+            cornerMatches,
+            cartogramBounds,
+        })
+        api.fitToBounds(cartogramBounds)
     }
 
-    map.on('moveend', () => {
+    map.on('moveend', (event) => {
+        const original = event && event.originalEvent
+        const originalInMap = eventStartedInMap(original)
+        const shouldSyncCartogram = mapGestureMoved || originalInMap
+        mapGestureStarted = false
+        mapGestureMoved = false
+        clearTimeout(mapWheelResetTimer)
         humanMoved = true
         const pos = map.getCenter()
         const z = map.getZoom()
         history.replaceState(null, '', `#x=${pos.lng.toFixed(4)}&y=${pos.lat.toFixed(4)}&z=${z.toFixed(4)}`)
-        fitCartogramToMapBounds()
+        syncLog('map.moveend', {
+            originalEventType: original ? original.type : null,
+            originalInMap,
+            shouldSyncCartogram,
+            hex_flying,
+            center: {lng: pos.lng, lat: pos.lat},
+            zoom: z,
+        })
+        if (shouldSyncCartogram) fitCartogramToMapBounds()
     })
 
     function upperBound(array, target) {

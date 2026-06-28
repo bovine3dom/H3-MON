@@ -25,6 +25,7 @@ export function render_cartogram(container, data, options = {}) {
         // data
         data_col = 'code',
         perf = false,
+        debug = false,
         
         get_color = (z) => d3.scaleSequential(d3.interpolateSpectral).domain([0,1])(z) ?? 'rgba(255,255,255,0)',
         onclick_callback = console.log,
@@ -44,6 +45,9 @@ export function render_cartogram(container, data, options = {}) {
                 console.info(`[perf] cartogram.svg.${label}: ${elapsed.toFixed(1)}ms`)
             }
         }
+    }
+    function debugLog(label, details) {
+        if (debug) console.info(`[sync] cartogram.${label}`, details || {})
     }
 
     let currentData = data
@@ -94,39 +98,84 @@ export function render_cartogram(container, data, options = {}) {
     const labelsG = svg.append("g")
     doneSvgCreate()
 
-    let movePending = false
     let latestTransform = null
     let fitToBoundsActive = false
-    const zoom = d3.zoom().scaleExtent([0.5, 100]).on("zoom", (e) => {
-        g.attr("transform", e.transform)
-        labelsG.attr("transform", e.transform)
-        if (fitToBoundsActive) return
-        if (onmove_callback) {
-            latestTransform = e.transform
-            if (!movePending) {
-                movePending = true
-                requestAnimationFrame(() => {
-                    movePending = false
-                    const doneVisible = perfTimer('visible_indices', {rows: numRows})
-                    const t = latestTransform
-                    const visible = []
-                    for (let i = 0; i < numRows; i++) {
-                        const cx = getX(xCol[i])
-                        const cy = getY(yCol[i])
-                        const halfExtent = square_size * t.k / 2
-                        const sx = cx * t.k + t.x
-                        const sy = cy * t.k + t.y
-                        if (sx + halfExtent >= 0 && sx - halfExtent <= width &&
-                            sy + halfExtent >= 0 && sy - halfExtent <= height) {
-                            visible.push(i)
-                        }
-                    }
-                    doneVisible({visible: visible.length})
-                    onmove_callback(currentData, visible)
-                })
+    let cartogramGestureActive = false
+    let cartogramGestureMoved = false
+
+    function visibleViewport() {
+        const node = svg.node()
+        const rect = node ? node.getBoundingClientRect() : null
+        const viewport = {xMin: 0, yMin: 0, xMax: width, yMax: height}
+        if (!rect || rect.width <= 0 || rect.height <= 0) return viewport
+
+        const clientRatio = rect.width / rect.height
+        const viewRatio = width / height
+        if (clientRatio > viewRatio) {
+            const visibleHeight = width / clientRatio
+            viewport.yMin = (height - visibleHeight) / 2
+            viewport.yMax = viewport.yMin + visibleHeight
+        } else if (clientRatio < viewRatio) {
+            const visibleWidth = height * clientRatio
+            viewport.xMin = (width - visibleWidth) / 2
+            viewport.xMax = viewport.xMin + visibleWidth
+        }
+        return viewport
+    }
+
+    function visibleIndices(transform) {
+        const doneVisible = perfTimer('visible_indices', {rows: numRows})
+        const viewport = visibleViewport()
+        const visible = []
+        for (let i = 0; i < numRows; i++) {
+            const cx = getX(xCol[i])
+            const cy = getY(yCol[i])
+            const halfExtent = square_size * transform.k / 2
+            const sx = cx * transform.k + transform.x
+            const sy = cy * transform.k + transform.y
+            if (sx + halfExtent >= viewport.xMin && sx - halfExtent <= viewport.xMax &&
+                sy + halfExtent >= viewport.yMin && sy - halfExtent <= viewport.yMax) {
+                visible.push(i)
             }
         }
-    })
+        doneVisible({visible: visible.length})
+        debugLog('visible_indices', {
+            visible: visible.length,
+            rows: numRows,
+            viewport,
+            transform: {x: transform.x, y: transform.y, k: transform.k},
+            firstRows: visible.slice(0, 10),
+        })
+        return visible
+    }
+
+    const zoom = d3.zoom().scaleExtent([0.5, 100])
+        .on("start", (e) => {
+            const source = e.sourceEvent
+            const svgNode = svg.node()
+            cartogramGestureActive = !!source && !!svgNode && svgNode.contains(source.target)
+            cartogramGestureMoved = false
+        })
+        .on("zoom", (e) => {
+            g.attr("transform", e.transform)
+            labelsG.attr("transform", e.transform)
+            latestTransform = e.transform
+            if (fitToBoundsActive) return
+            if (cartogramGestureActive && e.sourceEvent) cartogramGestureMoved = true
+        })
+        .on("end", (e) => {
+            if (!fitToBoundsActive && onmove_callback && cartogramGestureActive && cartogramGestureMoved && latestTransform) {
+                const visible = visibleIndices(latestTransform)
+                debugLog('zoom.end', {
+                    sourceEventType: e.sourceEvent ? e.sourceEvent.type : null,
+                    visible: visible.length,
+                    transform: {x: latestTransform.x, y: latestTransform.y, k: latestTransform.k},
+                })
+                onmove_callback(currentData, visible, e.sourceEvent)
+            }
+            cartogramGestureActive = false
+            cartogramGestureMoved = false
+        })
     svg.call(zoom)
 
     const cellMap = new Map()
@@ -314,15 +363,29 @@ export function render_cartogram(container, data, options = {}) {
                 doneFit({skipped: true})
                 return
             }
+            const viewport = visibleViewport()
+            const viewportWidth = viewport.xMax - viewport.xMin
+            const viewportHeight = viewport.yMax - viewport.yMin
             const pad = 20
-            const k = Math.min((width - 2 * pad) / boxW, (height - 2 * pad) / boxH)
+            const k = Math.min((viewportWidth - 2 * pad) / boxW, (viewportHeight - 2 * pad) / boxH)
             const cx = (left + right) / 2
             const cy = (top + bottom) / 2
+            const viewportCx = (viewport.xMin + viewport.xMax) / 2
+            const viewportCy = (viewport.yMin + viewport.yMax) / 2
             fitToBoundsActive = true
+            const transform = d3.zoomIdentity.translate(viewportCx - cx * k, viewportCy - cy * k).scale(k)
+            debugLog('fit_to_bounds', {
+                inputBounds: [[x1, y1, x2, y2]],
+                viewport,
+                box: {left, right, top, bottom, boxW, boxH},
+                transform: {x: transform.x, y: transform.y, k: transform.k},
+                duration,
+            })
             doneFit({duration})
             svg.transition().duration(duration)
-                .call(zoom.transform, d3.zoomIdentity.translate(width / 2 - cx * k, height / 2 - cy * k).scale(k))
+                .call(zoom.transform, transform)
                 .on("end", () => { fitToBoundsActive = false })
+                .on("interrupt", () => { fitToBoundsActive = false })
         }
     }
 }
