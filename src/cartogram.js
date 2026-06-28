@@ -1,5 +1,14 @@
 import * as d3 from 'd3'
 
+const TRANSPARENT_COLOUR = 'rgba(0,0,0,0)'
+const DEFAULT_COLOUR_SCALE = d3.scaleSequential(d3.interpolateSpectral).domain([0,1])
+
+function defaultGetColour(z) {
+    if (z == null) return TRANSPARENT_COLOUR
+    const number = Number(z)
+    return Number.isFinite(number) ? (DEFAULT_COLOUR_SCALE(number) ?? TRANSPARENT_COLOUR) : TRANSPARENT_COLOUR
+}
+
 export function render_cartogram(container, data, options = {}) {
     const {
         square_size = 10,
@@ -19,10 +28,15 @@ export function render_cartogram(container, data, options = {}) {
         perf = false,
         svgPerf = false,
         debug = false,
-        get_color = (z) => d3.scaleSequential(d3.interpolateSpectral).domain([0,1])(z) ?? 'rgba(255,255,255,0)',
+        get_color = defaultGetColour,
         onclick_callback = console.log,
         onmove_callback = () => {},
     } = options
+
+    const HTML_ESCAPES = {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}
+    function escapeHtml(value) {
+        return String(value).replace(/[&<>"']/g, c => HTML_ESCAPES[c])
+    }
 
     const perfNow = () => (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now())
     function perfTimer(label, details) {
@@ -134,7 +148,7 @@ export function render_cartogram(container, data, options = {}) {
     function updateColors(col) {
         const doneColors = perfTimer('colors.update', {rows: numRows})
         colors = new Array(numRows)
-        for (let i = 0; i < numRows; i++) colors[i] = get_color(col[i]) ?? 'rgba(255,255,255,0)'
+        for (let i = 0; i < numRows; i++) colors[i] = get_color(col[i]) ?? TRANSPARENT_COLOUR
         doneColors()
     }
     updateColors(currentData[currentDataCol])
@@ -525,7 +539,7 @@ export function render_cartogram(container, data, options = {}) {
             } else if (typeof val === 'number') {
                 displayVal = parseFloat(val.toPrecision(3)).toLocaleString()
             }
-            if (displayVal != null && displayVal !== '') rows.push(`<div><strong>${key}:</strong> ${displayVal}</div>`)
+            if (displayVal != null && displayVal !== '') rows.push(`<div><strong>${escapeHtml(key)}:</strong> ${escapeHtml(displayVal)}</div>`)
         }
         return rows.join("")
     }

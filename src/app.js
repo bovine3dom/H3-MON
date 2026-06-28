@@ -14,8 +14,14 @@ import {getCitiesStartsWith} from 'tiny-geocoder'
 import {render_cartogram} from './cartogram'
 
 const params = new URLSearchParams(window.location.search)
+function settingEnabled(value, fallback = false) {
+    if (value == null) return fallback
+    if (typeof value === 'boolean') return value
+    return !['0', 'false', 'off', 'no'].includes(String(value).trim().toLowerCase())
+}
+
 function flagEnabled(name) {
-    return params.has(name) && !['0', 'false', 'off', 'no'].includes((params.get(name) || '').toLowerCase())
+    return params.has(name) && settingEnabled(params.get(name), true)
 }
 const perfEnabled = flagEnabled('perf')
 const svgPerfEnabled = flagEnabled('svgperf')
@@ -561,6 +567,11 @@ function toStringValue(value) {
     return typeof value === 'bigint' ? value.toString() : String(value)
 }
 
+const HTML_ESCAPES = {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}
+function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, c => HTML_ESCAPES[c])
+}
+
 const XY_KEY_BASE = 1048576
 function xyKey(x, y) {
     return Math.abs(y) < XY_KEY_BASE ? x * XY_KEY_BASE + y : `${x},${y}`
@@ -909,15 +920,10 @@ map.on('movestart', (event) => {
     if (mapGestureStarted || eventStartedInMap(original)) mapGestureMoved = true
 })
 
-let humanMoved = false
-window.addEventListener("hashchange", () => {
-    if (humanMoved) {
-        humanMoved = false
-        return
-    }
-    const pos = Object.fromEntries(new URLSearchParams(window.location.hash.slice(1)))
-    const longitude = pos.x ? pos.x : 0.45
-    const latitude = pos.y ? pos.y : 51.47
+    window.addEventListener("hashchange", () => {
+        const pos = Object.fromEntries(new URLSearchParams(window.location.hash.slice(1)))
+        const longitude = pos.x ? pos.x : 0.45
+        const latitude = pos.y ? pos.y : 51.47
     const zoom = pos.z ? pos.z : 4
     syncCartogramAfterNextMapMove('hashchange')
     map.flyTo({
@@ -945,20 +951,32 @@ fetch(`data/${meta_name}`).then(r => r.json()).then(meta => {
 
 function bootstrap(meta = {}){
     const settings = Object.assign({}, meta, Object.fromEntries(params.entries()))
-    const settingEnabled = (value, fallback = false) => {
-        if (value == null) return fallback
-        if (typeof value === 'boolean') return value
-        return !['0', 'false', 'off', 'no'].includes(String(value).toLowerCase())
-    }
     const infill = settingEnabled(settings.infill, false)
-    const doCyclical = settings.cyclical != undefined
-    const flip = settings.flip != undefined
+    const doCyclical = settingEnabled(settings.cyclical, false)
+    const flip = settingEnabled(settings.flip, false)
+    const showTrains = settingEnabled(settings.trains, false)
     const colourRamp = d3.scaleSequential(doCyclical ? d3.interpolateRainbow : d3.interpolateSpectral).domain(flip ? [1,0] : [0,1])
     const file_path = `data/${file_name}`
     if (settings.t) document.title = settings.t
 
-    /* convert from "rgba(r,g,b,a)" string to [r,g,b] */
-    const getColour = v => Object.values(d3.color(colourRamp(v))).slice(0,-1)
+    const transparentColour = [0, 0, 0, 0]
+    const transparentCss = 'rgba(0,0,0,0)'
+    const getCssColour = v => {
+        const number = toFiniteNumber(v)
+        return number == null ? transparentCss : (colourRamp(number) ?? transparentCss)
+    }
+    const getColour = v => {
+        const colour = d3.color(getCssColour(v))
+        return colour ? [colour.r, colour.g, colour.b, Math.round((colour.opacity ?? 1) * 255)] : transparentColour
+    }
+    const writeColour = (target, colour) => {
+        if (!target) return colour
+        target[0] = colour[0]
+        target[1] = colour[1]
+        target[2] = colour[2]
+        target[3] = colour[3] ?? 255
+        return target
+    }
 
     function hexAccessors(kind, indexkey, valuekey, getColour) {
         if (kind === 'column') {
@@ -967,17 +985,13 @@ function bootstrap(meta = {}){
                 getFillColor: (_, {index, data, target}) => {
                     const v = data.src[valuekey][index]
                     const colour = getColour(v)
-                    target[0] = 255*v
-                    target[1] = 255*v
-                    target[2] = 255*v
-                    target[3] = 255
-                    return colour
+                    return writeColour(target, colour)
                 }
             }
         }
         return {
             getHexagon: d => d.index,
-            getFillColor: d => getColour(d[valuekey])
+            getFillColor: (d, {target} = {}) => writeColour(target, getColour(d[valuekey]))
         }
     }
 
@@ -1201,7 +1215,7 @@ function bootstrap(meta = {}){
         if (!loadProgress.totalWork) configureLoadProgress()
         setLoadStage('Loading data')
 
-        const doQuantiles = settings.raw == undefined
+        const doQuantiles = !settingEnabled(settings.raw, false)
         const trimFactor = settings.trimFactor ? settings.trimFactor : 0.01
         const useCartogramQuantiles = settings.quantileSource === 'cartogram'
 
@@ -1319,7 +1333,7 @@ function bootstrap(meta = {}){
                             svgPerf: svgPerfEnabled,
                             debug: syncDebugEnabled,
                             draw_outline: false,
-                            get_color: z => colourRamp(z) ?? 'rgba(255,255,255,0)',
+                            get_color: getCssColour,
                             include_outer_borders: true,
                             data_col: cartoDataCol,
                             onclick_callback: (data, event, i) => {
@@ -1505,10 +1519,9 @@ function bootstrap(meta = {}){
 
         if (format.layer === 'geojson') {
             setLoadStage('Preparing GeoJSON layer')
-            const randomColour = () => [Math.random()*255, Math.random()*255, Math.random()*255, 200]
             const getColor = f => {
                 const v = valuekey === 'quantile' ? f.properties?.quantile : (f.properties?.value ?? f.value ?? f.properties?.val)
-                return v != null ? getColour(v) : randomColour()
+                return getColour(v)
             }
             const doneGeoJsonLayer = perfTimer('deck.geojson_layer.create', {rows: data.features.length})
             const layer = new GeoJsonLayer({
@@ -1517,7 +1530,7 @@ function bootstrap(meta = {}){
                 filled: true,
                 stroked: true,
                 getFillColor: getColor,
-                getLineColor: f => { const rgb = getColor(f); return [...rgb.slice(0,3), 255] },
+                getLineColor: f => { const rgba = getColor(f); return rgba[3] === 0 ? rgba : [...rgba.slice(0,3), 255] },
                 getLineWidth: 1000,
                 lineWidthMinPixels: 1,
                 lineJointRounded: true,
@@ -1571,7 +1584,7 @@ function bootstrap(meta = {}){
             if (typeof v === 'object') return JSON.stringify(v)
             return v
         }
-        const toDivs = kv => `<div>${kv[0]}: ${fmtVal(kv[1])}</div>`
+        const toDivs = kv => `<div>${escapeHtml(kv[0])}: ${escapeHtml(fmtVal(kv[1]))}</div>`
         return {
             html: Object.entries(row).filter(([,v]) => v != null && v !== '').map(toDivs).join(" "),
             style: {
@@ -1715,7 +1728,7 @@ function bootstrap(meta = {}){
     renderLayers = () => {
         const layers = [...mainLayers]
         if (highlightLayer) layers.push(highlightLayer)
-        if (settings.trains) {
+        if (showTrains) {
             layers.push(choochoo)
         }
         const rendered = waitForNextDeckRender()
@@ -1745,7 +1758,7 @@ function bootstrap(meta = {}){
 
     const l = document.getElementById("attribution")
     const extra_c = settings.c ? settings.c.split(",") : []
-    if (settings.trains) extra_c.push("OpenRailwayMap")
+    if (showTrains) extra_c.push("OpenRailwayMap")
     l.innerText = "©\u00a0" + [...extra_c, "OpenFreeMap", "Natural Earth", "GEBCO", "Mapterhorn", "OpenStreetMap contributors"].filter(x=>x !== null).join(" ©\u00a0")
     const legendDiv = document.createElement('div')
     legendDiv.id = "observable_legend"
@@ -1776,24 +1789,33 @@ function bootstrap(meta = {}){
         }
     }
 
-
-    const socket = new WebSocket(`ws://${window.location.hostname}:1990`)
-    socket.addEventListener("error", (event) => {
-        console.warn("WebSocket error, automatic updates disabled")
-        update()
-    })
-    socket.addEventListener("open", (event) => {
-        socket.send("ping")
-        socket.send(`watch:${file_name}`)
-    })
-    // Update whenever you get a message (even if the message is "do not update")
-    // nb: this means that the "pong" message is important
-    socket.addEventListener("message", (event) => {
-        console.log("Message from server:", event.data)
-        if (event.data.startsWith("change") || event.data.startsWith("watching")) {
-            setTimeout(update, 100) // give file some time to be written
+    try {
+        const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
+        const host = window.location.hostname.includes(':') ? `[${window.location.hostname}]` : window.location.hostname
+        const socket = new WebSocket(`${protocol}://${host}:1990`)
+        let updateStarted = false
+        const startUpdate = (delay = 0) => {
+            updateStarted = true
+            setTimeout(update, delay)
         }
-    })
+        socket.addEventListener("error", () => {
+            console.warn("WebSocket error, automatic updates disabled")
+            if (!updateStarted) startUpdate()
+        })
+        socket.addEventListener("open", () => {
+            socket.send("ping")
+            socket.send(`watch:${file_name}`)
+        })
+        socket.addEventListener("message", (event) => {
+            const message = String(event.data)
+            if (message.startsWith("change") || message.startsWith("watching")) {
+                startUpdate(100) // give file some time to be written
+            }
+        })
+    } catch (e) {
+        console.warn("WebSocket unavailable, automatic updates disabled", e)
+        update()
+    }
 
     function fitCartogramToMapBounds(api = cartogramApi, h3map = h3toXY) {
         if (hex_flying) {
@@ -1855,7 +1877,6 @@ function bootstrap(meta = {}){
         mapGestureMoved = false
         mapProgrammaticSyncReason = null
         clearTimeout(mapWheelResetTimer)
-        humanMoved = true
         const pos = map.getCenter()
         const z = map.getZoom()
         history.replaceState(null, '', `#x=${pos.lng.toFixed(4)}&y=${pos.lat.toFixed(4)}&z=${z.toFixed(4)}`)

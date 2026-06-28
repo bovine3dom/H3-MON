@@ -14,3 +14,13 @@ left join (
     group by x,y
 ) p on p.x = c.x and p.y = c.y
 into outfile 'cartogram_weights.arrow' settings output_format_arrow_compression_method = 'none'
+
+
+select floor(value, 1) flv, round(min(median))
+from 'out_string_quantile.arrow'
+group by flv
+order by flv asc
+format csv
+
+select median as value, index from 'out_string_quantile.arrow'
+into outfile 'population_density.arrow' settings output_format_arrow_compression_method = 'none'
