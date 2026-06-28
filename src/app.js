@@ -16,6 +16,64 @@ import PERSPECTIVE_SERVER_WASM from "@perspective-dev/server/dist/wasm/perspecti
 import PERSPECTIVE_CLIENT_WASM from "@perspective-dev/client/dist/wasm/perspective-js.wasm"
 import {render_cartogram} from './cartogram'
 
+const params = new URLSearchParams(window.location.search)
+const perfEnabled = params.has('perf') && !['0', 'false', 'off', 'no'].includes((params.get('perf') || '').toLowerCase())
+const now = () => (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now())
+function perfTimer(label, details) {
+    if (!perfEnabled) return () => {}
+    const start = now()
+    return (extra) => {
+        const elapsed = now() - start
+        const merged = {...(details || {}), ...(extra || {})}
+        if (Object.keys(merged).length) {
+            console.info(`[perf] ${label}: ${elapsed.toFixed(1)}ms`, merged)
+        } else {
+            console.info(`[perf] ${label}: ${elapsed.toFixed(1)}ms`)
+        }
+    }
+}
+
+async function measurePerf(label, details, fn) {
+    if (typeof details === 'function') {
+        fn = details
+        details = null
+    }
+    const done = perfTimer(label, details)
+    try {
+        return await fn()
+    } finally {
+        done()
+    }
+}
+
+async function parseArrowTable(buf, label, details = {}) {
+    const table = await measurePerf(label, details, () => ArrowLoader.parseSync(buf, {arrow: {shape: 'arrow-table'}}))
+    return table.data
+}
+
+function columnValue(column, i) {
+    return column && typeof column.get === 'function' ? column.get(i) : column[i]
+}
+
+function columnLength(column) {
+    return column ? column.length : 0
+}
+
+async function materializeArrowColumn(table, name, labelPrefix) {
+    const column = table.getChild(name)
+    if (!column) return null
+    return measurePerf(`${labelPrefix}.${name}`, {rows: column.length}, () => column.toArray())
+}
+
+async function materializeArrowColumns(table, names, labelPrefix) {
+    const cols = {}
+    for (const name of names) {
+        const column = await materializeArrowColumn(table, name, labelPrefix)
+        if (column) cols[name] = column
+    }
+    return cols
+}
+
 function computeH3Bounds(indices) {
     let minLat = 90, maxLat = -90, minLng = 180, maxLng = -180
     for (const idx of indices) {
@@ -42,6 +100,124 @@ let h3toXY = null
 let cartogramApi = null
 let cartoAggCols = null
 let cartoRes = 5
+let cartogramAgg = null
+let cartogramRawCols = null
+let h3toXYPromise = null
+
+function addCount(counts, value) {
+    counts.set(value, (counts.get(value) || 0) + 1)
+}
+
+function dominant(counts) {
+    let best = null
+    let bestCount = -1
+    for (const [value, count] of counts) {
+        if (count > bestCount) {
+            best = value
+            bestCount = count
+        }
+    }
+    return best
+}
+
+function toNumber(value) {
+    return typeof value === 'bigint' ? Number(value) : value
+}
+
+function toStringValue(value) {
+    return typeof value === 'bigint' ? value.toString() : String(value)
+}
+
+const XY_KEY_BASE = 1048576
+function xyKey(x, y) {
+    return Math.abs(y) < XY_KEY_BASE ? x * XY_KEY_BASE + y : `${x},${y}`
+}
+
+function buildCartogramAggregation(rawCols) {
+    const rowCount = columnLength(rawCols.index)
+    const done = perfTimer('cartogram.cells.precompute', {rows: rowCount})
+    const cellByKey = new Map()
+    const rowCell = new Uint32Array(rowCount)
+    const x = []
+    const y = []
+    const code = []
+    const label = []
+    const index = []
+    const codeCounts = []
+    const labelCounts = []
+
+    for (let i = 0; i < rowCount; i++) {
+        const cx = toNumber(rawCols.x[i])
+        const cy = toNumber(rawCols.y[i])
+        const key = xyKey(cx, cy)
+        let cellIndex = cellByKey.get(key)
+        if (cellIndex === undefined) {
+            cellIndex = x.length
+            cellByKey.set(key, cellIndex)
+            x.push(cx)
+            y.push(cy)
+            codeCounts.push(new Map())
+            labelCounts.push(new Map())
+        }
+        rowCell[i] = cellIndex
+
+        if (rawCols.code && rawCols.code[i] != null) addCount(codeCounts[cellIndex], toNumber(rawCols.code[i]) / 1000)
+        if (rawCols.label && (!rawCols.label.isValid || rawCols.label.isValid(i))) {
+            const labelValue = columnValue(rawCols.label, i)
+            if (labelValue != null && labelValue !== '') addCount(labelCounts[cellIndex], labelValue)
+        }
+    }
+
+    for (let i = 0; i < x.length; i++) {
+        code.push(dominant(codeCounts[i]))
+        label.push(dominant(labelCounts[i]))
+        index.push('')
+    }
+
+    done({cells: x.length, strategy: 'numeric-xy-key'})
+    return {
+        h3ByRow: rawCols.index,
+        weights: rawCols.weight_mean || rawCols.weight || null,
+        rowCell,
+        x,
+        y,
+        code,
+        label,
+        index,
+    }
+}
+
+function buildH3ToXY(rawCols) {
+    const rowCount = columnLength(rawCols.index)
+    const doneIndex = perfTimer('cartogram.h3_to_xy.build', {rows: rowCount})
+    const map = new Map()
+    const indexParts = cartogramAgg ? Array.from({length: cartogramAgg.x.length}, () => []) : null
+    for (let i = 0; i < rowCount; i++) {
+        const hex = toStringValue(columnValue(rawCols.index, i))
+        const x = toNumber(rawCols.x[i])
+        const y = toNumber(rawCols.y[i])
+        const existing = map.get(hex)
+        if (existing) {
+            existing.cells.push([x, y])
+        } else {
+            map.set(hex, {cells: [[x, y]]})
+        }
+        if (indexParts) indexParts[cartogramAgg.rowCell[i]].push(hex)
+    }
+    if (indexParts) {
+        for (let i = 0; i < indexParts.length; i++) cartogramAgg.index[i] = indexParts[i].join(', ')
+    }
+    h3toXY = map
+    doneIndex({uniqueH3: map.size, cellIndexes: !!indexParts})
+    return map
+}
+
+async function ensureH3ToXY() {
+    if (h3toXY) return h3toXY
+    if (!cartogramRawCols) await cartogramInit
+    if (!h3toXYPromise) h3toXYPromise = Promise.resolve().then(() => buildH3ToXY(cartogramRawCols))
+    return h3toXYPromise
+}
 
 function hex(hexes, options = {}) {
     const {fit = false, padding = 200, highlight = true} = options
@@ -79,10 +255,15 @@ function hex(hexes, options = {}) {
     }
 }
 
-function findClosestHex(targetLat, targetLng) {
+function findClosestHex(targetLat, targetLng, h3map = h3toXY) {
     let best = null
     let bestDist = Infinity
-    for (const pt of h3toXY.values()) {
+    for (const [hex, pt] of h3map) {
+        if (pt.lat == null || pt.lng == null) {
+            const [lat, lng] = cellToLatLng(hex)
+            pt.lat = lat
+            pt.lng = lng
+        }
         const d = (pt.lat - targetLat) ** 2 + (pt.lng - targetLng) ** 2
         if (d < bestDist) {
             bestDist = d
@@ -103,36 +284,38 @@ function getH3Bounds(entry) {
     return {xMin, xMax, yMin, yMax}
 }
 
-perspective.init_server(fetch(PERSPECTIVE_SERVER_WASM))
-perspective.init_client(fetch(PERSPECTIVE_CLIENT_WASM))
-
-const ps = perspective.worker()
+let perspectiveWorkerPromise = null
+async function getPerspectiveWorker() {
+    if (!perspectiveWorkerPromise) {
+        perspective.init_server(fetch(PERSPECTIVE_SERVER_WASM))
+        perspective.init_client(fetch(PERSPECTIVE_CLIENT_WASM))
+        perspectiveWorkerPromise = perspective.worker()
+    }
+    const worker = await measurePerf('perspective.worker.ready', () => perspectiveWorkerPromise)
+    window.ps = worker
+    return worker
+}
 
 const cartogramInit = (async () => {
-    const worker = await ps
-    window.ps = worker
-    const arrow_resp = await fetch('data/cartogram_weights.arrow')
-    const cartogram_table = await worker.table(await arrow_resp.arrayBuffer())
-
-    const rawView = await cartogram_table.view({columns: ['index', 'x', 'y']})
-    const rawCols = await rawView.to_columns()
-    rawView.delete()
-    cartoRes = getResolution(rawCols.index[0])
-    h3toXY = new Map()
-    for (let i = 0; i < rawCols.index.length; i++) {
-        const hex = rawCols.index[i]
-        const x = rawCols.x[i]
-        const y = rawCols.y[i]
-        const existing = h3toXY.get(hex)
-        if (existing) {
-            existing.cells.push([x, y])
-        } else {
-            const [lat, lng] = cellToLatLng(hex)
-            h3toXY.set(hex, {cells: [[x, y]], lat, lng})
-        }
+    const doneInit = perfTimer('cartogram.init.total')
+    const arrow_resp = await measurePerf('cartogram.weights.fetch', () => fetch('data/cartogram_weights.arrow'))
+    const arrow_buf = await measurePerf('cartogram.weights.arrayBuffer', () => arrow_resp.arrayBuffer())
+    const rawTable = await parseArrowTable(arrow_buf, 'cartogram.weights.arrow_parse', {bytes: arrow_buf.byteLength})
+    const rawCols = {
+        x: await materializeArrowColumn(rawTable, 'x', 'cartogram.weights.column'),
+        y: await materializeArrowColumn(rawTable, 'y', 'cartogram.weights.column'),
+        code: await materializeArrowColumn(rawTable, 'code', 'cartogram.weights.column'),
+        label: rawTable.getChild('label'),
+        index: rawTable.getChild('index'),
+        weight: await materializeArrowColumn(rawTable, 'weight', 'cartogram.weights.column'),
+        weight_mean: await materializeArrowColumn(rawTable, 'weight_mean', 'cartogram.weights.column'),
     }
+    cartoRes = getResolution(toStringValue(columnValue(rawCols.index, 0)))
+    cartogramRawCols = rawCols
+    cartogramAgg = buildCartogramAggregation(rawCols)
+    doneInit({rows: columnLength(rawCols.index), cells: cartogramAgg.x.length, cartoRes})
 
-    return {worker, cartogram_table}
+    return {}
     // next steps:
     // 0) debug why on earth labels are showing up in multiple places even though they are unique in mapping.arrow. ditto for country borders?
     // 1) draw the cartogram in a new pane with borders
@@ -248,7 +431,6 @@ window.addEventListener("hashchange", () => {
     })
 })
 
-const params = new URLSearchParams(window.location.search)
 const dataParam = params.get('data') || 'out_string_quantile.arrow'
 // const dataParam = params.get('data') || 'h3_data'
 const dotIdx = dataParam.lastIndexOf('.')
@@ -308,33 +490,114 @@ function bootstrap(meta = {}){
 
     function applyQuantiles(raw, kind, getquantile) {
         if (kind === 'column') {
-            const quantiles = Array.from(raw.value).map(getquantile)
+            const quantiles = assignQuantiles(raw.value, getquantile)
             return {...raw, quantile: quantiles}
         }
         return raw.map(o => ({...o, quantile: getquantile(o.value)}))
     }
 
+    function assignQuantiles(values, getquantile) {
+        const quantiles = new Array(values.length)
+        for (let i = 0; i < values.length; i++) quantiles[i] = getquantile(values[i])
+        return quantiles
+    }
+
+    function getDefaultValue() {
+        const defaultValue = settings.defaultValue ?? null // in metadata json, specify defaultValue for missing data aggregation into cartogram
+        if (defaultValue == null || defaultValue === '' || defaultValue === 'null') return null
+        const parsed = Number(defaultValue)
+        return Number.isNaN(parsed) ? null : parsed
+    }
+
+    function groupCartogramWithMap(sourceCols, sourceValueKey, perfDetails = {}) {
+        const doneGroup = perfTimer('cartogram.js_group.total', perfDetails)
+        const defaultValue = getDefaultValue()
+        const meanCol = sourceValueKey === 'quantile' ? 'quantile_mean' : 'value_mean'
+        const sourceIndex = sourceCols.index
+        const sourceValues = sourceCols[sourceValueKey]
+
+        const sourceRows = columnLength(sourceIndex)
+        const doneDataMap = perfTimer('cartogram.js_group.data_map', {rows: sourceRows})
+        const valuesByH3 = new Map()
+        for (let i = 0; i < sourceRows; i++) {
+            valuesByH3.set(String(columnValue(sourceIndex, i)), columnValue(sourceValues, i))
+        }
+        doneDataMap({entries: valuesByH3.size})
+
+        const cellCount = cartogramAgg.x.length
+        const numerator = new Float64Array(cellCount)
+        const denominator = new Float64Array(cellCount)
+        const weights = cartogramAgg.weights
+        const cartogramRows = columnLength(cartogramAgg.h3ByRow)
+        const doneAccum = perfTimer('cartogram.js_group.accumulate', {rows: cartogramRows, cells: cellCount})
+        for (let i = 0; i < cartogramRows; i++) {
+            let value = valuesByH3.get(String(columnValue(cartogramAgg.h3ByRow, i)))
+            if (value == null) value = defaultValue
+            if (value == null) continue
+            value = toNumber(value)
+            const weight = weights ? toNumber(weights[i]) : 1
+            if (weight == null) continue
+            const cellIndex = cartogramAgg.rowCell[i]
+            numerator[cellIndex] += value * weight
+            denominator[cellIndex] += weight
+        }
+        doneAccum()
+
+        const doneOutput = perfTimer('cartogram.js_group.output', {cells: cellCount})
+        const values = new Array(cellCount)
+        for (let i = 0; i < cellCount; i++) {
+            values[i] = denominator[i] ? numerator[i] / denominator[i] : null
+        }
+        const aggCols = {
+            x: cartogramAgg.x,
+            y: cartogramAgg.y,
+            _code: cartogramAgg.code,
+            code: cartogramAgg.code,
+            label: cartogramAgg.label,
+            index: cartogramAgg.index,
+            [meanCol]: values,
+        }
+        doneOutput()
+        doneGroup({rows: cellCount, defaultValue})
+        return {aggCols, meanCol}
+    }
+
     let reloadNum = 0
     const getHexData = async () => {
+        const doneGetHexData = perfTimer('data.reload.total', {file: file_name, ext, layer: format.layer})
 
         const doQuantiles = settings.raw == undefined
         const trimFactor = settings.trimFactor ? settings.trimFactor : 0.01
         const useCartogramQuantiles = settings.quantileSource === 'cartogram'
 
         if (format.layer === 'hex' && (ext === 'arrow' || ext === 'csv')) {
-            const {worker, cartogram_table} = await cartogramInit
-            const resp = await fetch(`${file_path}?v=${++reloadNum}`)
-            const buf = ext === 'csv' ? await resp.text() : await resp.arrayBuffer()
-            const userTable = await worker.table(buf)
-            const schema = await userTable.schema()
+            const cartogramReady = measurePerf('cartogram.init.await', () => cartogramInit)
+            const reload = ++reloadNum
+            const resp = await measurePerf('data.fetch', {file: file_path, reload}, () => fetch(`${file_path}?v=${reload}`))
+            const buf = await measurePerf(ext === 'csv' ? 'data.read_text' : 'data.read_arrayBuffer', () => ext === 'csv' ? resp.text() : resp.arrayBuffer())
+            let userTable = null
+            let dataCols
+            let schema
+            if (ext === 'arrow') {
+                const dataTable = await parseArrowTable(buf, 'data.arrow_parse', {bytes: buf.byteLength})
+                const fields = dataTable.schema.fields.map(f => f.name)
+                dataCols = await materializeArrowColumns(dataTable, fields, 'data.arrow_column')
+                schema = dataCols
+            } else {
+                const worker = await getPerspectiveWorker()
+                userTable = await measurePerf('data.user_table', {bytes: buf.length}, () => worker.table(buf))
+                schema = await measurePerf('data.schema', () => userTable.schema())
+                const dataView = await measurePerf('data.view', () => userTable.view())
+                dataCols = await measurePerf('data.to_columns', () => dataView.to_columns())
+                dataView.delete()
+            }
 
             const hasWeight = schema.hasOwnProperty('weight')
-            const dataView = await userTable.view()
-            const dataCols = await dataView.to_columns()
-            dataView.delete()
 
             if (dataCols.index.length && String(dataCols.index[0]).startsWith('0')) {
+                const doneIndexNormalize = perfTimer('data.index_normalize', {rows: dataCols.index.length})
                 dataCols.index = dataCols.index.map(h => String(h).slice(1))
+                doneIndexNormalize()
             }
 
             const values = dataCols.value
@@ -343,9 +606,13 @@ function bootstrap(meta = {}){
             let getvalueFn
 
             if (doQuantiles && !useCartogramQuantiles) {
+                const doneEcdf = perfTimer('data.quantile.ecdf', {rows: values.length, weighted: !!weights})
                 const [getquantile, getvalue] = ecdf(values, trimFactor, weights)
+                doneEcdf()
                 getvalueFn = getvalue
-                dataCols.quantile = values.map(v => getquantile(v))
+                const doneQuantileAssign = perfTimer('data.quantile.assign', {rows: values.length})
+                dataCols.quantile = assignQuantiles(values, getquantile)
+                doneQuantileAssign()
                 valuekey = 'quantile'
                 makeLegend(getvalueFn)
             } else if (!doQuantiles) {
@@ -357,96 +624,91 @@ function bootstrap(meta = {}){
             let deckLayer
 
             if (!useCartogramQuantiles || !doQuantiles) {
+                const doneDeckLayer = perfTimer('deck.hex_layer.create', {rows: dataCols.value.length})
                 const accessors = hexAccessors('column', 'index', valuekey, getColour)
                 const dataWrap = {src: dataCols, length: dataCols.value.length}
                 deckLayer = new H3HexagonLayer({
                     id: 'H3HexagonLayer', data: dataWrap,
                     extruded: false, stroked: false, ...accessors, elevationScale: 20, pickable: true
                 })
+                doneDeckLayer()
             }
 
             if (schema.hasOwnProperty('index')) {
+                await cartogramReady
                 const firstIndex = dataCols.index[0]
                 const h3res = getResolution(String(firstIndex))
 
                 cartoAggCols = null
                 let cartoDataCol = null
 
-                async function groupCartogram(sourceTable) {
-                    const defaultValue = settings.defaultValue ?? null // in metadata json, specify defaultValue for missing data aggregation into cartogram
-                    const joinedTable = await worker.join(cartogram_table, sourceTable, 'index', {join_type: 'left'})
-                    const meanCol = valuekey === 'quantile' ? 'quantile_mean' : 'value_mean'
-                    const expressions = {'_code': '"code"/1000'}
-                    const aggregates = {'_code': 'dominant', 'label': 'dominant', 'x': 'first', 'y': 'first', 'index': 'join'}
-                    const columns = ['x', 'y', '_code', 'label', 'index' ]
-                    expressions[meanCol] = `coalesce("${valuekey}", float(${defaultValue}))`
-                    aggregates[meanCol] = ['weighted mean', ['weight_mean']] // syntax: {aggegates: {value_col: ['weighted mean', ['weight_col']]}}
-                    columns.push(meanCol)
-
-                    const aggView = await joinedTable.view({expressions, columns, aggregates, group_by: ['x', 'y'], group_rollup_mode: 'flat'})
-                    const aggCols = await aggView.to_columns()
-                    aggView.delete()
-                    joinedTable.delete()
-
-                    aggCols.code = aggCols._code
-                    return {aggCols, meanCol}
-                }
-
                 if (h3res === cartoRes) {
-                    const enhancedTable = await worker.table(dataCols)
-                    const result = await groupCartogram(enhancedTable)
+                    const result = groupCartogramWithMap(dataCols, valuekey, {source: 'same-resolution', rows: dataCols.index.length})
                     cartoAggCols = result.aggCols
                     cartoDataCol = result.meanCol
-                    enhancedTable.delete()
                 } else if (h3res > cartoRes) {
-                    const defaultValue = settings.defaultValue ?? null // in metadata json, specify defaultValue for missing data aggregation into cartogram
-                    const cartoH3s = Array.from(h3toXY.keys())
+                    const defaultValue = getDefaultValue()
+                    const worker = await getPerspectiveWorker()
+                    const h3map = await ensureH3ToXY()
+                    const cartoH3s = Array.from(h3map.keys())
+                    const doneChildPairs = perfTimer('cartogram.child_pairs.build', {cartoH3s: cartoH3s.length, cartoRes, h3res})
                     const childPairs = cartoH3s.flatMap(h =>
                         cellToChildren(h, h3res).map(child => ({child, cartoH3: h}))
                     )
-                    const childTable = await worker.table(childPairs)
+                    doneChildPairs({rows: childPairs.length})
+                    const childTable = await measurePerf('cartogram.child_table', {rows: childPairs.length}, () => worker.table(childPairs))
                     const dataSubset = {child: dataCols.index, [valuekey]: dataCols[valuekey]}
-                    const dataTable = await worker.table(dataSubset)
-                    const joined = await worker.join(childTable, dataTable, 'child', {join_type: 'left'})
+                    const dataTable = await measurePerf('cartogram.child_data_table', {rows: dataCols.index.length}, () => worker.table(dataSubset))
+                    const joined = await measurePerf('cartogram.child_join', {childRows: childPairs.length, dataRows: dataCols.index.length}, () => worker.join(childTable, dataTable, 'child', {join_type: 'left'}))
                     const fillExpr = {["_" + valuekey]: `coalesce("${valuekey}", float(${defaultValue}))`}
-                    const groupView = await joined.view({
+                    const groupView = await measurePerf('cartogram.child_group.view', () => joined.view({
                         expressions: fillExpr,
                         columns: ['cartoH3', "_" + valuekey],
                         aggregates: {["_" + valuekey]: 'mean', "cartoH3": 'first'},
                         group_by: ['cartoH3'],
                         group_rollup_mode: 'flat'
-                    })
-                    const grouped = await groupView.to_columns()
+                    }))
+                    const grouped = await measurePerf('cartogram.child_group.to_columns', () => groupView.to_columns())
                     groupView.delete()
                     joined.delete()
                     childTable.delete()
                     dataTable.delete()
+                    const doneChildGroupNormalize = perfTimer('cartogram.child_group.normalize', {rows: grouped.cartoH3.length})
                     delete grouped.__ROW_PATH__
                     grouped.index = grouped.cartoH3
                     delete grouped.cartoH3
                     grouped[valuekey] = grouped["_" + valuekey]
                     delete grouped["_" + valuekey]
-                    const enhancedTable = await worker.table(grouped)
-                    const result = await groupCartogram(enhancedTable)
+                    doneChildGroupNormalize()
+                    const result = groupCartogramWithMap(grouped, valuekey, {source: 'child-rollup', rows: grouped.index.length})
                     cartoAggCols = result.aggCols
                     cartoDataCol = result.meanCol
-                    enhancedTable.delete()
                 }
 
                 if (cartoAggCols) {
+                    const h3map = await measurePerf('cartogram.h3_to_xy.await_render', () => ensureH3ToXY())
+
                     if (useCartogramQuantiles && doQuantiles) {
                         const cartoValues = cartoAggCols[cartoDataCol]
+                        const doneCartoEcdf = perfTimer('cartogram.quantile.ecdf', {rows: cartoValues.length})
                         const [getquantile, getvalue] = ecdf(cartoValues, trimFactor)
+                        doneCartoEcdf()
                         getvalueFn = getvalue
-                        dataCols.quantile = values.map(v => getquantile(v))
-                        cartoAggCols['carto_quantile'] = cartoValues.map(v => getquantile(v))
+                        const doneDataQuantiles = perfTimer('cartogram.quantile.assign_data', {rows: values.length})
+                        dataCols.quantile = assignQuantiles(values, getquantile)
+                        doneDataQuantiles()
+                        const doneCartoQuantiles = perfTimer('cartogram.quantile.assign_cartogram', {rows: cartoValues.length})
+                        cartoAggCols['carto_quantile'] = assignQuantiles(cartoValues, getquantile)
+                        doneCartoQuantiles()
                         cartoDataCol = 'carto_quantile'
                         valuekey = 'quantile'
                         makeLegend(getvalueFn)
                     }
 
                     if (!cartogramApi) {
+                        const doneRenderCartogram = perfTimer('cartogram.render.call', {rows: cartoAggCols.x.length})
                         cartogramApi = render_cartogram('#cartogram', cartoAggCols, {
+                            perf: perfEnabled,
                             draw_outline: false,
                             get_color: z => colourRamp(z) ?? 'rgba(255,255,255,0)',
                             include_outer_borders: true,
@@ -473,41 +735,53 @@ function bootstrap(meta = {}){
                                 }
                             }))()
                         })
+                        doneRenderCartogram()
+                        fitCartogramToMapBounds(cartogramApi, h3map)
                     } else {
+                        const doneUpdateCartogram = perfTimer('cartogram.update.call', {rows: cartoAggCols.x.length})
                         cartogramApi.highlightCells([])
                         cartogramApi.updateData(cartoAggCols, cartoDataCol)
+                        doneUpdateCartogram()
                     }
                     document.body.classList.add('cartogram-ready')
                 }
             }
 
             if (!cartoAggCols && useCartogramQuantiles && doQuantiles) {
+                const doneEcdf = perfTimer('data.quantile.ecdf', {rows: values.length, weighted: !!weights, fallback: 'no-cartogram'})
                 const [getquantile, getvalue] = ecdf(values, trimFactor, weights)
+                doneEcdf()
                 getvalueFn = getvalue
-                dataCols.quantile = values.map(v => getquantile(v))
+                const doneQuantileAssign = perfTimer('data.quantile.assign', {rows: values.length, fallback: 'no-cartogram'})
+                dataCols.quantile = assignQuantiles(values, getquantile)
+                doneQuantileAssign()
                 valuekey = 'quantile'
                 makeLegend(getvalueFn)
             }
 
             if (!deckLayer) {
+                const doneDeckLayer = perfTimer('deck.hex_layer.create', {rows: dataCols.value.length})
                 const accessors = hexAccessors('column', 'index', valuekey, getColour)
                 const dataWrap = {src: dataCols, length: dataCols.value.length}
                 deckLayer = new H3HexagonLayer({
                     id: 'H3HexagonLayer', data: dataWrap,
                     extruded: false, stroked: false, ...accessors, elevationScale: 20, pickable: true
                 })
+                doneDeckLayer()
             }
 
-            userTable.delete()
+            if (userTable) userTable.delete()
+            doneGetHexData({rows: dataCols.value.length, cartogramRows: cartoAggCols ? cartoAggCols.x.length : 0})
             return deckLayer
         }
 
         let loaded
+        const reload = ++reloadNum
         if (format.layer === 'geojson') {
-            const resp = await fetch(`${file_path}?v=${++reloadNum}`)
-            loaded = {data: await resp.json()}
+            const resp = await measurePerf('data.fetch', {file: file_path, reload}, () => fetch(`${file_path}?v=${reload}`))
+            loaded = {data: await measurePerf('data.read_json', () => resp.json())}
         } else {
-            loaded = await load(`${file_path}?v=${++reloadNum}`, format.loader, format.loadOptions)
+            loaded = await measurePerf('data.load', {file: file_path, reload}, () => load(`${file_path}?v=${reload}`, format.loader, format.loadOptions))
         }
         let raw = loaded.data
         window.raw_data = raw
@@ -558,15 +832,21 @@ function bootstrap(meta = {}){
                     weights = null
                 }
             }
+            const doneEcdf = perfTimer('data.quantile.ecdf', {rows: values.length, weighted: !!weights})
             const [getquantile, getvalue] = ecdf(values, trimFactor, weights)
+            doneEcdf()
             if (format.layer === 'hex') {
+                const doneQuantileAssign = perfTimer('data.quantile.assign', {rows: values.length})
                 data = applyQuantiles(raw, format.kind, getquantile)
+                doneQuantileAssign()
             } else {
                 // assign quantile to each feature
+                const doneQuantileAssign = perfTimer('data.quantile.assign', {rows: raw.features.length})
                 data = {
                     ...raw,
                     features: raw.features.map(f => ({...f, properties: {...f.properties, quantile: getquantile(f.properties?.value ?? f.value ?? f.properties?.val)}}))
                 }
+                doneQuantileAssign()
             }
             valuekey = 'quantile'
             makeLegend(getvalue)
@@ -581,7 +861,9 @@ function bootstrap(meta = {}){
                 ? {src: data, length: data.value.length}
                 : data
             if (format.kind === 'column') window._columnData = data
-            return new H3HexagonLayer({
+            const rows = format.kind === 'column' ? data.value.length : data.length
+            const doneDeckLayer = perfTimer('deck.hex_layer.create', {rows})
+            const layer = new H3HexagonLayer({
                 id: 'H3HexagonLayer',
                 data: dataWrap,
                 extruded: false,
@@ -590,6 +872,9 @@ function bootstrap(meta = {}){
                 elevationScale: 20,
                 pickable: true
             })
+            doneDeckLayer()
+            doneGetHexData({rows})
+            return layer
         }
 
         if (format.layer === 'geojson') {
@@ -598,7 +883,8 @@ function bootstrap(meta = {}){
                 const v = valuekey === 'quantile' ? f.properties?.quantile : (f.properties?.value ?? f.value ?? f.properties?.val)
                 return v != null ? getColour(v) : randomColour()
             }
-            return new GeoJsonLayer({
+            const doneGeoJsonLayer = perfTimer('deck.geojson_layer.create', {rows: data.features.length})
+            const layer = new GeoJsonLayer({
                 id: 'GeoJsonLayer',
                 data: data,
                 filled: true,
@@ -614,6 +900,9 @@ function bootstrap(meta = {}){
                 lineBillboard: true,
                 pickable: true
             })
+            doneGeoJsonLayer()
+            doneGetHexData({rows: data.features.length})
+            return layer
         }
     }
 
@@ -669,13 +958,14 @@ function bootstrap(meta = {}){
 
     const mapOverlay = new MapboxOverlay({
         interleaved: false,
-        onClick: (info, event) => {
+        onClick: async (info, event) => {
             if (info.layer && info.layer.id === 'H3HexagonLayer' && info.index >= 0 && window._columnData) {
                 const h3Index = window._columnData.index[info.index]
                 hex([h3Index], {fit: false, highlight: true})
                 const res = getResolution(h3Index)
                 const parent = res === cartoRes ? h3Index : cellToParent(h3Index, cartoRes)
-                const xy = h3toXY ? h3toXY.get(parent) : null
+                const h3map = await ensureH3ToXY()
+                const xy = h3map ? h3map.get(parent) : null
                 if (xy && cartogramApi && cartoAggCols) {
                     const cellSet = new Set(xy.cells.map(([x, y]) => `${x},${y}`))
                     const rowIndices = []
@@ -777,7 +1067,9 @@ function bootstrap(meta = {}){
         if (settings.trains) {
             layers.push(choochoo)
         }
+        const doneSetLayers = perfTimer('deck.set_layers', {layers: layers.length})
         mapOverlay.setProps({layers})
+        doneSetLayers()
     }
 
     const update = () => {
@@ -842,14 +1134,8 @@ function bootstrap(meta = {}){
         }
     })
 
-    map.on('moveend', () => {
-        humanMoved = true
-        const pos = map.getCenter()
-        const z = map.getZoom()
-        history.replaceState(null, '', `#x=${pos.lng.toFixed(4)}&y=${pos.lat.toFixed(4)}&z=${z.toFixed(4)}`)
+    function fitCartogramToMapBounds(api = cartogramApi, h3map = h3toXY) {
         if (hex_flying) return
-        const h3map = h3toXY
-        const api = cartogramApi
         if (!h3map || !api) return
         const bounds = map.getBounds()
         if (!bounds) return
@@ -863,7 +1149,7 @@ function bootstrap(meta = {}){
         for (const c of corners) {
             const h = latLngToCell(c.lat, c.lng, cartoRes)
             let pt = h3map.get(h)
-            if (!pt) pt = findClosestHex(c.lat, c.lng)
+            if (!pt) pt = findClosestHex(c.lat, c.lng, h3map)
             if (!pt) continue
             const b = getH3Bounds(pt)
             if (b.xMin < xMin) xMin = b.xMin
@@ -873,7 +1159,38 @@ function bootstrap(meta = {}){
         }
         if (xMin === Infinity) return
         api.fitToBounds([[xMin, yMin, xMax, yMax]])
+    }
+
+    map.on('moveend', () => {
+        humanMoved = true
+        const pos = map.getCenter()
+        const z = map.getZoom()
+        history.replaceState(null, '', `#x=${pos.lng.toFixed(4)}&y=${pos.lat.toFixed(4)}&z=${z.toFixed(4)}`)
+        fitCartogramToMapBounds()
     })
+
+    function upperBound(array, target) {
+        let lo = 0
+        let hi = array.length
+        while (lo < hi) {
+            const mid = (lo + hi) >> 1
+            if (array[mid] > target) hi = mid
+            else lo = mid + 1
+        }
+        return lo
+    }
+
+    function upperBoundClamped(array, target, min, max) {
+        let lo = 0
+        let hi = array.length
+        while (lo < hi) {
+            const mid = (lo + hi) >> 1
+            const value = Math.min(Math.max(min, array[mid]), max)
+            if (value > target) hi = mid
+            else lo = mid + 1
+        }
+        return lo
+    }
 
     function ecdf(array, trimFactor=0.01, weights=null) {
         const valid = []
@@ -895,6 +1212,9 @@ function bootstrap(meta = {}){
         const totalW = sortedWeights.reduce((s, w) => s + w, 0)
         const quantile = sortedWeights.map(w => { cumW += w; return cumW / totalW })
         
-        return [target => target == null ? null : quantile[mini_array.findIndex(v => v > target)] ?? 1, target => target == null ? null : (mini_array[quantile.findIndex(v => Math.min(Math.max(trimFactor,v),1-trimFactor) > target)] ?? mini_array.slice(-1)[0])]
+        return [
+            target => target == null ? null : quantile[upperBound(mini_array, target)] ?? 1,
+            target => target == null ? null : (mini_array[upperBoundClamped(quantile, target, trimFactor, 1 - trimFactor)] ?? mini_array[mini_array.length - 1])
+        ]
     }
 }

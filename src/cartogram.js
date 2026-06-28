@@ -24,11 +24,27 @@ export function render_cartogram(container, data, options = {}) {
         
         // data
         data_col = 'code',
+        perf = false,
         
         get_color = (z) => d3.scaleSequential(d3.interpolateSpectral).domain([0,1])(z) ?? 'rgba(255,255,255,0)',
         onclick_callback = console.log,
         onmove_callback = () => {},
     } = options
+
+    const perfNow = () => (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now())
+    function perfTimer(label, details) {
+        if (!perf) return () => {}
+        const start = perfNow()
+        return (extra) => {
+            const elapsed = perfNow() - start
+            const merged = {...(details || {}), ...(extra || {})}
+            if (Object.keys(merged).length) {
+                console.info(`[perf] cartogram.svg.${label}: ${elapsed.toFixed(1)}ms`, merged)
+            } else {
+                console.info(`[perf] cartogram.svg.${label}: ${elapsed.toFixed(1)}ms`)
+            }
+        }
+    }
 
     let currentData = data
     let currentDataCol = data_col
@@ -46,6 +62,8 @@ export function render_cartogram(container, data, options = {}) {
 
     const numRows = xCol.length
 
+    const doneRender = perfTimer('render.total', {rows: numRows})
+    const doneLayout = perfTimer('layout', {rows: numRows})
     const minX = d3.min(xCol)
     const maxX = d3.max(xCol)
     const minY = d3.min(yCol)
@@ -59,7 +77,9 @@ export function render_cartogram(container, data, options = {}) {
 
     const getX = (x) => width / 2 + (x - center_x) * square_size / 2
     const getY = (y) => height / 2 + (y - center_y) * square_size / 2
+    doneLayout({width, height})
 
+    const doneSvgCreate = perfTimer('svg.create')
     d3.select(container).selectAll("svg").remove()
     d3.select(container).selectAll(".cartogram-tooltip").remove()
 
@@ -72,6 +92,7 @@ export function render_cartogram(container, data, options = {}) {
 
     const g = svg.append("g")
     const labelsG = svg.append("g")
+    doneSvgCreate()
 
     let movePending = false
     let latestTransform = null
@@ -86,6 +107,7 @@ export function render_cartogram(container, data, options = {}) {
                 movePending = true
                 requestAnimationFrame(() => {
                     movePending = false
+                    const doneVisible = perfTimer('visible_indices', {rows: numRows})
                     const t = latestTransform
                     const visible = []
                     for (let i = 0; i < numRows; i++) {
@@ -99,6 +121,7 @@ export function render_cartogram(container, data, options = {}) {
                             visible.push(i)
                         }
                     }
+                    doneVisible({visible: visible.length})
                     onmove_callback(currentData, visible)
                 })
             }
@@ -107,11 +130,14 @@ export function render_cartogram(container, data, options = {}) {
     svg.call(zoom)
 
     const cellMap = new Map()
+    const doneCellMap = perfTimer('cell_map.build', {rows: numRows})
     for (let i = 0; i < numRows; i++) {
         cellMap.set(`${xCol[i]},${yCol[i]}`, codeCol[i])
     }
+    doneCellMap({cells: cellMap.size})
 
     const rowIndices = d3.range(numRows)
+    const doneCells = perfTimer('cells.render', {rows: numRows})
     const cells = g.selectAll(".cell")
         .data(rowIndices)
         .join("rect")
@@ -123,6 +149,7 @@ export function render_cartogram(container, data, options = {}) {
         .attr("fill", i => get_color(currentData[currentDataCol][i]))
         .attr("stroke", draw_outline ? outline_color : "none")
         .attr("stroke-width", draw_outline ? outline_width : 0)
+    doneCells()
 
     // Tooltip
     const tooltip = d3.select(container)
@@ -166,6 +193,7 @@ export function render_cartogram(container, data, options = {}) {
     })
 
     if (draw_country_borders) {
+        const doneBorders = perfTimer('borders.render', {rows: numRows})
         const borderLines = []
 
         for (let i = 0; i < numRows; i++) {
@@ -217,9 +245,11 @@ export function render_cartogram(container, data, options = {}) {
             .attr("y2", d => d.y2)
             .attr("stroke", country_border_color)
             .attr("stroke-width", country_border_width)
+        doneBorders({borders: borderLines.length})
     }
 
     if (labelCol) {
+        const doneLabels = perfTimer('labels.render', {rows: numRows})
         const labeledIndices = rowIndices.filter(i => {
             const label = labelCol[i]
             return label !== null && label !== undefined && label !== ""
@@ -243,40 +273,53 @@ export function render_cartogram(container, data, options = {}) {
             .attr("paint-order", "stroke fill")
             .text(i => labelCol[i])
             .style("pointer-events", "none")
+        doneLabels({labels: labeledIndices.length})
     }
+
+    doneRender()
 
     return {
         updateData: (newData, newDataCol) => {
+            const doneUpdate = perfTimer('update_data', {rows: newData.x ? newData.x.length : 0})
             currentData = newData
             if (newDataCol !== undefined) currentDataCol = newDataCol
             const col = currentData[currentDataCol]
             if (!col) {
                 console.warn(`Column "${currentDataCol}" not found in updateData`)
+                doneUpdate({missingColumn: currentDataCol})
                 return
             }
             cells.attr("fill", i => get_color(col[i]))
+            doneUpdate()
         },
         highlightCells: (indices) => {
+            const doneHighlight = perfTimer('highlight_cells', {rows: numRows, highlighted: indices.length})
             cells.attr("stroke", i => indices.includes(i) ? "orange" : (draw_outline ? outline_color : "none"))
                 .attr("stroke-width", i => indices.includes(i) ? 1 : (draw_outline ? outline_width : 0))
             indices.forEach(i => {
                 const node = cells.nodes()[i]
                 if (node) node.parentNode.appendChild(node)
             })
+            doneHighlight()
         },
         fitToBounds: ([[x1, y1, x2, y2]], duration = 500) => {
+            const doneFit = perfTimer('fit_to_bounds')
             const left = getX(x1)
             const right = getX(x2)
             const top = getY(y1)
             const bottom = getY(y2)
             const boxW = right - left
             const boxH = bottom - top
-            if (boxW <= 0 || boxH <= 0) return
+            if (boxW <= 0 || boxH <= 0) {
+                doneFit({skipped: true})
+                return
+            }
             const pad = 20
             const k = Math.min((width - 2 * pad) / boxW, (height - 2 * pad) / boxH)
             const cx = (left + right) / 2
             const cy = (top + bottom) / 2
             fitToBoundsActive = true
+            doneFit({duration})
             svg.transition().duration(duration)
                 .call(zoom.transform, d3.zoomIdentity.translate(width / 2 - cx * k, height / 2 - cy * k).scale(k))
                 .on("end", () => { fitToBoundsActive = false })
