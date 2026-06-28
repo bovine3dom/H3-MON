@@ -73,6 +73,9 @@ const LOAD_PROGRESS_DEFAULTS = {
     'cartogram.child_rollup.data_map': 200,
     'cartogram.child_rollup.accumulate': 1500,
     'cartogram.child_rollup.output': 10,
+    'cartogram.parent_downproject.data_map': 100,
+    'cartogram.parent_downproject.project': 650,
+    'cartogram.parent_downproject.output': 5,
     'cartogram.h3_to_xy.build': 950,
     'cartogram.quantile.ecdf': 15,
     'cartogram.quantile.assign_data': 25,
@@ -140,6 +143,9 @@ const LOAD_PROGRESS_LABELS = {
     'cartogram.child_rollup.data_map': 'Indexing child H3 data',
     'cartogram.child_rollup.accumulate': 'Rolling up child H3 cells',
     'cartogram.child_rollup.output': 'Preparing child rollup values',
+    'cartogram.parent_downproject.data_map': 'Indexing parent H3 data',
+    'cartogram.parent_downproject.project': 'Projecting parent H3 values',
+    'cartogram.parent_downproject.output': 'Preparing parent projection values',
     'cartogram.h3_to_xy.build': 'Preparing map/cartogram links',
     'cartogram.quantile.ecdf': 'Calculating cartogram quantiles',
     'cartogram.quantile.assign_data': 'Assigning map colours',
@@ -761,6 +767,13 @@ function getH3Bounds(entry) {
     return {xMin, xMax, yMin, yMax}
 }
 
+function cartoH3sForDataH3(h3Index) {
+    const h3 = String(h3Index)
+    const res = getResolution(h3)
+    if (res === cartoRes) return [h3]
+    return res > cartoRes ? [cellToParent(h3, cartoRes)] : cellToChildren(h3, cartoRes)
+}
+
 configureLoadProgress()
 
 const cartogramInit = (async () => {
@@ -1025,16 +1038,11 @@ function bootstrap(meta = {}){
         return Number.isNaN(parsed) ? null : parsed
     }
 
-    function groupCartogramWithMap(sourceCols, sourceValueKey, perfDetails = {}) {
-        const doneGroup = perfTimer('cartogram.js_group.total', perfDetails)
-        const defaultValue = getDefaultValue()
-        const defaultNumber = toFiniteNumber(defaultValue)
-        const meanCol = sourceValueKey === 'quantile' ? 'quantile_mean' : 'value_mean'
+    function indexValuesByH3(sourceCols, sourceValueKey, perfLabel, perfDetails = {}) {
         const sourceIndex = sourceCols.index
         const sourceValues = sourceCols[sourceValueKey]
-
         const sourceRows = columnLength(sourceIndex)
-        const doneDataMap = perfTimer('cartogram.js_group.data_map', {rows: sourceRows})
+        const doneDataMap = perfTimer(perfLabel, {rows: sourceRows, ...perfDetails})
         const valuesByH3 = new Map()
         let sourceObserved = 0
         let sourceMissing = 0
@@ -1045,74 +1053,185 @@ function bootstrap(meta = {}){
             else sourceObserved++
         }
         doneDataMap({entries: valuesByH3.size, sourceObserved, sourceMissing})
+        return valuesByH3
+    }
+
+    function projectedH3Columns(indexes, values, sourceValueKey, perfLabel) {
+        const doneOutput = perfTimer(perfLabel, {rows: indexes.length})
+        const grouped = {index: indexes, [sourceValueKey]: values}
+        doneOutput()
+        return grouped
+    }
+
+    async function cartoProjectionBuffers() {
+        const h3map = await ensureH3ToXY()
+        const cartoH3s = Array.from(h3map.keys())
+        return {
+            cartoH3s,
+            indexes: new Array(cartoH3s.length),
+        }
+    }
+
+    function cartoProjectionConfig(h3res) {
+        const isChildRollup = h3res > cartoRes
+        return {
+            source: isChildRollup ? 'child-rollup' : 'parent-downproject',
+            dataMapLabel: isChildRollup ? 'cartogram.child_rollup.data_map' : 'cartogram.parent_downproject.data_map',
+            projectLabel: isChildRollup ? 'cartogram.child_rollup.accumulate' : 'cartogram.parent_downproject.project',
+            outputLabel: isChildRollup ? 'cartogram.child_rollup.output' : 'cartogram.parent_downproject.output',
+            dataMapDetails: isChildRollup ? {} : {sourceRes: h3res, cartoRes},
+            projectDetails: cartoH3s => isChildRollup
+                ? {cartoH3s: cartoH3s.length, cartoRes, h3res}
+                : {cartoH3s: cartoH3s.length, sourceRes: h3res, cartoRes},
+            contributorsFor: cartoH3 => isChildRollup ? cellToChildren(cartoH3, h3res) : [cellToParent(cartoH3, h3res)],
+            fillMissingContributors: isChildRollup,
+        }
+    }
+
+    function aggregateTargetMeans(targetCount, valuesBySource, forEachContributor, options = {}) {
+        const {
+            defaultNumber = null,
+            fillMissingContributors = false,
+            getWeight = () => 1,
+            infillMissing = false,
+            trackSourceCoverage = false,
+        } = options
+        const numerator = new Float64Array(targetCount)
+        const denominator = new Float64Array(targetCount)
+        const observedByTarget = new Uint8Array(targetCount)
+        const missingWeightByTarget = fillMissingContributors && defaultNumber != null ? new Float64Array(targetCount) : null
+        const missingCountByTarget = missingWeightByTarget ? new Uint32Array(targetCount) : null
+        const missingValidCountByTarget = missingWeightByTarget ? new Uint32Array(targetCount) : null
+        const invalidMissingWeightByTarget = missingWeightByTarget ? new Uint32Array(targetCount) : null
+        const coveredSourceH3s = trackSourceCoverage ? new Set() : null
+        const observedSourceH3s = trackSourceCoverage ? new Set() : null
+
+        let contributorRows = 0
+        let contributorsCoveredByInput = 0
+        let targetsWithObservedData = 0
+        let contributorValuesObserved = 0
+        let contributorValuesDefaulted = 0
+        let contributorValuesUsed = 0
+        let invalidWeights = 0
+
+        forEachContributor((targetIndex, sourceH3, contributor) => {
+            contributorRows++
+            const hasSource = valuesBySource.has(sourceH3)
+            const value = hasSource ? valuesBySource.get(sourceH3) : null
+            if (hasSource) {
+                contributorsCoveredByInput++
+                if (coveredSourceH3s) coveredSourceH3s.add(sourceH3)
+            }
+            if (value == null) {
+                if (missingWeightByTarget) {
+                    missingCountByTarget[targetIndex]++
+                    const weight = getWeight(contributor, targetIndex, sourceH3)
+                    if (weight == null) {
+                        invalidMissingWeightByTarget[targetIndex]++
+                    } else {
+                        missingWeightByTarget[targetIndex] += weight
+                        missingValidCountByTarget[targetIndex]++
+                    }
+                }
+                return
+            }
+
+            contributorValuesObserved++
+            if (!observedByTarget[targetIndex]) {
+                observedByTarget[targetIndex] = 1
+                targetsWithObservedData++
+            }
+            if (observedSourceH3s) observedSourceH3s.add(sourceH3)
+
+            const weight = getWeight(contributor, targetIndex, sourceH3)
+            if (weight == null) {
+                invalidWeights++
+                return
+            }
+            numerator[targetIndex] += value * weight
+            denominator[targetIndex] += weight
+            contributorValuesUsed++
+        })
+
+        if (missingWeightByTarget) {
+            for (let i = 0; i < targetCount; i++) {
+                if (!missingCountByTarget[i] || (!infillMissing && !observedByTarget[i])) continue
+                numerator[i] += defaultNumber * missingWeightByTarget[i]
+                denominator[i] += missingWeightByTarget[i]
+                contributorValuesDefaulted += missingCountByTarget[i]
+                contributorValuesUsed += missingValidCountByTarget[i]
+                invalidWeights += invalidMissingWeightByTarget[i]
+            }
+        }
+
+        const values = new Array(targetCount)
+        let targetsWithData = 0
+        let targetsMissing = 0
+        for (let i = 0; i < targetCount; i++) {
+            if (denominator[i]) {
+                values[i] = numerator[i] / denominator[i]
+                targetsWithData++
+            } else {
+                values[i] = null
+                targetsMissing++
+            }
+        }
+
+        return {
+            values,
+            contributorRows,
+            contributorsMissing: contributorRows - contributorValuesObserved,
+            contributorsCoveredByInput,
+            targetsWithObservedData,
+            targetsWithData,
+            targetsMissing,
+            contributorValuesObserved,
+            contributorValuesDefaulted,
+            contributorValuesUsed,
+            invalidWeights,
+            coveredSourceH3s,
+            observedSourceH3s,
+        }
+    }
+
+    function groupCartogramWithMap(sourceCols, sourceValueKey, perfDetails = {}) {
+        const doneGroup = perfTimer('cartogram.js_group.total', perfDetails)
+        const defaultValue = getDefaultValue()
+        const defaultNumber = toFiniteNumber(defaultValue)
+        const meanCol = sourceValueKey === 'quantile' ? 'quantile_mean' : 'value_mean'
+        const valuesByH3 = indexValuesByH3(sourceCols, sourceValueKey, 'cartogram.js_group.data_map')
 
         const cellCount = cartogramAgg.x.length
-        const numerator = new Float64Array(cellCount)
-        const denominator = new Float64Array(cellCount)
-        const observedByCell = new Uint8Array(cellCount)
         const weights = cartogramAgg.weights
         const cartogramRows = columnLength(cartogramAgg.h3ByRow)
         const doneAccum = perfTimer('cartogram.js_group.accumulate', {rows: cartogramRows, cells: cellCount})
-        let h3Observed = 0
-        let h3Missing = 0
-        let h3Defaulted = 0
-        let h3ValuesUsed = 0
-        let invalidWeights = 0
-        let cellsWithObservedData = 0
-        for (let i = 0; i < cartogramRows; i++) {
-            const value = valuesByH3.get(String(columnValue(cartogramAgg.h3ByRow, i)))
-            if (value == null) {
-                h3Missing++
-                continue
+        const aggregated = aggregateTargetMeans(
+            cellCount,
+            valuesByH3,
+            visit => {
+                for (let i = 0; i < cartogramRows; i++) {
+                    visit(cartogramAgg.rowCell[i], String(columnValue(cartogramAgg.h3ByRow, i)), i)
+                }
+            },
+            {
+                defaultNumber,
+                fillMissingContributors: defaultNumber != null,
+                infillMissing: infill,
+                getWeight: i => weights ? toFiniteNumber(weights[i]) : 1,
             }
-            const cellIndex = cartogramAgg.rowCell[i]
-            if (!observedByCell[cellIndex]) {
-                observedByCell[cellIndex] = 1
-                cellsWithObservedData++
-            }
-            h3Observed++
-        }
-        for (let i = 0; i < cartogramRows; i++) {
-            const cellIndex = cartogramAgg.rowCell[i]
-            let value = valuesByH3.get(String(columnValue(cartogramAgg.h3ByRow, i)))
-            if (value == null) {
-                if (defaultNumber == null || (!infill && !observedByCell[cellIndex])) continue
-                value = defaultNumber
-                h3Defaulted++
-            }
-            const weight = weights ? toFiniteNumber(weights[i]) : 1
-            if (weight == null) {
-                invalidWeights++
-                continue
-            }
-            numerator[cellIndex] += value * weight
-            denominator[cellIndex] += weight
-            h3ValuesUsed++
-        }
+        )
         doneAccum({
             infill,
             defaultValue: defaultNumber,
-            cellsWithObservedData,
-            h3Observed,
-            h3Missing,
-            h3Defaulted,
-            h3ValuesUsed,
-            invalidWeights,
+            cellsWithObservedData: aggregated.targetsWithObservedData,
+            h3Observed: aggregated.contributorValuesObserved,
+            h3Missing: aggregated.contributorsMissing,
+            h3Defaulted: aggregated.contributorValuesDefaulted,
+            h3ValuesUsed: aggregated.contributorValuesUsed,
+            invalidWeights: aggregated.invalidWeights,
         })
 
         const doneOutput = perfTimer('cartogram.js_group.output', {cells: cellCount})
-        const values = new Array(cellCount)
-        let cellsWithData = 0
-        let cellsMissing = 0
-        for (let i = 0; i < cellCount; i++) {
-            if (denominator[i]) {
-                values[i] = numerator[i] / denominator[i]
-                cellsWithData++
-            } else {
-                values[i] = null
-                cellsMissing++
-            }
-        }
         const aggCols = {
             x: cartogramAgg.x,
             y: cartogramAgg.y,
@@ -1120,92 +1239,69 @@ function bootstrap(meta = {}){
             code: cartogramAgg.code,
             label: cartogramAgg.label,
             index: cartogramAgg.index,
-            [meanCol]: values,
+            [meanCol]: aggregated.values,
         }
         doneOutput()
-        doneGroup({rows: cellCount, defaultValue: defaultNumber, infill, cellsWithData, cellsMissing, cellsWithObservedData})
+        doneGroup({
+            rows: cellCount,
+            defaultValue: defaultNumber,
+            infill,
+            cellsWithData: aggregated.targetsWithData,
+            cellsMissing: aggregated.targetsMissing,
+            cellsWithObservedData: aggregated.targetsWithObservedData,
+        })
         return {aggCols, meanCol}
     }
 
-    async function rollupChildrenToCartoParents(dataCols, sourceValueKey, h3res) {
+    async function projectH3ToCartoResolution(dataCols, sourceValueKey, h3res) {
+        const config = cartoProjectionConfig(h3res)
         const defaultValue = getDefaultValue()
-        const defaultNumber = toFiniteNumber(defaultValue)
-        const sourceIndex = dataCols.index
-        const sourceValues = dataCols[sourceValueKey]
-        const sourceRows = columnLength(sourceIndex)
+        const defaultNumber = config.fillMissingContributors ? toFiniteNumber(defaultValue) : null
+        const valuesBySource = indexValuesByH3(dataCols, sourceValueKey, config.dataMapLabel, config.dataMapDetails)
+        const {cartoH3s, indexes} = await cartoProjectionBuffers()
 
-        const doneDataMap = perfTimer('cartogram.child_rollup.data_map', {rows: sourceRows})
-        const valuesByChild = new Map()
-        let sourceObserved = 0
-        let sourceMissing = 0
-        for (let i = 0; i < sourceRows; i++) {
-            const value = toFiniteNumber(columnValue(sourceValues, i))
-            valuesByChild.set(String(columnValue(sourceIndex, i)), value)
-            if (value == null) sourceMissing++
-            else sourceObserved++
-        }
-        doneDataMap({entries: valuesByChild.size, sourceObserved, sourceMissing})
-
-        const h3map = await ensureH3ToXY()
-        const cartoH3s = Array.from(h3map.keys())
-        const parentIndexes = new Array(cartoH3s.length)
-        const parentValues = new Array(cartoH3s.length)
-
-        const doneAccum = perfTimer('cartogram.child_rollup.accumulate', {cartoH3s: cartoH3s.length, cartoRes, h3res})
-        let childRows = 0
-        let parentsWithObservedData = 0
-        let parentsWithData = 0
-        let parentsMissing = 0
-        let childValuesObserved = 0
-        let childValuesDefaulted = 0
-        let childValuesUsed = 0
-        for (let i = 0; i < cartoH3s.length; i++) {
-            const parent = cartoH3s[i]
-            parentIndexes[i] = parent
-            let sum = 0
-            let count = 0
-            let observedChildren = 0
-            let missingChildren = 0
-            const children = cellToChildren(parent, h3res)
-            childRows += children.length
-            for (const child of children) {
-                const value = valuesByChild.get(child)
-                if (value == null) {
-                    missingChildren++
-                    continue
+        const doneProject = perfTimer(config.projectLabel, config.projectDetails(cartoH3s))
+        const aggregated = aggregateTargetMeans(
+            cartoH3s.length,
+            valuesBySource,
+            visit => {
+                for (let i = 0; i < cartoH3s.length; i++) {
+                    indexes[i] = cartoH3s[i]
+                    for (const contributor of config.contributorsFor(cartoH3s[i])) visit(i, contributor)
                 }
-                sum += value
-                count++
-                observedChildren++
-                childValuesObserved++
+            },
+            {
+                defaultNumber,
+                fillMissingContributors: config.fillMissingContributors,
+                infillMissing: infill,
+                trackSourceCoverage: true,
             }
-            if (missingChildren && defaultNumber != null && (infill || count > 0)) {
-                sum += defaultNumber * missingChildren
-                count += missingChildren
-                childValuesDefaulted += missingChildren
-            }
-            if (observedChildren) parentsWithObservedData++
-            if (count) parentsWithData++
-            else parentsMissing++
-            childValuesUsed += count
-            parentValues[i] = count ? sum / count : null
-        }
-        doneAccum({
-            childRows,
-            infill,
-            defaultValue: defaultNumber,
-            parentsWithData,
-            parentsMissing,
-            parentsWithObservedData,
-            childValuesObserved,
-            childValuesDefaulted,
-            childValuesUsed,
-        })
+        )
 
-        const doneOutput = perfTimer('cartogram.child_rollup.output', {rows: parentIndexes.length})
-        const grouped = {index: parentIndexes, [sourceValueKey]: parentValues}
-        doneOutput()
-        return grouped
+        if (config.source === 'child-rollup') {
+            doneProject({
+                childRows: aggregated.contributorRows,
+                infill,
+                defaultValue: defaultNumber,
+                parentsWithData: aggregated.targetsWithData,
+                parentsMissing: aggregated.targetsMissing,
+                parentsWithObservedData: aggregated.targetsWithObservedData,
+                childValuesObserved: aggregated.contributorValuesObserved,
+                childValuesDefaulted: aggregated.contributorValuesDefaulted,
+                childValuesUsed: aggregated.contributorValuesUsed,
+            })
+        } else {
+            doneProject({
+                parentsCovered: aggregated.coveredSourceH3s.size,
+                parentsObserved: aggregated.observedSourceH3s.size,
+                childrenCoveredByInput: aggregated.contributorsCoveredByInput,
+                childrenWithObservedData: aggregated.targetsWithObservedData,
+                childrenMissing: aggregated.targetsMissing,
+            })
+        }
+
+        const grouped = projectedH3Columns(indexes, aggregated.values, sourceValueKey, config.outputLabel)
+        return {grouped, source: config.source}
     }
 
     let reloadNum = 0
@@ -1295,9 +1391,9 @@ function bootstrap(meta = {}){
                     const result = groupCartogramWithMap(dataCols, valuekey, {source: 'same-resolution', rows: dataCols.index.length})
                     cartoAggCols = result.aggCols
                     cartoDataCol = result.meanCol
-                } else if (h3res > cartoRes) {
-                    const grouped = await rollupChildrenToCartoParents(dataCols, valuekey, h3res)
-                    const result = groupCartogramWithMap(grouped, valuekey, {source: 'child-rollup', rows: grouped.index.length})
+                } else {
+                    const {grouped, source} = await projectH3ToCartoResolution(dataCols, valuekey, h3res)
+                    const result = groupCartogramWithMap(grouped, valuekey, {source, rows: grouped.index.length})
                     cartoAggCols = result.aggCols
                     cartoDataCol = result.meanCol
                 }
@@ -1601,12 +1697,16 @@ function bootstrap(meta = {}){
             if (info.layer && info.layer.id === 'H3HexagonLayer' && info.index >= 0 && window._columnData) {
                 const h3Index = window._columnData.index[info.index]
                 hex([h3Index], {fit: false, highlight: true})
-                const res = getResolution(h3Index)
-                const parent = res === cartoRes ? h3Index : cellToParent(h3Index, cartoRes)
+                const cartoH3s = cartoH3sForDataH3(h3Index)
                 const h3map = await ensureH3ToXY()
-                const xy = h3map ? h3map.get(parent) : null
-                if (xy && cartogramApi && cartoAggCols) {
-                    const cellSet = new Set(xy.cells.map(([x, y]) => `${x},${y}`))
+                if (h3map && cartogramApi && cartoAggCols) {
+                    const cells = []
+                    for (const cartoH3 of cartoH3s) {
+                        const entry = h3map.get(cartoH3)
+                        if (entry) cells.push(...entry.cells)
+                    }
+                    if (!cells.length) return
+                    const cellSet = new Set(cells.map(([x, y]) => `${x},${y}`))
                     const rowIndices = []
                     for (let i = 0; i < cartoAggCols.x.length; i++) {
                         if (cellSet.has(`${cartoAggCols.x[i]},${cartoAggCols.y[i]}`)) {
@@ -1615,7 +1715,7 @@ function bootstrap(meta = {}){
                     }
                     if (rowIndices.length > 0) {
                         cartogramApi.highlightCells(rowIndices)
-                        const b = getH3Bounds(xy)
+                        const b = getH3Bounds({cells})
                         const padding = 20
                         cartogramApi.fitToBounds([[b.xMin - padding, b.yMin - padding, b.xMax + padding, b.yMax + padding]])
                     }
