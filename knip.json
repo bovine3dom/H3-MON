@@ -1,0 +1,10 @@
+{
+  "entry": [
+    "src/app.js",
+    "srv/watcher.ts"
+  ],
+  "project": [
+    "src/**/*.{js,ts}",
+    "srv/**/*.ts"
+  ]
+}

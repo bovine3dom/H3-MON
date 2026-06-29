@@ -225,7 +225,3 @@ function Swatches(color, {
   </style>
   <div>${domain.map(value => htl.html`<span class="${id}" style="--color: ${color(value)}">${format(value)}</span>`)}</div>`;
 }
-
-export function swatches({color, ...options}) {
-  return Swatches(color, options);
-}
