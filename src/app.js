@@ -25,6 +25,15 @@ function flagEnabled(name) {
 }
 const perfEnabled = flagEnabled('perf')
 const svgPerfEnabled = flagEnabled('svgperf')
+function parseH3Precision(value) {
+    if (value == null || value === '') return undefined
+    if (String(value).toLowerCase() === 'auto') return 'auto'
+    return settingEnabled(value, false)
+}
+const h3Precision = parseH3Precision(params.get('h3precision')) ?? false
+function h3LayerProps() {
+    return {highPrecision: h3Precision}
+}
 const syncDebugEnabled = flagEnabled('sync') || perfEnabled
 function syncLog(label, details) {
     if (syncDebugEnabled) console.info(`[sync] ${label}`, details || {})
@@ -692,6 +701,7 @@ function hex(hexes, options = {}) {
         highlightLayer = new H3HexagonLayer({
             id: 'hex-highlight',
             data: hexes,
+            ...h3LayerProps(),
             getHexagon: d => d,
             getFillColor: [255, 0, 0, 255], // it'd be neat to colour by weight but it's a tiny bit tricky
             getLineColor: [0, 0, 0, 255], // doesn't seem to do anything?
@@ -990,19 +1000,67 @@ function bootstrap(meta = {}){
         return target
     }
 
+    function h3IndexAt(data, kind, indexkey, i) {
+        if (kind === 'column') return columnValue(data[indexkey], i)
+        return data[i][indexkey]
+    }
+
+    function buildH3PositionAttribute(data, kind, indexkey, rows) {
+        if (data._h3Positions) return data._h3Positions
+        const donePositions = perfTimer('deck.h3_binary.positions', {rows})
+        const positions = new Float64Array(rows * 3)
+        for (let i = 0; i < rows; i++) {
+            const [lat, lng] = cellToLatLng(h3IndexAt(data, kind, indexkey, i))
+            const offset = i * 3
+            positions[offset] = lng
+            positions[offset + 1] = lat
+            positions[offset + 2] = 0
+        }
+        data._h3Positions = positions
+        donePositions()
+        return positions
+    }
+
+    function buildH3FillColorAttribute(data, kind, valuekey, getColour, rows) {
+        const doneColors = perfTimer('deck.h3_binary.colors', {rows})
+        const colors = new Uint8Array(rows * 4)
+        for (let i = 0; i < rows; i++) {
+            const value = kind === 'column' ? columnValue(data[valuekey], i) : data[i][valuekey]
+            const colour = getColour(value)
+            const offset = i * 4
+            colors[offset] = colour[0]
+            colors[offset + 1] = colour[1]
+            colors[offset + 2] = colour[2]
+            colors[offset + 3] = colour[3] ?? 255
+        }
+        doneColors()
+        return colors
+    }
+
+    function h3DeckData(kind, data, indexkey, valuekey, getColour) {
+        const rows = kind === 'column' ? columnLength(data[indexkey]) : data.length
+        const dataWrap = kind === 'column' ? {src: data, length: rows} : data
+        dataWrap.attributes = {
+            getPosition: {value: buildH3PositionAttribute(data, kind, indexkey, rows), size: 3},
+            getFillColor: {value: buildH3FillColorAttribute(data, kind, valuekey, getColour, rows), size: 4, type: 'unorm8'},
+        }
+        dataWrap.startIndices = null
+        return dataWrap
+    }
+
     function hexAccessors(kind, indexkey, valuekey, getColour) {
         if (kind === 'column') {
             return {
-                getHexagon: (_, {index, data}) => data.src[indexkey][index],
+                getHexagon: (_, {index, data}) => columnValue(data.src[indexkey], index),
                 getFillColor: (_, {index, data, target}) => {
-                    const v = data.src[valuekey][index]
+                    const v = columnValue(data.src[valuekey], index)
                     const colour = getColour(v)
                     return writeColour(target, colour)
                 }
             }
         }
         return {
-            getHexagon: d => d.index,
+            getHexagon: d => d[indexkey],
             getFillColor: (d, {target} = {}) => writeColour(target, getColour(d[valuekey]))
         }
     }
@@ -1368,11 +1426,12 @@ function bootstrap(meta = {}){
             let deckLayer
 
             if (!useCartogramQuantiles || !doQuantiles) {
-                const doneDeckLayer = perfTimer('deck.hex_layer.create', {rows: dataCols.value.length})
+                const doneDeckLayer = perfTimer('deck.hex_layer.create', {rows: dataCols.value.length, h3Precision, h3Binary: true})
                 const accessors = hexAccessors('column', 'index', valuekey, getColour)
-                const dataWrap = {src: dataCols, length: dataCols.value.length}
+                const dataWrap = h3DeckData('column', dataCols, 'index', valuekey, getColour)
                 deckLayer = new H3HexagonLayer({
                     id: 'H3HexagonLayer', data: dataWrap,
+                    ...h3LayerProps(),
                     extruded: false, stroked: false, ...accessors, elevationScale: 20, pickable: true
                 })
                 doneDeckLayer()
@@ -1491,11 +1550,12 @@ function bootstrap(meta = {}){
 
             if (!deckLayer) {
                 setLoadStage('Preparing map layer')
-                const doneDeckLayer = perfTimer('deck.hex_layer.create', {rows: dataCols.value.length})
+                const doneDeckLayer = perfTimer('deck.hex_layer.create', {rows: dataCols.value.length, h3Precision, h3Binary: true})
                 const accessors = hexAccessors('column', 'index', valuekey, getColour)
-                const dataWrap = {src: dataCols, length: dataCols.value.length}
+                const dataWrap = h3DeckData('column', dataCols, 'index', valuekey, getColour)
                 deckLayer = new H3HexagonLayer({
                     id: 'H3HexagonLayer', data: dataWrap,
+                    ...h3LayerProps(),
                     extruded: false, stroked: false, ...accessors, elevationScale: 20, pickable: true
                 })
                 doneDeckLayer()
@@ -1592,15 +1652,14 @@ function bootstrap(meta = {}){
         if (format.layer === 'hex') {
             setLoadStage('Preparing map layer')
             const accessors = hexAccessors(format.kind, 'index', valuekey, getColour)
-            const dataWrap = format.kind === 'column'
-                ? {src: data, length: data.value.length}
-                : data
             if (format.kind === 'column') window._columnData = data
             const rows = format.kind === 'column' ? data.value.length : data.length
-            const doneDeckLayer = perfTimer('deck.hex_layer.create', {rows})
+            const doneDeckLayer = perfTimer('deck.hex_layer.create', {rows, h3Precision, h3Binary: true})
+            const dataWrap = h3DeckData(format.kind, data, 'index', valuekey, getColour)
             const layer = new H3HexagonLayer({
                 id: 'H3HexagonLayer',
                 data: dataWrap,
+                ...h3LayerProps(),
                 extruded: false,
                 stroked: false,
                 ...accessors,
@@ -1838,14 +1897,17 @@ function bootstrap(meta = {}){
     }
 
     const update = () => {
+        const doneMapReady = perfTimer('app.load_to_map_ready', {file: file_name, ext, layer: format.layer, h3Precision, h3Binary: true})
         if (loadProgress.complete) resetLoadProgress('Reloading data')
         getHexData()
             .then(async x => {
                 mainLayers = [x]
                 await renderLayers()
+                doneMapReady({rows: x?.props?.data?.length ?? null})
                 finishLoadProgress()
             })
             .catch(e => {
+                doneMapReady({failed: true})
                 console.error(e)
                 setLoadProgress(100, 'Load failed')
                 loadProgress.complete = true
