@@ -36,7 +36,9 @@ Here, we support the following representation of such a mapping of many H3 -> ma
 |--------|--------|-------------|
 | `x`    | int    | column position, origin at top-left of screen |
 | `y`    | int    | row position, origin at top-left of screen |
-| `index`| string | H3 index |
+| `index_lower` | uint32 | H3 index, lower 32 bits|
+| `index_upper` | uint32 | H3 index, upper 32 bits |
+| `index`| string | H3 index, optional instead of split ints |
 | `code` | int | country / subdivision code for border rendering |
 | `label`| string | optional label text displayed on the cartogram cell |
 | `weight`| float | weight for aggregation — `groupby(x, y)` weights should sum to 1 |
@@ -74,4 +76,16 @@ select substring(lower(hex(h3)),2) index, count()::Int32 value, weight::Int32 we
 )
 group by all
 into outfile 'total_stops_weighted.parquet' truncate
+```
+
+```sql
+-- clickhouse
+select * except (index, h3) from (
+    select *, reinterpretAsUInt64(reverse(unhex(index))) h3,
+    toUInt32(bitAnd(h3, toUInt64(4294967295))) as index_lower,
+    toUInt32(bitShiftRight(h3, 32)) as index_upper
+    -- bitOr(toUInt64(index_lower), bitShiftLeft(toUInt64(index_upper),32)) -- validation
+    from 'cartogram_weights.arrow'
+)
+into outfile 'cartogram_weights_hilo.arrow' settings output_format_arrow_compression_method = 'none'
 ```

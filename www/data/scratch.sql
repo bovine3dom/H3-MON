@@ -24,3 +24,22 @@ format csv
 
 select median as value, index from 'out_string_quantile.arrow'
 into outfile 'population_density.arrow' settings output_format_arrow_compression_method = 'none'
+
+-- add split int for h3 zero-copy
+select * except (index, h3) from (
+    select *, reinterpretAsUInt64(reverse(unhex(index))) h3,
+    toUInt32(bitAnd(h3, toUInt64(4294967295))) as index_lower,
+    toUInt32(bitShiftRight(h3, 32)) as index_upper
+    -- bitOr(toUInt64(index_lower), bitShiftLeft(toUInt64(index_upper),32)) -- validation
+    from 'cartogram_weights.arrow'
+)
+into outfile 'cartogram_weights_hilo.arrow' settings output_format_arrow_compression_method = 'none'
+
+select * except (index, h3) from (
+    select *, reinterpretAsUInt64(reverse(unhex(index))) h3,
+    toUInt32(bitAnd(h3, toUInt64(4294967295))) as index_lower,
+    toUInt32(bitShiftRight(h3, 32)) as index_upper
+    -- bitOr(toUInt64(index_lower), bitShiftLeft(toUInt64(index_upper),32)) -- validation
+    from 'population_density.arrow'
+)
+into outfile 'population_density_hilo.arrow' settings output_format_arrow_compression_method = 'none'
