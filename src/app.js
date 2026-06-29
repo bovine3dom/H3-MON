@@ -327,13 +327,22 @@ function perfTimer(label, details) {
     return (extra) => {
         const elapsed = now() - start
         finishLoadTask(progressTask, elapsed)
-        if (!perfEnabled) return
-        const merged = {...(details || {}), ...(extra || {})}
-        if (Object.keys(merged).length) {
-            console.info(`[perf] ${label}: ${elapsed.toFixed(1)}ms`, merged)
-        } else {
-            console.info(`[perf] ${label}: ${elapsed.toFixed(1)}ms`)
-        }
+        logPerf(label, elapsed, details, extra)
+    }
+}
+
+function detailPerfTimer(label, details) {
+    const start = now()
+    return extra => logPerf(label, now() - start, details, extra)
+}
+
+function logPerf(label, elapsed, details, extra) {
+    if (!perfEnabled) return
+    const merged = {...(details || {}), ...(extra || {})}
+    if (Object.keys(merged).length) {
+        console.info(`[perf] ${label}: ${elapsed.toFixed(1)}ms`, merged)
+    } else {
+        console.info(`[perf] ${label}: ${elapsed.toFixed(1)}ms`)
     }
 }
 
@@ -599,6 +608,7 @@ function toStringValue(value) {
 
 const H3_INDEX_LOWER = 'index_lower'
 const H3_INDEX_UPPER = 'index_upper'
+const COLOUR_PALETTE_SIZE = 1024
 
 function hasSplitH3Index(cols) {
     return Boolean(cols && cols[H3_INDEX_LOWER] && cols[H3_INDEX_UPPER])
@@ -694,6 +704,28 @@ function createSplitH3ToXYMap() {
     }
 }
 
+function addH3MapCell(map, split, lower, upper, h3, cellIndex, x, y) {
+    let entry = split ? map.getSplit(lower, upper) : map.get(h3)
+    if (!entry) {
+        entry = split
+            ? {lower, upper, cellIndices: [], xMin: x, xMax: x, yMin: y, yMax: y}
+            : {cellIndices: [], xMin: x, xMax: x, yMin: y, yMax: y}
+        if (split) map.setSplit(lower, upper, entry)
+        else map.set(h3, entry)
+    } else {
+        if (x < entry.xMin) entry.xMin = x
+        if (x > entry.xMax) entry.xMax = x
+        if (y < entry.yMin) entry.yMin = y
+        if (y > entry.yMax) entry.yMax = y
+    }
+    entry.cellIndices.push(cellIndex)
+    return entry
+}
+
+function h3EntryCellCount(entry) {
+    return entry?.cellIndices ? entry.cellIndices.length : (entry?.cells?.length ?? 0)
+}
+
 const HTML_ESCAPES = {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}
 function escapeHtml(value) {
     return String(value).replace(/[&<>"']/g, c => HTML_ESCAPES[c])
@@ -707,6 +739,8 @@ function xyKey(x, y) {
 function buildCartogramAggregation(rawCols) {
     const rowCount = h3RowCount(rawCols)
     const done = perfTimer('cartogram.cells.precompute', {rows: rowCount, h3Index: hasSplitH3Index(rawCols) ? 'split' : 'string'})
+    const weights = rawCols.weight_mean || rawCols.weight || null
+    let weightValues = null
     const cellByKey = new Map()
     const rowCell = new Uint32Array(rowCount)
     const x = []
@@ -719,6 +753,7 @@ function buildCartogramAggregation(rawCols) {
     const codeCounts = []
     const labelCounts = []
 
+    const doneGroupXY = detailPerfTimer('cartogram.cells.group_xy', {rows: rowCount})
     for (let i = 0; i < rowCount; i++) {
         const cx = toNumber(rawCols.x[i])
         const cy = toNumber(rawCols.y[i])
@@ -742,18 +777,38 @@ function buildCartogramAggregation(rawCols) {
             if (labelValue != null && labelValue !== '') addCount(labelCounts[cellIndex], labelValue)
         }
     }
+    doneGroupXY({cells: x.length})
 
+    if (weights) {
+        const doneWeightValues = detailPerfTimer('cartogram.weights.values_precompute', {rows: rowCount})
+        weightValues = new Float64Array(rowCount)
+        let invalidWeights = 0
+        for (let i = 0; i < rowCount; i++) {
+            const weight = toFiniteNumber(weights[i])
+            if (weight == null) {
+                weightValues[i] = NaN
+                invalidWeights++
+            } else {
+                weightValues[i] = weight
+            }
+        }
+        doneWeightValues({invalidWeights})
+    }
+
+    const doneOutput = detailPerfTimer('cartogram.cells.output', {cells: x.length})
     for (let i = 0; i < x.length; i++) {
         code.push(dominant(codeCounts[i]))
         label.push(dominant(labelCounts[i]))
         index.push('')
         anchorIndex.push('')
     }
+    doneOutput()
 
     done({cells: x.length, strategy: 'numeric-xy-key'})
     return {
         h3Cols: rawCols,
-        weights: rawCols.weight_mean || rawCols.weight || null,
+        weights,
+        weightValues,
         rowCell,
         h3RowsByCell,
         cellH3StringCache: [],
@@ -777,12 +832,7 @@ function buildH3ToXY(rawCols) {
             const upper = toNumber(columnValue(rawCols[H3_INDEX_UPPER], i))
             const x = toNumber(rawCols.x[i])
             const y = toNumber(rawCols.y[i])
-            const existing = map.getSplit(lower, upper)
-            if (existing) {
-                existing.cells.push([x, y])
-            } else {
-                map.setSplit(lower, upper, {lower, upper, cells: [[x, y]]})
-            }
+            addH3MapCell(map, true, lower, upper, null, cartogramAgg?.rowCell?.[i] ?? i, x, y)
         }
     } else {
         const h3Strings = ensureH3StringColumn(rawCols, 'cartogram.h3_strings.from_split')
@@ -790,12 +840,7 @@ function buildH3ToXY(rawCols) {
             const hex = toStringValue(columnValue(h3Strings, i))
             const x = toNumber(rawCols.x[i])
             const y = toNumber(rawCols.y[i])
-            const existing = map.get(hex)
-            if (existing) {
-                existing.cells.push([x, y])
-            } else {
-                map.set(hex, {cells: [[x, y]]})
-            }
+            addH3MapCell(map, false, null, null, hex, cartogramAgg?.rowCell?.[i] ?? i, x, y)
         }
     }
     h3toXY = map
@@ -920,6 +965,9 @@ function findClosestHex(targetLat, targetLng, h3map = h3toXY) {
 }
 
 function getH3Bounds(entry) {
+    if (entry && entry.xMin != null) {
+        return {xMin: entry.xMin, xMax: entry.xMax, yMin: entry.yMin, yMax: entry.yMax}
+    }
     let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity
     for (const [x, y] of entry.cells) {
         if (x < xMin) xMin = x
@@ -1143,14 +1191,62 @@ function bootstrap(meta = {}){
 
     const transparentColour = [0, 0, 0, 0]
     const transparentCss = 'rgba(0,0,0,0)'
+    const parsedColourCache = new Map()
+    function parseColour(css) {
+        let cached = parsedColourCache.get(css)
+        if (cached) return cached
+        const colour = d3.color(css)
+        cached = colour ? [colour.r, colour.g, colour.b, Math.round((colour.opacity ?? 1) * 255)] : transparentColour
+        parsedColourCache.set(css, cached)
+        return cached
+    }
+    const colourPaletteCss = new Array(COLOUR_PALETTE_SIZE)
+    const colourPaletteRgba = new Uint8Array(COLOUR_PALETTE_SIZE * 4)
+    for (let i = 0; i < COLOUR_PALETTE_SIZE; i++) {
+        const css = colourRamp(i / (COLOUR_PALETTE_SIZE - 1)) ?? transparentCss
+        const rgba = parseColour(css)
+        colourPaletteCss[i] = css
+        const offset = i * 4
+        colourPaletteRgba[offset] = rgba[0]
+        colourPaletteRgba[offset + 1] = rgba[1]
+        colourPaletteRgba[offset + 2] = rgba[2]
+        colourPaletteRgba[offset + 3] = rgba[3]
+    }
+    function colourPaletteIndex(number) {
+        return number >= 0 && number <= 1 ? Math.round(number * (COLOUR_PALETTE_SIZE - 1)) : -1
+    }
     const getCssColour = v => {
         const number = toFiniteNumber(v)
-        return number == null ? transparentCss : (colourRamp(number) ?? transparentCss)
+        if (number == null) return transparentCss
+        const paletteIndex = colourPaletteIndex(number)
+        return paletteIndex >= 0 ? colourPaletteCss[paletteIndex] : (colourRamp(number) ?? transparentCss)
     }
-    const getColour = v => {
-        const colour = d3.color(getCssColour(v))
-        return colour ? [colour.r, colour.g, colour.b, Math.round((colour.opacity ?? 1) * 255)] : transparentColour
+    const writeColourForValue = (v, target, offset = 0) => {
+        const number = toFiniteNumber(v)
+        if (number == null) {
+            target[offset] = 0
+            target[offset + 1] = 0
+            target[offset + 2] = 0
+            target[offset + 3] = 0
+            return target
+        }
+        const paletteIndex = colourPaletteIndex(number)
+        if (paletteIndex >= 0) {
+            const paletteOffset = paletteIndex * 4
+            target[offset] = colourPaletteRgba[paletteOffset]
+            target[offset + 1] = colourPaletteRgba[paletteOffset + 1]
+            target[offset + 2] = colourPaletteRgba[paletteOffset + 2]
+            target[offset + 3] = colourPaletteRgba[paletteOffset + 3]
+            return target
+        }
+        const colour = parseColour(colourRamp(number) ?? transparentCss)
+        target[offset] = colour[0]
+        target[offset + 1] = colour[1]
+        target[offset + 2] = colour[2]
+        target[offset + 3] = colour[3]
+        return target
     }
+    const getColour = v => writeColourForValue(v, [0, 0, 0, 0])
     const writeColour = (target, colour) => {
         if (!target) return colour
         target[0] = colour[0]
@@ -1191,28 +1287,24 @@ function bootstrap(meta = {}){
         return positions
     }
 
-    function buildH3FillColorAttribute(data, kind, valuekey, getColour, rows) {
+    function buildH3FillColorAttribute(data, kind, valuekey, writeColourValue, rows) {
         const doneColors = perfTimer('deck.h3_binary.colors', {rows})
         const colors = new Uint8Array(rows * 4)
         for (let i = 0; i < rows; i++) {
             const value = kind === 'column' ? columnValue(data[valuekey], i) : data[i][valuekey]
-            const colour = getColour(value)
             const offset = i * 4
-            colors[offset] = colour[0]
-            colors[offset + 1] = colour[1]
-            colors[offset + 2] = colour[2]
-            colors[offset + 3] = colour[3] ?? 255
+            writeColourValue(value, colors, offset)
         }
         doneColors()
         return colors
     }
 
-    function h3DeckData(kind, data, indexkey, valuekey, getColour) {
+    function h3DeckData(kind, data, indexkey, valuekey, writeColourValue) {
         const rows = kind === 'column' ? h3RowCount(data) : data.length
         const dataWrap = kind === 'column' ? {src: data, length: rows} : data
         const attributes = {}
         if (h3BinaryPositions) attributes.getPosition = {value: buildH3PositionAttribute(data, kind, indexkey, rows), size: 3}
-        if (h3BinaryColors) attributes.getFillColor = {value: buildH3FillColorAttribute(data, kind, valuekey, getColour, rows), size: 4, type: 'unorm8'}
+        if (h3BinaryColors) attributes.getFillColor = {value: buildH3FillColorAttribute(data, kind, valuekey, writeColourValue, rows), size: 4, type: 'unorm8'}
         dataWrap.attributes = attributes
         dataWrap.startIndices = null
         return dataWrap
@@ -1302,6 +1394,35 @@ function bootstrap(meta = {}){
             }
         }
         doneDataMap({entries: split ? valuesByH3.entries : valuesByH3.size, sourceObserved, sourceMissing})
+        return valuesByH3
+    }
+
+    function indexFiniteSplitValuesByH3(sourceCols, sourceValueKey, perfLabel, perfDetails = {}) {
+        const sourceValues = sourceCols[sourceValueKey]
+        const sourceRows = h3RowCount(sourceCols)
+        const lowerCol = sourceCols[H3_INDEX_LOWER]
+        const upperCol = sourceCols[H3_INDEX_UPPER]
+        const doneDataMap = perfTimer(perfLabel, {rows: sourceRows, h3Index: 'split', ...perfDetails})
+        const root = new Map()
+        const valuesByH3 = {
+            split: true,
+            root,
+            entries: 0,
+        }
+        let sourceObserved = 0
+        let sourceMissing = 0
+        let entries = 0
+        for (let i = 0; i < sourceRows; i++) {
+            const value = toFiniteNumber(sourceValues[i])
+            if (value == null) {
+                sourceMissing++
+                continue
+            }
+            if (splitMapSet(root, toNumber(lowerCol[i]), toNumber(upperCol[i]), value)) entries++
+            sourceObserved++
+        }
+        valuesByH3.entries = entries
+        doneDataMap({entries: valuesByH3.entries, sourceObserved, sourceMissing})
         return valuesByH3
     }
 
@@ -1444,46 +1565,118 @@ function bootstrap(meta = {}){
         }
     }
 
+    function aggregateSameResolutionSplitCartogram(valuesByH3, cellCount, cartogramRows) {
+        const numerator = new Float64Array(cellCount)
+        const denominator = new Float64Array(cellCount)
+        const observedByTarget = new Uint8Array(cellCount)
+        const values = new Array(cellCount)
+        const rowCell = cartogramAgg.rowCell
+        const lowerCol = cartogramAgg.h3Cols[H3_INDEX_LOWER]
+        const upperCol = cartogramAgg.h3Cols[H3_INDEX_UPPER]
+        const weightValues = cartogramAgg.weightValues
+        const valuesRoot = valuesByH3.root
+
+        let targetsWithObservedData = 0
+        let contributorValuesObserved = 0
+        let contributorValuesUsed = 0
+        let invalidWeights = 0
+
+        for (let i = 0; i < cartogramRows; i++) {
+            const targetIndex = rowCell[i]
+            const value = splitMapGet(valuesRoot, toNumber(lowerCol[i]), toNumber(upperCol[i]))
+            if (value == null) continue
+
+            contributorValuesObserved++
+            if (!observedByTarget[targetIndex]) {
+                observedByTarget[targetIndex] = 1
+                targetsWithObservedData++
+            }
+
+            const weight = weightValues ? weightValues[i] : 1
+            if (!Number.isFinite(weight)) {
+                invalidWeights++
+                continue
+            }
+            numerator[targetIndex] += value * weight
+            denominator[targetIndex] += weight
+            contributorValuesUsed++
+        }
+
+        let targetsWithData = 0
+        let targetsMissing = 0
+        for (let i = 0; i < cellCount; i++) {
+            if (denominator[i]) {
+                values[i] = numerator[i] / denominator[i]
+                targetsWithData++
+            } else {
+                values[i] = null
+                targetsMissing++
+            }
+        }
+
+        return {
+            values,
+            contributorRows: cartogramRows,
+            contributorsMissing: cartogramRows - contributorValuesObserved,
+            contributorsCoveredByInput: contributorValuesObserved,
+            targetsWithObservedData,
+            targetsWithData,
+            targetsMissing,
+            contributorValuesObserved,
+            contributorValuesDefaulted: 0,
+            contributorValuesUsed,
+            invalidWeights,
+            coveredSourceH3s: null,
+            observedSourceH3s: null,
+        }
+    }
+
     function groupCartogramWithMap(sourceCols, sourceValueKey, perfDetails = {}) {
         const doneGroup = perfTimer('cartogram.js_group.total', perfDetails)
         const defaultValue = getDefaultValue()
         const defaultNumber = toFiniteNumber(defaultValue)
         const meanCol = sourceValueKey === 'quantile' ? 'quantile_mean' : 'value_mean'
         const useSplitJoin = hasSplitH3Index(sourceCols) && hasSplitH3Index(cartogramAgg.h3Cols)
-        const valuesByH3 = indexValuesByH3(sourceCols, sourceValueKey, 'cartogram.js_group.data_map', {}, useSplitJoin)
+        const useFastSplitJoin = useSplitJoin && defaultNumber == null
+        const valuesByH3 = useFastSplitJoin
+            ? indexFiniteSplitValuesByH3(sourceCols, sourceValueKey, 'cartogram.js_group.data_map')
+            : indexValuesByH3(sourceCols, sourceValueKey, 'cartogram.js_group.data_map', {}, useSplitJoin)
 
         const cellCount = cartogramAgg.x.length
+        const weightValues = cartogramAgg.weightValues
         const weights = cartogramAgg.weights
         const cartogramRows = h3RowCount(cartogramAgg.h3Cols)
         const split = valuesByH3.split && hasSplitH3Index(cartogramAgg.h3Cols)
         const doneAccum = perfTimer('cartogram.js_group.accumulate', {rows: cartogramRows, cells: cellCount})
-        const aggregated = aggregateTargetMeans(
-            cellCount,
-            valuesByH3,
-            split ? visit => {
-                const lowerCol = cartogramAgg.h3Cols[H3_INDEX_LOWER]
-                const upperCol = cartogramAgg.h3Cols[H3_INDEX_UPPER]
-                for (let i = 0; i < cartogramRows; i++) {
-                    visit(
-                        cartogramAgg.rowCell[i],
-                        toNumber(columnValue(lowerCol, i)),
-                        i,
-                        toNumber(columnValue(upperCol, i))
-                    )
+        const aggregated = useFastSplitJoin
+            ? aggregateSameResolutionSplitCartogram(valuesByH3, cellCount, cartogramRows)
+            : aggregateTargetMeans(
+                cellCount,
+                valuesByH3,
+                split ? visit => {
+                    const lowerCol = cartogramAgg.h3Cols[H3_INDEX_LOWER]
+                    const upperCol = cartogramAgg.h3Cols[H3_INDEX_UPPER]
+                    for (let i = 0; i < cartogramRows; i++) {
+                        visit(
+                            cartogramAgg.rowCell[i],
+                            toNumber(columnValue(lowerCol, i)),
+                            i,
+                            toNumber(columnValue(upperCol, i))
+                        )
+                    }
+                } : visit => {
+                    const cartogramH3s = ensureH3StringColumn(cartogramAgg.h3Cols, 'cartogram.js_group.h3_strings')
+                    for (let i = 0; i < cartogramRows; i++) {
+                        visit(cartogramAgg.rowCell[i], toStringValue(columnValue(cartogramH3s, i)), i)
+                    }
+                },
+                {
+                    defaultNumber,
+                    fillMissingContributors: defaultNumber != null,
+                    infillMissing: infill,
+                    getWeight: i => weightValues ? (Number.isFinite(weightValues[i]) ? weightValues[i] : null) : (weights ? toFiniteNumber(weights[i]) : 1),
                 }
-            } : visit => {
-                const cartogramH3s = ensureH3StringColumn(cartogramAgg.h3Cols, 'cartogram.js_group.h3_strings')
-                for (let i = 0; i < cartogramRows; i++) {
-                    visit(cartogramAgg.rowCell[i], toStringValue(columnValue(cartogramH3s, i)), i)
-                }
-            },
-            {
-                defaultNumber,
-                fillMissingContributors: defaultNumber != null,
-                infillMissing: infill,
-                getWeight: i => weights ? toFiniteNumber(weights[i]) : 1,
-            }
-        )
+            )
         doneAccum({
             infill,
             defaultValue: defaultNumber,
@@ -1639,7 +1832,7 @@ function bootstrap(meta = {}){
             if (!useCartogramQuantiles || !doQuantiles) {
                 const doneDeckLayer = perfTimer('deck.hex_layer.create', {rows: dataCols.value.length, h3Precision, h3BinaryPositions, h3BinaryColors, pickable: false, h3Index: hasSplitH3Index(dataCols) ? 'split' : 'string'})
                 const accessors = hexAccessors('column', 'index', valuekey, getColour)
-                const dataWrap = h3DeckData('column', dataCols, 'index', valuekey, getColour)
+                const dataWrap = h3DeckData('column', dataCols, 'index', valuekey, writeColourForValue)
                 deckLayer = new H3HexagonLayer({
                     id: 'H3HexagonLayer', data: dataWrap,
                     ...h3LayerProps(),
@@ -1758,7 +1951,7 @@ function bootstrap(meta = {}){
                 setLoadStage('Preparing map layer')
                 const doneDeckLayer = perfTimer('deck.hex_layer.create', {rows: dataCols.value.length, h3Precision, h3BinaryPositions, h3BinaryColors, pickable: false, h3Index: hasSplitH3Index(dataCols) ? 'split' : 'string'})
                 const accessors = hexAccessors('column', 'index', valuekey, getColour)
-                const dataWrap = h3DeckData('column', dataCols, 'index', valuekey, getColour)
+                const dataWrap = h3DeckData('column', dataCols, 'index', valuekey, writeColourForValue)
                 deckLayer = new H3HexagonLayer({
                     id: 'H3HexagonLayer', data: dataWrap,
                     ...h3LayerProps(),
@@ -1861,7 +2054,7 @@ function bootstrap(meta = {}){
             if (format.kind === 'column') window._columnData = data
             const rows = format.kind === 'column' ? data.value.length : data.length
             const doneDeckLayer = perfTimer('deck.hex_layer.create', {rows, h3Precision, h3BinaryPositions, h3BinaryColors, pickable: false, h3Index: format.kind === 'column' && hasSplitH3Index(data) ? 'split' : 'string'})
-            const dataWrap = h3DeckData(format.kind, data, 'index', valuekey, getColour)
+            const dataWrap = h3DeckData(format.kind, data, 'index', valuekey, writeColourForValue)
             const layer = new H3HexagonLayer({
                 id: 'H3HexagonLayer',
                 data: dataWrap,
@@ -2013,24 +2206,35 @@ function bootstrap(meta = {}){
         const h3map = await ensureH3ToXY()
         if (!h3map || !cartogramApi || !cartoAggCols) return
 
+        const rowSet = new Set()
         const cells = []
+        let xMin = Infinity, yMin = Infinity, xMax = -Infinity, yMax = -Infinity
         for (const cartoH3 of cartoH3s) {
             const entry = h3map.get(cartoH3)
-            if (entry) cells.push(...entry.cells)
+            if (!entry) continue
+            const bounds = getH3Bounds(entry)
+            if (bounds.xMin < xMin) xMin = bounds.xMin
+            if (bounds.yMin < yMin) yMin = bounds.yMin
+            if (bounds.xMax > xMax) xMax = bounds.xMax
+            if (bounds.yMax > yMax) yMax = bounds.yMax
+            if (entry.cellIndices) {
+                for (const cellIndex of entry.cellIndices) rowSet.add(cellIndex)
+            } else if (entry.cells) {
+                cells.push(...entry.cells)
+            }
         }
-        if (!cells.length) return
 
-        const cellSet = new Set(cells.map(([x, y]) => `${x},${y}`))
-        const rowIndices = []
-        for (let i = 0; i < cartoAggCols.x.length; i++) {
-            if (cellSet.has(`${cartoAggCols.x[i]},${cartoAggCols.y[i]}`)) rowIndices.push(i)
+        if (!rowSet.size && cells.length) {
+            const cellSet = new Set(cells.map(([x, y]) => `${x},${y}`))
+            for (let i = 0; i < cartoAggCols.x.length; i++) {
+                if (cellSet.has(`${cartoAggCols.x[i]},${cartoAggCols.y[i]}`)) rowSet.add(i)
+            }
         }
-        if (!rowIndices.length) return
+        if (!rowSet.size || xMin === Infinity) return
 
-        cartogramApi.highlightCells(rowIndices)
-        const b = getH3Bounds({cells})
+        cartogramApi.highlightCells(Array.from(rowSet))
         const padding = 20
-        cartogramApi.fitToBounds([[b.xMin - padding, b.yMin - padding, b.xMax + padding, b.yMax + padding]])
+        cartogramApi.fitToBounds([[xMin - padding, yMin - padding, xMax + padding, yMax + padding]])
     }
 
     const mapOverlay = new MapboxOverlay({
@@ -2283,7 +2487,7 @@ function bootstrap(meta = {}){
             }
             if (!pt) continue
             const b = getH3Bounds(pt)
-            cornerMatches.push({lat: c.lat, lng: c.lng, h, fallback, cells: pt.cells.length, bounds: b})
+            cornerMatches.push({lat: c.lat, lng: c.lng, h, fallback, cells: h3EntryCellCount(pt), bounds: b})
             if (b.xMin < xMin) xMin = b.xMin
             if (b.yMin < yMin) yMin = b.yMin
             if (b.xMax > xMax) xMax = b.xMax
