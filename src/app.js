@@ -696,7 +696,7 @@ function hex(hexes, options = {}) {
             getFillColor: [255, 0, 0, 255], // it'd be neat to colour by weight but it's a tiny bit tricky
             getLineColor: [0, 0, 0, 255], // doesn't seem to do anything?
             getLineWidth: 10,
-            stroked: true,
+            coverage: 0.6,
             extruded: false,
             pickable: false,
         })
@@ -1434,7 +1434,7 @@ function bootstrap(meta = {}){
                             onclick_callback: (data, event, i) => {
                                 if (cartogramApi) cartogramApi.highlightCells([])
                                 if (data.index && data.index[i]) {
-                                    hex(data.index[i].split(", ").filter(x => x))
+                                    hex(data.index[i].split(", ").filter(x => x), {fit: true})
                                 }
                             },
                             onmove_callback: (data, visibleIndices) => {
