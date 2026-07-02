@@ -135,6 +135,8 @@ const LOAD_PROGRESS_DEFAULT_PROFILE = [
     'deck.set_layers',
     'deck.after_render',
 ]
+const LOAD_PROGRESS_NO_CARTOGRAM_PROFILE = LOAD_PROGRESS_DEFAULT_PROFILE.filter(label => !label.startsWith('cartogram.'))
+let loadProgressProfile = LOAD_PROGRESS_DEFAULT_PROFILE
 const LOAD_PROGRESS_LABELS = {
     'cartogram.weights.fetch': 'Loading cartogram weights',
     'cartogram.weights.arrayBuffer': 'Downloading cartogram weights',
@@ -197,7 +199,8 @@ function saveProgressEstimate(label, elapsed) {
     } catch (_) {}
 }
 
-function configureLoadProgress(labels = LOAD_PROGRESS_DEFAULT_PROFILE) {
+function configureLoadProgress(labels = loadProgressProfile) {
+    loadProgressProfile = labels
     loadProgress.estimates = loadProgressEstimates()
     loadProgress.completedWork = 0
     loadProgress.active.clear()
@@ -564,6 +567,8 @@ let hex_flying = false
 let hexFlyToken = 0
 let h3toXY = null
 let cartogramApi = null
+let cartogramEnabled = false
+let cartogramInit = null
 let cartoAggCols = null
 let cartoRes = 5
 let dataH3Res = null
@@ -850,7 +855,9 @@ function buildH3ToXY(rawCols) {
 
 async function ensureH3ToXY() {
     if (h3toXY) return h3toXY
+    if (!cartogramInit) return null
     if (!cartogramRawCols) await cartogramInit
+    if (!cartogramRawCols) return null
     if (!h3toXYPromise) h3toXYPromise = Promise.resolve().then(() => buildH3ToXY(cartogramRawCols))
     return h3toXYPromise
 }
@@ -985,8 +992,6 @@ function cartoH3sForDataH3(h3Index) {
     return res > cartoRes ? [cellToParent(h3, cartoRes)] : cellToChildren(h3, cartoRes)
 }
 
-configureLoadProgress()
-
 const PARQUET_WASM_URL = './parquet_wasm_bg.wasm'
 
 const FORMATS = {
@@ -1004,55 +1009,68 @@ if (!FORMATS[ext] && dotIdx >= 0) console.warn(`Unknown extension ".${ext}", fal
 const file_name = dotIdx >= 0 ? dataParam : `${dataParam}.csv`
 const base_name = dotIdx >= 0 ? dataParam.slice(0, dotIdx) : dataParam
 const meta_name = `${base_name}.json`
-const cartogramWeightsFile = base_name.endsWith('_hilo') ? 'cartogram_weights_hilo.arrow' : 'cartogram_weights.arrow'
 
-const cartogramInit = (async () => {
-    const doneInit = perfTimer('cartogram.init.total')
-    setLoadStage('Loading cartogram weights')
-    const arrow_resp = await measurePerf('cartogram.weights.fetch', {file: cartogramWeightsFile}, () => fetch(`data/${cartogramWeightsFile}`))
-    if (!arrow_resp.ok) throw new Error(`Failed to load ${cartogramWeightsFile}: HTTP ${arrow_resp.status}`)
-    const arrow_buf = await measurePerf('cartogram.weights.arrayBuffer', () => arrow_resp.arrayBuffer())
-    setLoadStage('Parsing cartogram weights')
-    const rawTable = await parseArrowTable(arrow_buf, 'cartogram.weights.arrow_parse', {bytes: arrow_buf.byteLength})
-    const rawCols = {
-        x: await materializeArrowColumn(rawTable, 'x', 'cartogram.weights.column'),
-        y: await materializeArrowColumn(rawTable, 'y', 'cartogram.weights.column'),
-        code: await materializeArrowColumn(rawTable, 'code', 'cartogram.weights.column'),
-        label: rawTable.getChild('label'),
-        index: rawTable.getChild('index'),
-        index_lower: await materializeArrowColumn(rawTable, H3_INDEX_LOWER, 'cartogram.weights.column'),
-        index_upper: await materializeArrowColumn(rawTable, H3_INDEX_UPPER, 'cartogram.weights.column'),
-        weight: await materializeArrowColumn(rawTable, 'weight', 'cartogram.weights.column'),
-        weight_mean: await materializeArrowColumn(rawTable, 'weight_mean', 'cartogram.weights.column'),
-    }
-    cartoRes = getResolution(h3IndexInputAt(rawCols, 0))
-    cartogramRawCols = rawCols
-    await yieldToPaint('Preparing cartogram cells')
-    cartogramAgg = buildCartogramAggregation(rawCols)
-    setLoadStage('Cartogram weights ready')
-    doneInit({rows: h3RowCount(rawCols), cells: cartogramAgg.x.length, cartoRes, file: cartogramWeightsFile, h3Index: hasSplitH3Index(rawCols) ? 'split' : 'string'})
+function defaultCartogramWeightsFile() {
+    return base_name.endsWith('_hilo') ? 'cartogram_weights_hilo.arrow' : 'cartogram_weights.arrow'
+}
 
-    return {}
-    // next steps:
-    // 0) debug why on earth labels are showing up in multiple places even though they are unique in mapping.arrow. ditto for country borders?
-    // 1) draw the cartogram in a new pane with borders
-    // 3) link cartogram <-> map
-    // (e.g. click on cartogram -> draw h3 that contribute to that cell * weight;
-    // zoom/move cartogram -> zoom/move map based on bbox of cartogram ... might be worth pre-computing lat/lon?)
-    // 2) aggregate actual data into the cartogram. your current spec is index: string, which is incompatible with the cartogram spec of h3: uint64. so fix that first. then join and profit
-    // high-resolution H3 data is rolled up into cartogram-resolution parents before aggregation.
-    // 4) reduce duplication of effort: reuse quantiles and data.
-    // 5) investigate aggregation of non-h3 5 data. sum/mean/median? exercise for reader
-    // 7) try to work out why legend has flipped between the two
-    // 8) add tooltip to cartogram cells
-    // done ^
-    //
-    // 6) change opacity of cells with bad 'wp' (london etc seems totally wrong useless)
-    // 9) make legend respect flip, etc.
-    // 10) make tooltip look up quantiles in legend so they're pretty printed?
-    // 11) investigate random extra stuff in the legend. stop dividing code by 1000?
-    // 12) reinstate 'wp' from cartogram.arrow
-})()
+function resolveCartogramWeightsFile(value) {
+    if (value == null || value === '') return defaultCartogramWeightsFile()
+    const file = String(value).trim()
+    if (file.toLowerCase() === 'none') return null
+    if (!file) return defaultCartogramWeightsFile()
+    return file.lastIndexOf('.') >= 0 ? file : `${file}.arrow`
+}
+
+function loadCartogramWeights(cartogramWeightsFile) {
+    return (async () => {
+        const doneInit = perfTimer('cartogram.init.total')
+        setLoadStage('Loading cartogram weights')
+        const arrow_resp = await measurePerf('cartogram.weights.fetch', {file: cartogramWeightsFile}, () => fetch(`data/${cartogramWeightsFile}`))
+        if (!arrow_resp.ok) throw new Error(`Failed to load ${cartogramWeightsFile}: HTTP ${arrow_resp.status}`)
+        const arrow_buf = await measurePerf('cartogram.weights.arrayBuffer', () => arrow_resp.arrayBuffer())
+        setLoadStage('Parsing cartogram weights')
+        const rawTable = await parseArrowTable(arrow_buf, 'cartogram.weights.arrow_parse', {bytes: arrow_buf.byteLength})
+        const rawCols = {
+            x: await materializeArrowColumn(rawTable, 'x', 'cartogram.weights.column'),
+            y: await materializeArrowColumn(rawTable, 'y', 'cartogram.weights.column'),
+            code: await materializeArrowColumn(rawTable, 'code', 'cartogram.weights.column'),
+            label: rawTable.getChild('label'),
+            index: rawTable.getChild('index'),
+            index_lower: await materializeArrowColumn(rawTable, H3_INDEX_LOWER, 'cartogram.weights.column'),
+            index_upper: await materializeArrowColumn(rawTable, H3_INDEX_UPPER, 'cartogram.weights.column'),
+            weight: await materializeArrowColumn(rawTable, 'weight', 'cartogram.weights.column'),
+            weight_mean: await materializeArrowColumn(rawTable, 'weight_mean', 'cartogram.weights.column'),
+        }
+        cartoRes = getResolution(h3IndexInputAt(rawCols, 0))
+        cartogramRawCols = rawCols
+        await yieldToPaint('Preparing cartogram cells')
+        cartogramAgg = buildCartogramAggregation(rawCols)
+        setLoadStage('Cartogram weights ready')
+        doneInit({rows: h3RowCount(rawCols), cells: cartogramAgg.x.length, cartoRes, file: cartogramWeightsFile, h3Index: hasSplitH3Index(rawCols) ? 'split' : 'string'})
+
+        return {}
+        // next steps:
+        // 0) debug why on earth labels are showing up in multiple places even though they are unique in mapping.arrow. ditto for country borders?
+        // 1) draw the cartogram in a new pane with borders
+        // 3) link cartogram <-> map
+        // (e.g. click on cartogram -> draw h3 that contribute to that cell * weight;
+        // zoom/move cartogram -> zoom/move map based on bbox of cartogram ... might be worth pre-computing lat/lon?)
+        // 2) aggregate actual data into the cartogram. your current spec is index: string, which is incompatible with the cartogram spec of h3: uint64. so fix that first. then join and profit
+        // high-resolution H3 data is rolled up into cartogram-resolution parents before aggregation.
+        // 4) reduce duplication of effort: reuse quantiles and data.
+        // 5) investigate aggregation of non-h3 5 data. sum/mean/median? exercise for reader
+        // 7) try to work out why legend has flipped between the two
+        // 8) add tooltip to cartogram cells
+        // done ^
+        //
+        // 6) change opacity of cells with bad 'wp' (london etc seems totally wrong useless)
+        // 9) make legend respect flip, etc.
+        // 10) make tooltip look up quantiles in legend so they're pretty printed?
+        // 11) investigate random extra stuff in the legend. stop dividing code by 1000?
+        // 12) reinstate 'wp' from cartogram.arrow
+    })()
+}
 
 const STYLE = "./toner_ofm_moderatlist.json"
 //const STYLE = {version: 8, sources: {
@@ -1137,6 +1155,7 @@ function clearInactiveMapGesture() {
 }
 
 function syncCartogramAfterNextMapMove(reason) {
+    if (!cartogramEnabled) return
     hexFlyToken++
     map.stop()
     hex_flying = false
@@ -1179,6 +1198,20 @@ fetch(`data/${meta_name}`).then(r => r.json()).then(meta => {
 
 function bootstrap(meta = {}){
     const settings = Object.assign({}, meta, Object.fromEntries(params.entries()))
+    const cartogramWeightsFile = resolveCartogramWeightsFile(settings.cartogram)
+    cartogramEnabled = cartogramWeightsFile !== null
+    configureLoadProgress(cartogramEnabled ? LOAD_PROGRESS_DEFAULT_PROFILE : LOAD_PROGRESS_NO_CARTOGRAM_PROFILE)
+    if (cartogramEnabled) {
+        cartogramInit = loadCartogramWeights(cartogramWeightsFile)
+    } else {
+        cartogramInit = null
+        cartogramRawCols = null
+        cartogramAgg = null
+        cartoAggCols = null
+        h3toXY = null
+        h3toXYPromise = null
+        document.body.classList.remove('cartogram-ready')
+    }
     const infill = settingEnabled(settings.infill, false)
     const doCyclical = settingEnabled(settings.cyclical, false)
     const flip = settingEnabled(settings.flip, false)
@@ -1774,10 +1807,10 @@ function bootstrap(meta = {}){
 
         const doQuantiles = !settingEnabled(settings.raw, false)
         const trimFactor = settings.trimFactor ? settings.trimFactor : 0.01
-        const useCartogramQuantiles = settings.quantileSource === 'cartogram'
+        const useCartogramQuantiles = cartogramEnabled && settings.quantileSource === 'cartogram'
 
         if (format.layer === 'hex' && (ext === 'arrow' || ext === 'csv')) {
-            const cartogramReady = measurePerf('cartogram.init.await', () => cartogramInit)
+            const cartogramReady = cartogramEnabled ? measurePerf('cartogram.init.await', () => cartogramInit) : null
             const reload = ++reloadNum
             const resp = await measurePerf('data.fetch', {file: file_path, reload}, () => fetch(`${file_path}?v=${reload}`))
             const buf = await measurePerf(ext === 'csv' ? 'data.read_text' : 'data.read_arrayBuffer', () => ext === 'csv' ? resp.text() : resp.arrayBuffer())
@@ -1806,6 +1839,9 @@ function bootstrap(meta = {}){
 
             const values = dataCols.value
             const weights = hasWeight ? dataCols.weight : null
+            const schemaHasH3Index = hasH3Index(schema)
+            const h3res = schemaHasH3Index && h3RowCount(dataCols) ? getResolution(h3IndexInputAt(dataCols, 0)) : null
+            dataH3Res = h3res
             let valuekey = 'value'
             let getvalueFn
 
@@ -1841,11 +1877,9 @@ function bootstrap(meta = {}){
                 doneDeckLayer()
             }
 
-            if (hasH3Index(schema)) {
+            if (cartogramEnabled && schemaHasH3Index) {
                 await waitWithLoadProgress(cartogramReady, 'Waiting for cartogram weights')
                 await yieldToPaint('Aggregating cartogram')
-                const h3res = getResolution(h3IndexInputAt(dataCols, 0))
-                dataH3Res = h3res
 
                 cartoAggCols = null
                 let cartoDataCol = null
@@ -1895,9 +1929,34 @@ function bootstrap(meta = {}){
                             include_outer_borders: true,
                             data_col: cartoDataCol,
                             onclick_callback: (data, event, i) => {
-                                if (cartogramApi) cartogramApi.highlightCells([])
-                                const refs = cartogramCellH3Strings(i)
-                                if (refs.length) hex(refs, {fit: true})
+                                try {
+                                    syncLog('cartogram.click.callback', {
+                                        row: i,
+                                        eventType: event?.type,
+                                        cartogramEnabled,
+                                        hasApi: !!cartogramApi,
+                                        hasAggCols: !!cartoAggCols,
+                                        dataH3Res,
+                                        cartoRes,
+                                    })
+                                    if (cartogramApi) cartogramApi.highlightCells([i])
+                                    const cartoRefs = cartogramCellH3Strings(i)
+                                    const popupH3 = dataH3ForCartogramH3s(cartoRefs)
+                                    syncLog('cartogram.click.resolve', {
+                                        row: i,
+                                        cartoH3Refs: cartoRefs.length,
+                                        firstCartoRefs: cartoRefs.slice(0, 5),
+                                        popupH3,
+                                        popupRow: popupH3 ? lookupDataRowForH3(popupH3) : null,
+                                        cartoRes,
+                                        dataH3Res,
+                                    })
+                                    if (cartoRefs.length) hex(cartoRefs, {fit: true})
+                                    else syncLog('cartogram.click.skip_no_carto_refs', {row: i})
+                                    showClickPopupForH3AfterMapMove(popupH3)
+                                } catch (e) {
+                                    console.warn('Cartogram click failed', {row: i, cartoRes, dataH3Res}, e)
+                                }
                             },
                             onmove_callback: (data, visibleIndices) => {
                                 const contributorH3 = cartogramCellsH3Strings(visibleIndices)
@@ -2155,6 +2214,70 @@ function bootstrap(meta = {}){
         return h3DataRowLookup.map.get(String(h3Index)) ?? null
     }
 
+    function firstH3WithDataRow(h3s) {
+        for (const h3 of h3s) {
+            const row = lookupDataRowForH3(h3)
+            if (row != null) {
+                syncLog('cartogram.click.data_row_match', {h3, row})
+                return h3
+            }
+        }
+        return null
+    }
+
+    function dataH3ForCartogramH3s(cartoH3s) {
+        if (!cartoH3s || !cartoH3s.length) {
+            syncLog('cartogram.click.resolve.skip_no_carto_h3')
+            return null
+        }
+        const firstCartoH3 = cartoH3s[0]
+        if (dataH3Res == null || dataH3Res === cartoRes) {
+            const matched = firstH3WithDataRow(cartoH3s)
+            const selected = matched || firstCartoH3
+            syncLog('cartogram.click.resolve.same_res', {cartoH3Refs: cartoH3s.length, selected, matched: !!matched, dataH3Res, cartoRes})
+            return selected
+        }
+
+        if (dataH3Res < cartoRes) {
+            const parents = []
+            const seen = new Set()
+            for (const cartoH3 of cartoH3s) {
+                const parent = cellToParent(cartoH3, dataH3Res)
+                if (seen.has(parent)) continue
+                seen.add(parent)
+                parents.push(parent)
+            }
+            const matched = firstH3WithDataRow(parents)
+            const selected = matched || parents[0] || firstCartoH3
+            syncLog('cartogram.click.resolve.parent', {cartoH3Refs: cartoH3s.length, parents: parents.length, selected, matched: !!matched, dataH3Res, cartoRes})
+            return selected
+        }
+
+        let scannedChildren = 0
+        const maxChildScan = 5000
+        if ((7 ** (dataH3Res - cartoRes)) > maxChildScan) {
+            syncLog('cartogram.click.child_scan_skip', {cartoH3Refs: cartoH3s.length, cartoRes, dataH3Res, maxChildScan})
+            return firstCartoH3
+        }
+        for (const cartoH3 of cartoH3s) {
+            const children = cellToChildren(cartoH3, dataH3Res)
+            for (const child of children) {
+                scannedChildren++
+                const row = lookupDataRowForH3(child)
+                if (row != null) {
+                    syncLog('cartogram.click.resolve.child', {cartoH3Refs: cartoH3s.length, selected: child, row, scannedChildren, dataH3Res, cartoRes})
+                    return child
+                }
+                if (scannedChildren >= maxChildScan) {
+                    syncLog('cartogram.click.child_scan_limit', {cartoH3Refs: cartoH3s.length, cartoRes, dataH3Res, scannedChildren})
+                    return firstCartoH3
+                }
+            }
+        }
+        syncLog('cartogram.click.resolve.fallback_first_carto_h3', {cartoH3Refs: cartoH3s.length, firstCartoH3, scannedChildren, dataH3Res, cartoRes})
+        return firstCartoH3
+    }
+
     function formatDataValue(v) {
         if (v == null) return ''
         if (typeof v === 'number') return parseFloat(v.toPrecision(4)).toLocaleString()
@@ -2200,8 +2323,44 @@ function bootstrap(meta = {}){
         clickPopup = popup
     }
 
+    function showClickPopupForH3(h3Index) {
+        if (!h3Index) {
+            syncLog('cartogram.click.popup.skip_no_h3')
+            return
+        }
+        try {
+            const [lat, lng] = cellToLatLng(h3Index)
+            const point = map.project([lng, lat])
+            const row = lookupDataRowForH3(h3Index)
+            syncLog('cartogram.click.popup.show', {h3Index, row, lat, lng, point, mapMoving: typeof map.isMoving === 'function' ? map.isMoving() : null})
+            showClickPopup(point, h3Index, row)
+        } catch (e) {
+            console.warn('Failed to show H3 popup', h3Index, e)
+        }
+    }
+
+    function showClickPopupForH3AfterMapMove(h3Index) {
+        if (!h3Index) {
+            syncLog('cartogram.click.popup.schedule.skip_no_h3')
+            return
+        }
+        requestAnimationFrame(() => {
+            const moving = typeof map.isMoving === 'function' && map.isMoving()
+            syncLog('cartogram.click.popup.schedule', {h3Index, moving})
+            if (moving) {
+                map.once('moveend', () => {
+                    syncLog('cartogram.click.popup.moveend', {h3Index})
+                    showClickPopupForH3(h3Index)
+                })
+            } else {
+                showClickPopupForH3(h3Index)
+            }
+        })
+    }
+
     async function focusCartogramForH3(h3Index) {
         hex([h3Index], {fit: false, highlight: true})
+        if (!cartogramEnabled || !cartogramApi || !cartoAggCols) return
         const cartoH3s = cartoH3sForDataH3(h3Index)
         const h3map = await ensureH3ToXY()
         if (!h3map || !cartogramApi || !cartoAggCols) return
@@ -2527,7 +2686,7 @@ function bootstrap(meta = {}){
             center: {lng: pos.lng, lat: pos.lat},
             zoom: z,
         })
-        if (shouldSyncCartogram) fitCartogramToMapBounds()
+        if (cartogramEnabled && shouldSyncCartogram) fitCartogramToMapBounds()
     })
 
     function upperBound(array, target) {

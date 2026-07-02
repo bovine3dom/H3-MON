@@ -551,19 +551,61 @@ export function render_cartogram(container, data, options = {}) {
         const modelY = (point.y - transform.y) / transform.k
         const rawX = center_x + (modelX - width / 2) * 2 / square_size
         const rawY = center_y + (modelY - height / 2) * 2 / square_size
-        const x = minX + Math.round((rawX - minX) / coord_step) * coord_step
-        const y = minY + Math.round((rawY - minY) / coord_step) * coord_step
-        const i = rowByCell.get(cellKey(x, y))
-        if (i == null) return null
-        if (Math.abs(modelX - cellX[i]) > square_size / 2 || Math.abs(modelY - cellY[i]) > square_size / 2) return null
-        return i
+        const oldSnappedX = minX + Math.round((rawX - minX) / coord_step) * coord_step
+        const oldSnappedY = minY + Math.round((rawY - minY) / coord_step) * coord_step
+        const details = {
+            client: {x: event.clientX, y: event.clientY},
+            point,
+            model: {x: modelX, y: modelY},
+            raw: {x: rawX, y: rawY},
+            snapped: {x: oldSnappedX, y: oldSnappedY},
+            transform: transformDetails(transform),
+        }
+        let best = null
+        let candidates = 0
+        for (let x = Math.floor(rawX) - 1; x <= Math.ceil(rawX) + 1; x++) {
+            for (let y = Math.floor(rawY) - 1; y <= Math.ceil(rawY) + 1; y++) {
+                const i = rowByCell.get(cellKey(x, y))
+                if (i == null) continue
+                candidates++
+                const dx = Math.abs(modelX - cellX[i])
+                const dy = Math.abs(modelY - cellY[i])
+                const dist = dx * dx + dy * dy
+                if (!best || dist < best.dist) best = {i, x, y, dx, dy, dist}
+            }
+        }
+        if (!best) return {i: null, reason: 'no-cell', details: {...details, candidates}}
+        if (best.dx > square_size / 2 || best.dy > square_size / 2) {
+            return {i: null, reason: 'outside-cell', details: {...details, row: best.i, cell: {x: best.x, y: best.y}, dx: best.dx, dy: best.dy, candidates}}
+        }
+        return {i: best.i, reason: 'hit', details: {...details, row: best.i, cell: {x: best.x, y: best.y}, dx: best.dx, dy: best.dy, candidates}}
+    }
+
+    function hoveredCellIndexFromEvent(event) {
+        return cellIndexFromEvent(event).i
+    }
+
+    function logClickEvent(event, hit) {
+        debugLog('click.hit_test', {
+            defaultPrevented: event.defaultPrevented,
+            button: event.button,
+            target: event.target ? event.target.tagName : null,
+            reason: hit.reason,
+            row: hit.i,
+            dataRows: numRows,
+            ...hit.details,
+        })
     }
 
     let hoveredCellIndex = null
     svg.on("click.cell", (event) => {
-        if (event.defaultPrevented) return
-        const i = cellIndexFromEvent(event)
-        if (i != null) onclick_callback(currentData, event, i)
+        const hit = cellIndexFromEvent(event)
+        logClickEvent(event, hit)
+        if (event.defaultPrevented) {
+            debugLog('click.skip_default_prevented', {row: hit.i, reason: hit.reason})
+            return
+        }
+        if (hit.i != null) onclick_callback(currentData, event, hit.i)
     })
     svg.on("mousemove.cell", (event) => {
         if (cartogramGestureActive || fitToBoundsActive) {
@@ -572,7 +614,7 @@ export function render_cartogram(container, data, options = {}) {
             hoveredCellIndex = null
             return
         }
-        const i = cellIndexFromEvent(event)
+        const i = hoveredCellIndexFromEvent(event)
         if (i == null) {
             if (hoveredCellIndex != null) recordSvgPerfTooltip('mouseleave')
             hoveredCellIndex = null
