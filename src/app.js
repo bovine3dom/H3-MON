@@ -572,6 +572,7 @@ let h3toXY = null
 let cartogramApi = null
 let cartogramEnabled = false
 let cartogramInit = null
+let cartogramWeightsFile = null
 let cartoAggCols = null
 let cartoRes = 5
 let dataH3Res = null
@@ -1013,16 +1014,19 @@ const file_name = dotIdx >= 0 ? dataParam : `${dataParam}.csv`
 const base_name = dotIdx >= 0 ? dataParam.slice(0, dotIdx) : dataParam
 const meta_name = `${base_name}.json`
 
-function defaultCartogramWeightsFile() {
-    return base_name.endsWith('_hilo') ? 'cartogram_weights_hilo.arrow' : 'cartogram_weights.arrow'
+function cartogramFile(value) {
+    if (value == null || value === '') return 'cartogram_weights.arrow'
+    const file = String(value).trim()
+    const lower = file.toLowerCase()
+    if (lower === 'none') return null
+    if (!file || ['auto', 'default', '1', 'true', 'on', 'yes'].includes(lower)) return 'cartogram_weights.arrow'
+    return file.split('/').pop().includes('.') ? file : `${file}.arrow`
 }
 
-function resolveCartogramWeightsFile(value) {
-    if (value == null || value === '') return defaultCartogramWeightsFile()
-    const file = String(value).trim()
-    if (file.toLowerCase() === 'none') return null
-    if (!file) return defaultCartogramWeightsFile()
-    return file.lastIndexOf('.') >= 0 ? file : `${file}.arrow`
+function cartogramFileForData(value, preferHilo = false) {
+    const file = cartogramFile(value)
+    if (!file || !preferHilo || /_hilo\.[^/.]+$/.test(file)) return file
+    return file.replace(/(\.[^/.]+)$/, '_hilo$1')
 }
 
 function loadCartogramWeights(cartogramWeightsFile) {
@@ -1237,13 +1241,11 @@ fetch(`data/${meta_name}`).then(r => r.json()).then(meta => {
 
 function bootstrap(meta = {}){
     const settings = Object.assign({}, meta, Object.fromEntries(params.entries()))
-    const cartogramWeightsFile = resolveCartogramWeightsFile(settings.cartogram)
-    cartogramEnabled = cartogramWeightsFile !== null
+    cartogramInit = null
+    cartogramWeightsFile = null
+    cartogramEnabled = cartogramFile(settings.cartogram) !== null
     configureLoadProgress(cartogramEnabled ? LOAD_PROGRESS_DEFAULT_PROFILE : LOAD_PROGRESS_NO_CARTOGRAM_PROFILE)
-    if (cartogramEnabled) {
-        cartogramInit = loadCartogramWeights(cartogramWeightsFile)
-    } else {
-        cartogramInit = null
+    if (!cartogramEnabled) {
         cartogramRawCols = null
         cartogramAgg = null
         cartoAggCols = null
@@ -1879,7 +1881,6 @@ function bootstrap(meta = {}){
         const useCartogramQuantiles = cartogramEnabled && settings.quantileSource === 'cartogram'
 
         if (format.layer === 'hex' && (ext === 'arrow' || ext === 'csv')) {
-            const cartogramReady = cartogramEnabled ? measurePerf('cartogram.init.await', () => cartogramInit) : null
             const reload = ++reloadNum
             const resp = await measurePerf('data.fetch', {file: file_path, reload}, () => fetch(`${file_path}?v=${reload}`))
             const buf = await measurePerf(ext === 'csv' ? 'data.read_text' : 'data.read_arrayBuffer', () => ext === 'csv' ? resp.text() : resp.arrayBuffer())
@@ -1909,6 +1910,16 @@ function bootstrap(meta = {}){
             const values = dataCols.value
             const weights = hasWeight ? dataCols.weight : null
             const schemaHasH3Index = hasH3Index(schema)
+            const dataHasSplitH3Index = hasSplitH3Index(schema)
+            const cartogramReady = cartogramEnabled && schemaHasH3Index
+                ? measurePerf('cartogram.init.await', {dataH3Index: dataHasSplitH3Index ? 'split' : 'string'}, () => {
+                    if (!cartogramInit) {
+                        cartogramWeightsFile = cartogramFileForData(settings.cartogram, dataHasSplitH3Index)
+                        cartogramInit = loadCartogramWeights(cartogramWeightsFile)
+                    }
+                    return cartogramInit
+                })
+                : null
             const h3res = schemaHasH3Index && h3RowCount(dataCols) ? getResolution(h3IndexInputAt(dataCols, 0)) : null
             dataH3Res = h3res
             let valuekey = 'value'
