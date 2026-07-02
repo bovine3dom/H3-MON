@@ -40,6 +40,9 @@ const syncDebugEnabled = flagEnabled('sync') || perfEnabled
 function syncLog(label, details) {
     if (syncDebugEnabled) console.info(`[sync] ${label}`, details || {})
 }
+function svgPerfLog(label, details) {
+    if (svgPerfEnabled) console.info(`[svgperf] ${label}`, details || {})
+}
 const now = () => (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now())
 const loadProgress = {
     root: document.getElementById('load-progress'),
@@ -1138,6 +1141,7 @@ let mapGestureStarted = false
 let mapGestureMoved = false
 let mapWheelResetTimer = null
 let mapProgrammaticSyncReason = null
+let mapMovePerf = null
 
 function eventStartedInMap(event) {
     const target = event && event.target
@@ -1174,6 +1178,41 @@ window.addEventListener('pointercancel', clearInactiveMapGesture, {capture: true
 map.on('movestart', (event) => {
     const original = event && event.originalEvent
     if (mapGestureStarted || eventStartedInMap(original)) mapGestureMoved = true
+    if (svgPerfEnabled) {
+        const center = map.getCenter()
+        mapMovePerf = {
+            startedAt: now(),
+            lastLogAt: now(),
+            moves: 0,
+            originalEventType: original ? original.type : null,
+            originalInMap: eventStartedInMap(original),
+            gestureStarted: mapGestureStarted,
+            startCenter: {lng: center.lng, lat: center.lat},
+            startZoom: map.getZoom(),
+        }
+        svgPerfLog('map.movestart', mapMovePerf)
+    }
+})
+
+map.on('move', (event) => {
+    if (!svgPerfEnabled || !mapMovePerf) return
+    mapMovePerf.moves++
+    const t = now()
+    if (t - mapMovePerf.lastLogAt < 250) return
+    mapMovePerf.lastLogAt = t
+    const center = map.getCenter()
+    const original = event && event.originalEvent
+    svgPerfLog('map.move', {
+        elapsedMs: t - mapMovePerf.startedAt,
+        moves: mapMovePerf.moves,
+        originalEventType: original ? original.type : null,
+        mapGestureStarted,
+        mapGestureMoved,
+        cartogramEnabled,
+        hasCartogramApi: !!cartogramApi,
+        center: {lng: center.lng, lat: center.lat},
+        zoom: map.getZoom(),
+    })
 })
 
     window.addEventListener("hashchange", () => {
@@ -1220,7 +1259,37 @@ function bootstrap(meta = {}){
     const file_path = `data/${file_name}`
     let h3DataRowLookup = null
     let clickPopup = null
+    const sidePane = document.getElementById('side-pane')
+    const cartogramContainer = document.getElementById('cartogram')
     if (settings.t) document.title = settings.t
+
+    function rectDetails(element) {
+        if (!element) return null
+        const rect = element.getBoundingClientRect()
+        return {x: rect.x, y: rect.y, width: rect.width, height: rect.height}
+    }
+
+    function cartogramLayoutDetails() {
+        return {
+            cartogramReady: document.body.classList.contains('cartogram-ready'),
+            paneOpen: document.body.classList.contains('pane-open'),
+            paneFull: document.body.classList.contains('pane-full'),
+            sidePane: rectDetails(sidePane),
+            cartogram: rectDetails(cartogramContainer),
+            canvas: rectDetails(cartogramContainer?.querySelector('canvas')),
+            map: rectDetails(mapContainer),
+        }
+    }
+
+    async function ensureCartogramPaneLaidOut(reason) {
+        const wasReady = document.body.classList.contains('cartogram-ready')
+        document.body.classList.add('cartogram-ready')
+        svgPerfLog('cartogram.layout.ready', {reason, wasReady, beforePaint: cartogramLayoutDetails()})
+        await nextPaint()
+        map.resize()
+        await nextPaint()
+        svgPerfLog('cartogram.layout.ready_after_paint', {reason, wasReady, afterPaint: cartogramLayoutDetails()})
+    }
 
     const transparentColour = [0, 0, 0, 0]
     const transparentCss = 'rgba(0,0,0,0)'
@@ -1918,6 +1987,8 @@ function bootstrap(meta = {}){
                     }
 
                     if (!cartogramApi) {
+                        setLoadStage('Showing cartogram pane')
+                        await ensureCartogramPaneLaidOut('initial-render')
                         await yieldToPaint('Drawing cartogram')
                         const doneRenderCartogram = perfTimer('cartogram.render.call', {rows: cartoAggCols.x.length})
                         cartogramApi = render_cartogram('#cartogram', cartoAggCols, {
@@ -1980,6 +2051,8 @@ function bootstrap(meta = {}){
                         })
                         doneRenderCartogram()
                         setLoadStage('Fitting cartogram to map')
+                        await nextPaint()
+                        svgPerfLog('cartogram.initial_fit.layout', cartogramLayoutDetails())
                         fitCartogramToMapBounds(cartogramApi, h3map)
                     } else {
                         setLoadStage('Updating cartogram')
@@ -2615,17 +2688,21 @@ function bootstrap(meta = {}){
     }
 
     function fitCartogramToMapBounds(api = cartogramApi, h3map = h3toXY) {
+        const fitStart = svgPerfEnabled ? now() : 0
         if (hex_flying) {
             syncLog('map->cartogram.skip_hex_flying')
+            svgPerfLog('map->cartogram.fit.skip', {reason: 'hex_flying'})
             return
         }
         if (!h3map || !api) {
             syncLog('map->cartogram.skip_missing_state', {hasH3Map: !!h3map, hasApi: !!api})
+            svgPerfLog('map->cartogram.fit.skip', {reason: 'missing_state', hasH3Map: !!h3map, hasApi: !!api})
             return
         }
         const bounds = map.getBounds()
         if (!bounds) {
             syncLog('map->cartogram.skip_no_bounds')
+            svgPerfLog('map->cartogram.fit.skip', {reason: 'no_bounds'})
             return
         }
         const corners = [
@@ -2654,6 +2731,7 @@ function bootstrap(meta = {}){
         }
         if (xMin === Infinity) {
             syncLog('map->cartogram.skip_no_corner_matches', {mapBounds: bounds.toArray ? bounds.toArray() : null})
+            svgPerfLog('map->cartogram.fit.skip', {reason: 'no_corner_matches', elapsedMs: now() - fitStart, mapBounds: bounds.toArray ? bounds.toArray() : null})
             return
         }
         const cartogramBounds = [[xMin, yMin, xMax, yMax]]
@@ -2662,7 +2740,16 @@ function bootstrap(meta = {}){
             cornerMatches,
             cartogramBounds,
         })
+        svgPerfLog('map->cartogram.fit.compute', {
+            elapsedMs: now() - fitStart,
+            mapBounds: bounds.toArray ? bounds.toArray() : null,
+            cornerMatches: cornerMatches.length,
+            fallbackCorners: cornerMatches.filter(x => x.fallback).length,
+            h3MapSize: h3map.size,
+            cartogramBounds,
+        })
         api.fitToBounds(cartogramBounds)
+        svgPerfLog('map->cartogram.fit.call', {elapsedMs: now() - fitStart})
     }
 
     map.on('moveend', (event) => {
@@ -2670,6 +2757,8 @@ function bootstrap(meta = {}){
         const originalInMap = eventStartedInMap(original)
         const programmaticSyncReason = mapProgrammaticSyncReason
         const shouldSyncCartogram = mapGestureMoved || originalInMap || !!programmaticSyncReason
+        const movePerf = mapMovePerf
+        mapMovePerf = null
         mapGestureStarted = false
         mapGestureMoved = false
         mapProgrammaticSyncReason = null
@@ -2686,6 +2775,23 @@ function bootstrap(meta = {}){
             center: {lng: pos.lng, lat: pos.lat},
             zoom: z,
         })
+        if (svgPerfEnabled && movePerf) {
+            svgPerfLog('map.moveend', {
+                elapsedMs: now() - movePerf.startedAt,
+                moves: movePerf.moves,
+                startCenter: movePerf.startCenter,
+                startZoom: movePerf.startZoom,
+                originalEventType: original ? original.type : null,
+                originalInMap,
+                programmaticSyncReason,
+                shouldSyncCartogram,
+                cartogramEnabled,
+                hasCartogramApi: !!cartogramApi,
+                hex_flying,
+                center: {lng: pos.lng, lat: pos.lat},
+                zoom: z,
+            })
+        }
         if (cartogramEnabled && shouldSyncCartogram) fitCartogramToMapBounds()
     })
 

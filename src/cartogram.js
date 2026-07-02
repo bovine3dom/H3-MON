@@ -14,7 +14,7 @@ export function render_cartogram(container, data, options = {}) {
         square_size = 10,
         coord_step = 2,
         padding = 20,
-        draw_outline = true,
+        draw_outline = false,
         outline_color = "black",
         outline_width = 0.5,
         draw_country_borders = true,
@@ -24,6 +24,8 @@ export function render_cartogram(container, data, options = {}) {
         font_size = 8,
         font_face = "Iosevka, monospace",
         text_color = "black",
+        label_min_screen_px = 8,
+        max_canvas_labels = 5000,
         data_col = 'code',
         perf = false,
         svgPerf = false,
@@ -93,22 +95,14 @@ export function render_cartogram(container, data, options = {}) {
     root.style("position", "relative")
 
     const doneCreate = perfTimer('create')
-    const canvas = root.append("canvas")
+    const canvasSelection = root.append("canvas")
         .style("position", "absolute")
         .style("inset", "0")
         .style("width", "100%")
         .style("height", "100%")
         .style("display", "block")
-        .node()
+    const canvas = canvasSelection.node()
     const ctx = canvas.getContext('2d')
-    const svg = root.append("svg")
-        .attr("width", "100%")
-        .attr("height", "100%")
-        .attr("viewBox", `0 0 ${width} ${height}`)
-        .attr("preserveAspectRatio", "xMidYMid slice")
-        .style("position", "absolute")
-        .style("inset", "0")
-    const labelsG = svg.append("g")
     doneCreate()
 
     const cellKey = (x, y) => `${x},${y}`
@@ -117,8 +111,13 @@ export function render_cartogram(container, data, options = {}) {
     const cellX = new Float32Array(numRows)
     const cellY = new Float32Array(numRows)
     let colors = new Array(numRows)
+    let colorGroups = []
+    let cellRaster = null
+    let cellRasterDirty = true
     let borderLines = []
-    let labelNodeCount = 0
+    let labelCount = 0
+    let labeledIndices = []
+    let labelAngles = []
     let highlightedIndices = []
     let latestTransform = d3.zoomIdentity
     let fitToBoundsActive = false
@@ -132,6 +131,8 @@ export function render_cartogram(container, data, options = {}) {
     let svgPerfGestureId = 0
     let svgPerfGesture = null
     let svgPerfFrameRaf = null
+    let svgPerfDrawFrameId = 0
+    let svgPerfLastDrawFrameLog = 0
 
     const donePrecompute = perfTimer('cells.precompute', {rows: numRows})
     for (let i = 0; i < numRows; i++) {
@@ -148,10 +149,71 @@ export function render_cartogram(container, data, options = {}) {
     function updateColors(col) {
         const doneColors = perfTimer('colors.update', {rows: numRows})
         colors = new Array(numRows)
-        for (let i = 0; i < numRows; i++) colors[i] = get_color(col[i]) ?? TRANSPARENT_COLOUR
-        doneColors()
+        const groups = new Map()
+        for (let i = 0; i < numRows; i++) {
+            const color = get_color(col[i]) ?? TRANSPARENT_COLOUR
+            colors[i] = color
+            if (color === TRANSPARENT_COLOUR) continue
+            let indices = groups.get(color)
+            if (!indices) {
+                indices = []
+                groups.set(color, indices)
+            }
+            indices.push(i)
+        }
+        colorGroups = Array.from(groups, ([color, indices]) => ({color, indices}))
+        cellRasterDirty = true
+        doneColors({colorGroups: colorGroups.length})
     }
     updateColors(currentData[currentDataCol])
+
+    function createCanvas(width, height) {
+        if (typeof OffscreenCanvas !== 'undefined') return new OffscreenCanvas(width, height)
+        const canvas = document.createElement('canvas')
+        canvas.width = width
+        canvas.height = height
+        return canvas
+    }
+
+    function ensureCellRaster() {
+        if (!cellRasterDirty && cellRaster) return {raster: cellRaster, buildMs: 0, rebuilt: false}
+        const buildStart = svgPerf ? perfNow() : 0
+        const footprint = Math.max(1, Math.round(coord_step))
+        const coordinateUnit = square_size / 2
+        const rasterWidth = Math.max(1, Math.ceil(Number(maxX) - Number(minX) + footprint))
+        const rasterHeight = Math.max(1, Math.ceil(Number(maxY) - Number(minY) + footprint))
+        const rasterCanvas = createCanvas(rasterWidth, rasterHeight)
+        const rasterCtx = rasterCanvas.getContext('2d')
+        rasterCtx.imageSmoothingEnabled = false
+        rasterCtx.clearRect(0, 0, rasterWidth, rasterHeight)
+        if (draw_outline) {
+            rasterCtx.strokeStyle = outline_color
+            rasterCtx.lineWidth = Math.max(1, outline_width)
+        }
+        for (const group of colorGroups) {
+            rasterCtx.fillStyle = group.color
+            for (const i of group.indices) {
+                const left = Math.max(0, Math.round(Number(xCol[i]) - Number(minX)))
+                const top = Math.max(0, Math.round(Number(yCol[i]) - Number(minY)))
+                rasterCtx.fillRect(left, top, footprint, footprint)
+                if (draw_outline) rasterCtx.strokeRect(left, top, footprint, footprint)
+            }
+        }
+        const half = square_size / 2
+        cellRaster = {
+            canvas: rasterCanvas,
+            scale: coordinateUnit,
+            width: rasterWidth,
+            height: rasterHeight,
+            modelX: getX(minX) - half,
+            modelY: getY(minY) - half,
+            modelWidth: rasterWidth * coordinateUnit,
+            modelHeight: rasterHeight * coordinateUnit,
+            footprint,
+        }
+        cellRasterDirty = false
+        return {raster: cellRaster, buildMs: svgPerf ? perfNow() - buildStart : 0, rebuilt: true}
+    }
 
     if (draw_country_borders) {
         const doneBorders = perfTimer('borders.precompute', {rows: numRows})
@@ -182,6 +244,20 @@ export function render_cartogram(container, data, options = {}) {
         doneBorders({borders: borderLines.length})
     }
 
+    if (labelCol) {
+        const doneLabels = perfTimer('labels.precompute', {rows: numRows})
+        labeledIndices = []
+        labelAngles = new Float32Array(numRows)
+        for (let i = 0; i < numRows; i++) {
+            const label = labelCol[i]
+            if (label === null || label === undefined || label === "") continue
+            labeledIndices.push(i)
+            labelAngles[i] = ((Math.random() * 90) - 45) * Math.PI / 180
+        }
+        labelCount = labeledIndices.length
+        doneLabels({labels: labelCount, renderer: 'canvas'})
+    }
+
     function transformDetails(transform) {
         return transform ? {x: transform.x, y: transform.y, k: transform.k} : null
     }
@@ -208,6 +284,27 @@ export function render_cartogram(container, data, options = {}) {
             xMax: (vt.cssWidth - vt.offsetX) / vt.scale,
             yMax: (vt.cssHeight - vt.offsetY) / vt.scale,
         }
+    }
+
+    function cssToViewTransform(transform) {
+        const vt = viewTransform()
+        if (!vt.scale) return d3.zoomIdentity
+        return d3.zoomIdentity
+            .translate(
+                (transform.x + vt.offsetX * (transform.k - 1)) / vt.scale,
+                (transform.y + vt.offsetY * (transform.k - 1)) / vt.scale
+            )
+            .scale(transform.k)
+    }
+
+    function viewToCssTransform(transform) {
+        const vt = viewTransform()
+        return d3.zoomIdentity
+            .translate(
+                transform.x * vt.scale - vt.offsetX * (transform.k - 1),
+                transform.y * vt.scale - vt.offsetY * (transform.k - 1)
+            )
+            .scale(transform.k)
     }
 
     function resizeCanvas() {
@@ -298,6 +395,8 @@ export function render_cartogram(container, data, options = {}) {
             drawnCellTotal: 0,
             maxDrawnCells: 0,
             drawnBorderTotal: 0,
+            drawnLabelTotal: 0,
+            maxDrawnLabels: 0,
             frameCount: 0,
             frameTotalMs: 0,
             maxFrameGapMs: 0,
@@ -319,7 +418,7 @@ export function render_cartogram(container, data, options = {}) {
         if (handlerMs > svgPerfGesture.maxHandlerMs) svgPerfGesture.maxHandlerMs = handlerMs
     }
 
-    function recordSvgPerfDraw(drawMs, drawnCells, drawnBorders) {
+    function recordSvgPerfDraw(drawMs, drawnCells, drawnBorders, drawnLabels = 0) {
         if (!svgPerfGesture) return
         svgPerfGesture.transformWrites++
         svgPerfGesture.drawTotalMs += drawMs
@@ -327,10 +426,28 @@ export function render_cartogram(container, data, options = {}) {
         svgPerfGesture.drawnCellTotal += drawnCells
         if (drawnCells > svgPerfGesture.maxDrawnCells) svgPerfGesture.maxDrawnCells = drawnCells
         svgPerfGesture.drawnBorderTotal += drawnBorders
+        svgPerfGesture.drawnLabelTotal += drawnLabels
+        if (drawnLabels > svgPerfGesture.maxDrawnLabels) svgPerfGesture.maxDrawnLabels = drawnLabels
     }
 
     function recordSvgPerfTooltip(kind) {
         if (svgPerfGesture && svgPerfGesture.tooltipEvents[kind] !== undefined) svgPerfGesture.tooltipEvents[kind]++
+    }
+
+    function logSvgPerfDrawFrame(details) {
+        if (!svgPerf) return
+        const now = perfNow()
+        const slow = details.drawMs > 16 || details.cellsMs > 8 || details.bordersMs > 8 || details.labelsMs > 8
+        const labelCapped = details.drawnLabels >= max_canvas_labels
+        if (!slow && !labelCapped && now - svgPerfLastDrawFrameLog < 250) return
+        svgPerfLastDrawFrameLog = now
+        svgPerfLog('draw.frame', {
+            frame: ++svgPerfDrawFrameId,
+            phase: fitToBoundsActive ? 'fit' : (cartogramGestureActive ? 'gesture' : 'idle'),
+            slow,
+            labelCapped,
+            ...details,
+        })
     }
 
     function endSvgPerfGesture(extra = {}) {
@@ -366,6 +483,8 @@ export function render_cartogram(container, data, options = {}) {
             avgDrawnCells: gesture.transformWrites ? gesture.drawnCellTotal / gesture.transformWrites : 0,
             maxDrawnCells: gesture.maxDrawnCells,
             avgDrawnBorders: gesture.transformWrites ? gesture.drawnBorderTotal / gesture.transformWrites : 0,
+            avgDrawnLabels: gesture.transformWrites ? gesture.drawnLabelTotal / gesture.transformWrites : 0,
+            maxDrawnLabels: gesture.maxDrawnLabels,
             frameCount: gesture.frameCount,
             avgFrameGapMs,
             approxFps: avgFrameGapMs ? 1000 / avgFrameGapMs : null,
@@ -382,8 +501,9 @@ export function render_cartogram(container, data, options = {}) {
             nodes: {
                 renderer: 'canvas',
                 canvas: 1,
-                labels: labelNodeCount,
-                total: 1 + 1 + labelNodeCount,
+                labels: 0,
+                canvasLabels: labelCount,
+                total: 1,
                 cellShapes: numRows,
                 borderSegments: borderLines.length,
                 cellEventListeners: 0,
@@ -414,11 +534,38 @@ export function render_cartogram(container, data, options = {}) {
     function drawCanvas(transform = latestTransform) {
         if (!ctx) return
         const drawStart = svgPerf ? perfNow() : 0
-        resizeCanvas()
+        const resizeStart = drawStart
+        const resized = resizeCanvas()
+        const resizeMs = svgPerf ? perfNow() - resizeStart : 0
         const vt = viewTransform()
+        const clearStart = svgPerf ? perfNow() : 0
         ctx.setTransform(1, 0, 0, 1, 0, 0)
         ctx.clearRect(0, 0, canvas.width, canvas.height)
-        if (!canvasCssWidth || !canvasCssHeight) return
+        const clearMs = svgPerf ? perfNow() - clearStart : 0
+        if (!canvasCssWidth || !canvasCssHeight) {
+            if (svgPerf) {
+                logSvgPerfDrawFrame({
+                    skipped: 'no-canvas-size',
+                    drawMs: perfNow() - drawStart,
+                    resizeMs,
+                    clearMs,
+                    cellsMs: 0,
+                    bordersMs: 0,
+                    labelsMs: 0,
+                    highlightMs: 0,
+                    drawnCells: 0,
+                    drawnBorders: 0,
+                    drawnLabels: 0,
+                    screenFontPx: 0,
+                    resized,
+                    cssWidth: canvasCssWidth,
+                    cssHeight: canvasCssHeight,
+                    dpr: canvasDpr,
+                    transform: transformDetails(transform),
+                })
+            }
+            return
+        }
 
         const dpr = canvasDpr
         ctx.setTransform(
@@ -438,26 +585,31 @@ export function render_cartogram(container, data, options = {}) {
         const yMaxVisible = (viewport.yMax - transform.y) / transform.k + half
 
         let drawnCells = 0
-        let lastFill = null
-        for (let i = 0; i < numRows; i++) {
-            const cx = cellX[i]
-            const cy = cellY[i]
-            if (cx < xMinVisible || cx > xMaxVisible || cy < yMinVisible || cy > yMaxVisible) continue
-            const fill = colors[i]
-            if (fill !== lastFill) {
-                ctx.fillStyle = fill
-                lastFill = fill
-            }
-            ctx.fillRect(cx - half, cy - half, square_size, square_size)
-            if (draw_outline) {
-                ctx.strokeStyle = outline_color
-                ctx.lineWidth = outline_width
-                ctx.strokeRect(cx - half, cy - half, square_size, square_size)
-            }
-            drawnCells++
+        const testedCells = 0
+        const visibleColorGroups = 0
+        const fillStyleChanges = 0
+        const cellRenderer = 'raster'
+        let cellRasterBuildMs = 0
+        let cellRasterRebuilt = false
+        let cellRasterScale = null
+        let cellRasterPixels = 0
+        const cellScreenPx = square_size * vt.scale * transform.k
+        const cellsStart = svgPerf ? perfNow() : 0
+        if (colorGroups.length) {
+            const rasterResult = ensureCellRaster()
+            const raster = rasterResult.raster
+            cellRasterBuildMs = rasterResult.buildMs
+            cellRasterRebuilt = rasterResult.rebuilt
+            cellRasterScale = raster.scale
+            cellRasterPixels = raster.width * raster.height
+            ctx.imageSmoothingEnabled = false
+            ctx.drawImage(raster.canvas, raster.modelX, raster.modelY, raster.modelWidth, raster.modelHeight)
+            drawnCells = numRows
         }
+        const cellsMs = svgPerf ? perfNow() - cellsStart : 0
 
         let drawnBorders = 0
+        const bordersStart = svgPerf ? perfNow() : 0
         if (draw_country_borders && borderLines.length) {
             ctx.beginPath()
             for (const line of borderLines) {
@@ -474,7 +626,41 @@ export function render_cartogram(container, data, options = {}) {
             ctx.lineWidth = country_border_width
             ctx.stroke()
         }
+        const bordersMs = svgPerf ? perfNow() - bordersStart : 0
 
+        let drawnLabels = 0
+        const screenFontPx = font_size * vt.scale * transform.k
+        let labelSkipReason = null
+        const labelsStart = svgPerf ? perfNow() : 0
+        if (labelCount && screenFontPx >= label_min_screen_px) {
+            ctx.font = `${font_size}px ${font_face}`
+            ctx.textAlign = 'center'
+            ctx.textBaseline = 'middle'
+            ctx.lineJoin = 'round'
+            ctx.lineWidth = 2
+            ctx.strokeStyle = 'white'
+            ctx.fillStyle = text_color
+            for (const i of labeledIndices) {
+                const cx = cellX[i]
+                const cy = cellY[i]
+                if (cx < xMinVisible || cx > xMaxVisible || cy < yMinVisible || cy > yMaxVisible) continue
+                ctx.save()
+                ctx.translate(cx, cy)
+                ctx.rotate(labelAngles[i])
+                ctx.strokeText(labelCol[i], 0, 0)
+                ctx.fillText(labelCol[i], 0, 0)
+                ctx.restore()
+                drawnLabels++
+                if (drawnLabels >= max_canvas_labels) break
+            }
+        } else if (!labelCount) {
+            labelSkipReason = 'no-labels'
+        } else {
+            labelSkipReason = 'too-small'
+        }
+        const labelsMs = svgPerf ? perfNow() - labelsStart : 0
+
+        const highlightStart = svgPerf ? perfNow() : 0
         if (highlightedIndices.length) {
             ctx.strokeStyle = "orange"
             ctx.lineWidth = 1
@@ -482,13 +668,49 @@ export function render_cartogram(container, data, options = {}) {
                 ctx.strokeRect(cellX[i] - half, cellY[i] - half, square_size, square_size)
             }
         }
+        const highlightMs = svgPerf ? perfNow() - highlightStart : 0
 
-        if (svgPerf) recordSvgPerfDraw(perfNow() - drawStart, drawnCells, drawnBorders)
+        if (svgPerf) {
+            const drawMs = perfNow() - drawStart
+            recordSvgPerfDraw(drawMs, drawnCells, drawnBorders, drawnLabels)
+            logSvgPerfDrawFrame({
+                drawMs,
+                resizeMs,
+                clearMs,
+                cellsMs,
+                bordersMs,
+                labelsMs,
+                highlightMs,
+                cellRenderer,
+                cellScreenPx,
+                cellRasterBuildMs,
+                cellRasterRebuilt,
+                cellRasterScale,
+                cellRasterPixels,
+                cellRasterFootprint: cellRaster ? cellRaster.footprint : null,
+                cellRasterModel: cellRaster ? {x: cellRaster.modelX, y: cellRaster.modelY, width: cellRaster.modelWidth, height: cellRaster.modelHeight} : null,
+                drawnCells,
+                testedCells,
+                colorGroups: colorGroups.length,
+                visibleColorGroups,
+                fillStyleChanges,
+                drawnBorders,
+                drawnLabels,
+                labelCount,
+                labelSkipReason,
+                screenFontPx,
+                visibleBounds: {xMin: xMinVisible, xMax: xMaxVisible, yMin: yMinVisible, yMax: yMaxVisible},
+                resized,
+                cssWidth: canvasCssWidth,
+                cssHeight: canvasCssHeight,
+                dpr: canvasDpr,
+                transform: transformDetails(transform),
+            })
+        }
     }
 
     function writeTransform(transform) {
         latestTransform = transform
-        labelsG.attr("transform", transform)
         drawCanvas(transform)
     }
 
@@ -598,7 +820,7 @@ export function render_cartogram(container, data, options = {}) {
     }
 
     let hoveredCellIndex = null
-    svg.on("click.cell", (event) => {
+    canvasSelection.on("click.cell", (event) => {
         const hit = cellIndexFromEvent(event)
         logClickEvent(event, hit)
         if (event.defaultPrevented) {
@@ -607,7 +829,7 @@ export function render_cartogram(container, data, options = {}) {
         }
         if (hit.i != null) onclick_callback(currentData, event, hit.i)
     })
-    svg.on("mousemove.cell", (event) => {
+    canvasSelection.on("mousemove.cell", (event) => {
         if (cartogramGestureActive || fitToBoundsActive) {
             recordSvgPerfTooltip('suppressed')
             hideTooltip()
@@ -631,54 +853,24 @@ export function render_cartogram(container, data, options = {}) {
         tooltip.style("left", (event.pageX + 12) + "px")
             .style("top", (event.pageY - 12) + "px")
     })
-    svg.on("mouseleave.cell", () => {
+    canvasSelection.on("mouseleave.cell", () => {
         if (hoveredCellIndex != null) recordSvgPerfTooltip('mouseleave')
         hoveredCellIndex = null
         hideTooltip()
     })
 
-    if (labelCol) {
-        const doneLabels = perfTimer('labels.render', {rows: numRows})
-        const rowIndices = d3.range(numRows)
-        const labeledIndices = rowIndices.filter(i => {
-            const label = labelCol[i]
-            return label !== null && label !== undefined && label !== ""
-        })
-        labelsG.selectAll(".label")
-            .data(labeledIndices)
-            .join("text")
-            .attr("class", "label")
-            .attr("x", i => cellX[i])
-            .attr("y", i => cellY[i])
-            .attr("transform", i => `rotate(${(Math.random() * 90) - 45}, ${cellX[i]}, ${cellY[i]})`)
-            .attr("text-anchor", "middle")
-            .attr("dominant-baseline", "central")
-            .attr("font-size", `${font_size}px`)
-            .attr("font-family", font_face)
-            .attr("fill", text_color)
-            .attr("stroke", "white")
-            .attr("stroke-width", "2")
-            .attr("stroke-linejoin", "round")
-            .attr("paint-order", "stroke fill")
-            .text(i => labelCol[i])
-            .style("pointer-events", "none")
-        labelNodeCount = labeledIndices.length
-        doneLabels({labels: labelNodeCount})
-    }
-
     const zoom = d3.zoom().scaleExtent([0.5, 100])
         .on("start", (e) => {
             const source = e.sourceEvent
-            const svgNode = svg.node()
-            cartogramGestureActive = !!source && !!svgNode && svgNode.contains(source.target)
+            cartogramGestureActive = !!source && canvas.contains(source.target)
             cartogramGestureMoved = false
             hoveredCellIndex = null
             hideTooltip()
-            startSvgPerfGesture(e, e.transform)
+            startSvgPerfGesture(e, cssToViewTransform(e.transform))
         })
         .on("zoom", (e) => {
             const handlerStart = svgPerf ? perfNow() : 0
-            scheduleTransform(e.transform)
+            scheduleTransform(cssToViewTransform(e.transform))
             if (svgPerf) recordSvgPerfZoom(perfNow() - handlerStart)
             if (fitToBoundsActive) return
             if (cartogramGestureActive && e.sourceEvent) cartogramGestureMoved = true
@@ -702,7 +894,7 @@ export function render_cartogram(container, data, options = {}) {
             cartogramGestureActive = false
             cartogramGestureMoved = false
         })
-    svg.call(zoom)
+    canvasSelection.call(zoom)
 
     if (typeof ResizeObserver !== 'undefined') {
         const resizeObserver = new ResizeObserver(() => scheduleTransform(latestTransform))
@@ -716,8 +908,9 @@ export function render_cartogram(container, data, options = {}) {
     svgPerfLog('nodes', {
         renderer: 'canvas',
         canvas: 1,
-        labels: labelNodeCount,
-        total: 1 + 1 + labelNodeCount,
+        labels: 0,
+        canvasLabels: labelCount,
+        total: 1,
         cellShapes: numRows,
         borderSegments: borderLines.length,
         cellEventListeners: 0,
@@ -768,6 +961,7 @@ export function render_cartogram(container, data, options = {}) {
             const viewportCy = (viewport.yMin + viewport.yMax) / 2
             fitToBoundsActive = true
             const transform = d3.zoomIdentity.translate(viewportCx - cx * k, viewportCy - cy * k).scale(k)
+            const cssTransform = viewToCssTransform(transform)
             debugLog('fit_to_bounds', {
                 inputBounds: [[x1, y1, x2, y2]],
                 viewport,
@@ -775,11 +969,29 @@ export function render_cartogram(container, data, options = {}) {
                 transform: transformDetails(transform),
                 duration,
             })
+            svgPerfLog('fit_to_bounds.request', {
+                inputBounds: [[x1, y1, x2, y2]],
+                viewport,
+                box: {left, right, top, bottom, boxW, boxH},
+                viewTransform: transformDetails(transform),
+                cssTransform: transformDetails(cssTransform),
+                latestTransform: transformDetails(latestTransform),
+                duration,
+                cssWidth: canvasCssWidth,
+                cssHeight: canvasCssHeight,
+                dpr: canvasDpr,
+            })
             doneFit({duration})
-            svg.transition().duration(duration)
-                .call(zoom.transform, transform)
-                .on("end", () => { fitToBoundsActive = false })
-                .on("interrupt", () => { fitToBoundsActive = false })
+            canvasSelection.transition().duration(duration)
+                .call(zoom.transform, cssTransform)
+                .on("end", () => {
+                    fitToBoundsActive = false
+                    svgPerfLog('fit_to_bounds.end', {latestTransform: transformDetails(latestTransform)})
+                })
+                .on("interrupt", () => {
+                    fitToBoundsActive = false
+                    svgPerfLog('fit_to_bounds.interrupt', {latestTransform: transformDetails(latestTransform)})
+                })
         }
     }
 }
