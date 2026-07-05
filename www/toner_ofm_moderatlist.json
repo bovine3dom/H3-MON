@@ -183,6 +183,13 @@
       }
     },
     {
+      "id": "contours",
+      "type": "line",
+      "source": "seascape",
+      "source-layer": "contours",
+      "paint": { "line-color": "#000000", "line-width": 0.5, "line-opacity": 0.5 }
+    },
+    {
       "id": "waterway",
       "type": "line",
       "source": "openmaptiles",
