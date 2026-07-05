@@ -17,6 +17,16 @@
       "minzoom": 0,
       "maxzoom": 10
     },
+    "seascape-dem": {
+      "type": "raster-dem",
+      "url": "https://tiles.openwaters.io/seascape/raster.json",
+      "encoding": "terrarium",
+      "tileSize": 512
+    },
+    "seascape": {
+      "type": "vector",
+      "url": "https://tiles.openwaters.io/seascape/vector.json"
+    },
     "mapterhorn": {
       "type": "raster-dem",
       "url": "https://tiles.mapterhorn.com/tilejson.json",
@@ -43,39 +53,6 @@
       }
     },
     {
-      "id": "landcover_grass",
-      "type": "fill",
-      "source": "openmaptiles",
-      "source-layer": "landcover",
-      "filter": ["==", "class", "grass"],
-      "paint": {
-        "fill-color": "#000000",
-        "fill-opacity": 0.08
-      }
-    },
-    {
-      "id": "landcover_wood",
-      "type": "fill",
-      "source": "openmaptiles",
-      "source-layer": "landcover",
-      "filter": ["==", "class", "wood"],
-      "paint": {
-        "fill-color": "#000000",
-        "fill-opacity": 0.15
-      }
-    },
-    {
-      "id": "hillshading",
-      "type": "hillshade",
-      "source": "mapterhorn",
-      "paint": {
-        "hillshade-exaggeration": 0.4,
-        "hillshade-shadow-color": "#473b24",
-        "hillshade-highlight-color": "#ffffff",
-        "hillshade-accent-color": "#000000"
-      }
-    },
-    {
       "id": "water",
       "type": "fill",
       "source": "openmaptiles",
@@ -90,17 +67,15 @@
       }
     },
     {
-      "id": "water-bathymetry",
-      "type": "fill",
-      "source": "gebco",
-      "source-layer": "bathymetry",
+      "id": "water_bathymetry",
+      "type": "color-relief",
+      "source": "seascape-dem",
       "paint": {
-        "fill-color": [
-          "step",
-          [
-            "get",
-            "mindepth"
-          ],
+        "color-relief-color": [
+          "interpolate",
+          ["linear"],
+          ["elevation"],
+          -10000,
           "#ffffff",
           -9500,
           "#f2f2f2",
@@ -156,10 +131,55 @@
           "#121212",
           -25,
           "#090909",
+          -1,
+          "rgba(0,0,0,0)",
           0,
-          "#000000"
-        ],
-        "fill-opacity": 1
+          "rgba(0,0,0,0)"
+        ]
+      }
+    },
+    {
+      "id": "landcover_grass",
+      "type": "fill",
+      "source": "openmaptiles",
+      "source-layer": "landcover",
+      "filter": ["==", "class", "grass"],
+      "paint": {
+        "fill-color": "#000000",
+        "fill-opacity": 0.08
+      }
+    },
+    {
+      "id": "landcover_wood",
+      "type": "fill",
+      "source": "openmaptiles",
+      "source-layer": "landcover",
+      "filter": ["==", "class", "wood"],
+      "paint": {
+        "fill-color": "#000000",
+        "fill-opacity": 0.15
+      }
+    },
+    {
+      "id": "hillshading",
+      "type": "hillshade",
+      "source": "mapterhorn",
+      "paint": {
+        "hillshade-exaggeration": 0.4,
+        "hillshade-shadow-color": "#473b24",
+        "hillshade-highlight-color": "#ffffff",
+        "hillshade-accent-color": "#000000"
+      }
+    },
+    {
+      "id": "hillshading_water",
+      "type": "hillshade",
+      "source": "seascape-dem",
+      "paint": {
+        "hillshade-exaggeration": 0.2,
+        "hillshade-shadow-color": "#473b24",
+        "hillshade-highlight-color": "#ffffff",
+        "hillshade-accent-color": "#000000"
       }
     },
     {

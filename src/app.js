@@ -2640,7 +2640,7 @@ function bootstrap(meta = {}){
     const l = document.getElementById("attribution")
     const extra_c = settings.c ? settings.c.split(",") : []
     if (showTrains) extra_c.push("OpenRailwayMap")
-    l.innerText = "©\u00a0" + [...extra_c, "OpenFreeMap", "Natural Earth", "GEBCO", "Mapterhorn", "OpenStreetMap contributors", "Our World in Data", "GeoNames"].filter(x=>x !== null).join(" ©\u00a0")
+    l.innerText = "©\u00a0" + [...extra_c, "OpenFreeMap", "Natural Earth", "Seascape LLC et al.", "Mapterhorn", "OpenStreetMap contributors", "Our World in Data", "GeoNames"].filter(x=>x !== null).join(" ©\u00a0")
     const legendDiv = document.createElement('div')
     legendDiv.id = "observable_legend"
     l.insertBefore(legendDiv, l.firstChild)
