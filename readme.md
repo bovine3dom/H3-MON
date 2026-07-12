@@ -89,3 +89,9 @@ select * except (index, h3) from (
 )
 into outfile 'cartogram_weights_hilo.arrow' settings output_format_arrow_compression_method = 'none'
 ```
+
+```julia
+#/bin/julia
+loweruint64(x) = x % UInt32
+upperuint64(x) = (x >> 32) % UInt32
+```
