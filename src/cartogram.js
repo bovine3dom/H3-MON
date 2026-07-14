@@ -31,6 +31,7 @@ export function render_cartogram(container, data, options = {}) {
         svgPerf = false,
         debug = false,
         get_color = defaultGetColour,
+        color_transition_duration = 500,
         onclick_callback = console.log,
         onmove_callback = () => {},
         onviewchange_callback = () => {},
@@ -115,6 +116,8 @@ export function render_cartogram(container, data, options = {}) {
     let colorGroups = []
     let cellRaster = null
     let cellRasterDirty = true
+    let colorTransition = null
+    let colorTransitionRaf = null
     let borderLines = []
     let labelCount = 0
     let labeledIndices = []
@@ -215,6 +218,59 @@ export function render_cartogram(container, data, options = {}) {
         }
         cellRasterDirty = false
         return {raster: cellRaster, buildMs: svgPerf ? perfNow() - buildStart : 0, rebuilt: true}
+    }
+
+    const colorTransitionDuration = Math.max(0, Number(color_transition_duration) || 0)
+
+    function colorTransitionProgress(transition) {
+        return Math.min(1, Math.max(0, (perfNow() - transition.startedAt) / transition.duration))
+    }
+
+    function currentCellRaster() {
+        const target = ensureCellRaster().raster
+        if (!colorTransition) return target
+
+        const progress = d3.easeCubicInOut(colorTransitionProgress(colorTransition))
+        if (progress >= 1) {
+            colorTransition = null
+            return target
+        }
+
+        const canvas = createCanvas(target.width, target.height)
+        const blendCtx = canvas.getContext('2d')
+        blendCtx.imageSmoothingEnabled = false
+        blendCtx.globalCompositeOperation = 'lighter'
+        blendCtx.globalAlpha = 1 - progress
+        blendCtx.drawImage(colorTransition.from.canvas, 0, 0, target.width, target.height)
+        blendCtx.globalAlpha = progress
+        blendCtx.drawImage(target.canvas, 0, 0, target.width, target.height)
+        return {...target, canvas}
+    }
+
+    function scheduleColorTransitionFrame() {
+        if (!colorTransition || colorTransitionRaf !== null || typeof requestAnimationFrame !== 'function') return
+        colorTransitionRaf = requestAnimationFrame(drawColorTransitionFrame)
+    }
+
+    function drawColorTransitionFrame() {
+        colorTransitionRaf = null
+        if (!colorTransition) return
+        if (colorTransitionProgress(colorTransition) >= 1) colorTransition = null
+        scheduleTransform(latestTransform)
+        scheduleColorTransitionFrame()
+    }
+
+    function updateColorsWithTransition(col) {
+        const animate = colorTransitionDuration > 0 && typeof requestAnimationFrame === 'function'
+        const from = animate ? currentCellRaster() : null
+        updateColors(col)
+        colorTransition = from ? {from, duration: colorTransitionDuration, startedAt: perfNow()} : null
+        if (!colorTransition && colorTransitionRaf !== null) {
+            cancelAnimationFrame(colorTransitionRaf)
+            colorTransitionRaf = null
+        }
+        drawCanvas(latestTransform)
+        scheduleColorTransitionFrame()
     }
 
     if (draw_country_borders) {
@@ -597,7 +653,7 @@ export function render_cartogram(container, data, options = {}) {
         let cellRasterPixels = 0
         const cellScreenPx = square_size * vt.scale * transform.k
         const cellsStart = svgPerf ? perfNow() : 0
-        if (colorGroups.length) {
+        if (colorGroups.length || colorTransition) {
             const rasterResult = ensureCellRaster()
             const raster = rasterResult.raster
             cellRasterBuildMs = rasterResult.buildMs
@@ -605,7 +661,25 @@ export function render_cartogram(container, data, options = {}) {
             cellRasterScale = raster.scale
             cellRasterPixels = raster.width * raster.height
             ctx.imageSmoothingEnabled = false
-            ctx.drawImage(raster.canvas, raster.modelX, raster.modelY, raster.modelWidth, raster.modelHeight)
+            if (colorTransition) {
+                const progress = colorTransitionProgress(colorTransition)
+                if (progress >= 1) {
+                    colorTransition = null
+                    ctx.drawImage(raster.canvas, raster.modelX, raster.modelY, raster.modelWidth, raster.modelHeight)
+                } else {
+                    const eased = d3.easeCubicInOut(progress)
+                    const from = colorTransition.from
+                    ctx.globalCompositeOperation = 'lighter'
+                    ctx.globalAlpha = 1 - eased
+                    ctx.drawImage(from.canvas, from.modelX, from.modelY, from.modelWidth, from.modelHeight)
+                    ctx.globalAlpha = eased
+                    ctx.drawImage(raster.canvas, raster.modelX, raster.modelY, raster.modelWidth, raster.modelHeight)
+                    ctx.globalAlpha = 1
+                    ctx.globalCompositeOperation = 'source-over'
+                }
+            } else {
+                ctx.drawImage(raster.canvas, raster.modelX, raster.modelY, raster.modelWidth, raster.modelHeight)
+            }
             drawnCells = numRows
         }
         const cellsMs = svgPerf ? perfNow() - cellsStart : 0
@@ -932,8 +1006,7 @@ export function render_cartogram(container, data, options = {}) {
                 doneUpdate({missingColumn: currentDataCol})
                 return
             }
-            updateColors(col)
-            drawCanvas(latestTransform)
+            updateColorsWithTransition(col)
             doneUpdate()
         },
         highlightCells: (indices) => {

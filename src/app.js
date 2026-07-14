@@ -618,6 +618,7 @@ const H3_INDEX_LOWER = 'index_lower'
 const H3_INDEX_UPPER = 'index_upper'
 const COLOUR_PALETTE_SIZE = 1024
 const QUANTILE_SAMPLE_SIZE = 8192
+const COLOUR_TRANSITION_DURATION = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 1000
 
 function hasSplitH3Index(cols) {
     return Boolean(cols && cols[H3_INDEX_LOWER] && cols[H3_INDEX_UPPER])
@@ -1306,6 +1307,7 @@ function bootstrap(meta = {}){
     }
     const colourPaletteCss = new Array(COLOUR_PALETTE_SIZE)
     const colourPaletteRgba = new Uint8Array(COLOUR_PALETTE_SIZE * 4)
+    const colourTransition = {duration: COLOUR_TRANSITION_DURATION, easing: d3.easeCubicInOut}
     let colourVersion = 0
     let activeH3Layer = null
     let viewportQuantileState = null
@@ -1402,6 +1404,9 @@ function bootstrap(meta = {}){
             data: h3DeckSource(kind, data),
             ...accessors,
             updateTriggers: {getFillColor: [colourVersion]},
+            _subLayerProps: {
+                'hexagon-cell-packed': {transitions: {getFillColor: colourTransition}}
+            },
             pickable: false,
         })
         activeH3Layer = {layer}
@@ -2087,6 +2092,7 @@ function bootstrap(meta = {}){
                             debug: syncDebugEnabled,
                             draw_outline: false,
                             get_color: getCssColour,
+                            color_transition_duration: COLOUR_TRANSITION_DURATION,
                             include_outer_borders: true,
                             data_col: cartoDataCol,
                             onviewchange_callback: (data, visibleIndices) => updateViewportQuantiles('cartogram', visibleIndices),
@@ -2321,6 +2327,7 @@ function bootstrap(meta = {}){
                 lineWidthMaxPixels: 4,
                 lineWidthUnits: 'meters',
                 lineBillboard: true,
+                transitions: {getFillColor: colourTransition, getLineColor: colourTransition},
                 pickable: false
             })
             doneGeoJsonLayer()
@@ -2731,13 +2738,32 @@ function bootstrap(meta = {}){
     const legendDiv = document.createElement('div')
     legendDiv.id = "observable_legend"
     l.insertBefore(legendDiv, l.firstChild)
+    let legendVersion = 0
     // todo: read impressum from metadata too
+    function replaceLegend(legend) {
+        const previous = legendDiv.lastElementChild
+        const version = ++legendVersion
+        if (!previous || !COLOUR_TRANSITION_DURATION) {
+            legendDiv.replaceChildren(legend)
+            return
+        }
+
+        legend.style.opacity = 0
+        legendDiv.append(legend)
+        d3.select(legend).transition()
+            .duration(COLOUR_TRANSITION_DURATION)
+            .ease(d3.easeCubicInOut)
+            .style('opacity', 1)
+            .on('end', () => {
+                if (version === legendVersion) legendDiv.replaceChildren(legend)
+            })
+    }
+
     async function makeLegend(fmt) {
         try {
             if (fmt !== undefined) {
                 const legend = observablehq.legend({color: colourRamp, title: settings.t, tickFormat: v => parseFloat(fmt(v).toPrecision(2)).toLocaleString()})
-                legendDiv.innerHTML = ""
-                legendDiv.insertBefore(legend, legendDiv.firstChild)
+                replaceLegend(legend)
             } else {
                 const legend_options = {color: colourRamp, title: settings.t}
                 if (settings.scale) {
@@ -2746,14 +2772,12 @@ function bootstrap(meta = {}){
                     legend_options.tickFormat = fmt
                 }
                 const legend = observablehq.legend(legend_options)
-                legendDiv.innerHTML = ""
-                legendDiv.insertBefore(legend, legendDiv.firstChild)
+                replaceLegend(legend)
             }
         } catch(e) {
             console.warn(e)
             const legend = observablehq.legend({color: colourRamp, title: settings.t})
-            legendDiv.innerHTML = ""
-            legendDiv.insertBefore(legend, legendDiv.firstChild)
+            replaceLegend(legend)
         }
     }
 
