@@ -23,7 +23,7 @@
         "esbuild": "^0.21.3",
         "faster-h3-for-deckgl": "https://github.com/bovine3dom/faster-h3-for-deckgl",
         "h3-js": "^4.4.0",
-        "maplibre-gl": "^3.0.0",
+        "maplibre-gl": "^5.24.0",
         "tiny-geocoder": "^0.0.1"
     },
     "devDependencies": {
