@@ -618,6 +618,7 @@ function toStringValue(value) {
 const H3_INDEX_LOWER = 'index_lower'
 const H3_INDEX_UPPER = 'index_upper'
 const COLOUR_PALETTE_SIZE = 1024
+const QUANTILE_SAMPLE_SIZE = 8192
 
 function hasSplitH3Index(cols) {
     return Boolean(cols && cols[H3_INDEX_LOWER] && cols[H3_INDEX_UPPER])
@@ -1306,6 +1307,10 @@ function bootstrap(meta = {}){
     }
     const colourPaletteCss = new Array(COLOUR_PALETTE_SIZE)
     const colourPaletteRgba = new Uint8Array(COLOUR_PALETTE_SIZE * 4)
+    let colourVersion = 0
+    let activeH3Layer = null
+    let viewportQuantileState = null
+    const h3DeckDataCache = new WeakMap()
     for (let i = 0; i < COLOUR_PALETTE_SIZE; i++) {
         const css = colourRamp(i / (COLOUR_PALETTE_SIZE - 1)) ?? transparentCss
         const rgba = parseColour(css)
@@ -1405,9 +1410,13 @@ function bootstrap(meta = {}){
 
     function h3DeckData(kind, data, indexkey, valuekey, writeColourValue) {
         const rows = kind === 'column' ? h3RowCount(data) : data.length
-        const dataWrap = kind === 'column' ? {src: data, length: rows} : data
-        const attributes = {}
-        if (h3BinaryPositions) attributes.getPosition = {value: buildH3PositionAttribute(data, kind, indexkey, rows), size: 3}
+        let dataWrap = kind === 'column' ? h3DeckDataCache.get(data) : data
+        if (!dataWrap || dataWrap.length !== rows) {
+            dataWrap = kind === 'column' ? {src: data, length: rows} : data
+            if (kind === 'column') h3DeckDataCache.set(data, dataWrap)
+        }
+        const attributes = {...dataWrap.attributes}
+        if (h3BinaryPositions && !attributes.getPosition) attributes.getPosition = {value: buildH3PositionAttribute(data, kind, indexkey, rows), size: 3}
         if (h3BinaryColors) attributes.getFillColor = {value: buildH3FillColorAttribute(data, kind, valuekey, writeColourValue, rows), size: 4, type: 'unorm8'}
         dataWrap.attributes = attributes
         dataWrap.startIndices = null
@@ -1431,6 +1440,126 @@ function bootstrap(meta = {}){
         }
     }
 
+    function createH3Layer(data, kind, valuekey) {
+        const accessors = hexAccessors(kind, 'index', valuekey, getColour)
+        const dataWrap = h3DeckData(kind, data, 'index', valuekey, writeColourForValue)
+        const layer = new H3HexagonLayer({
+            id: 'H3HexagonLayer',
+            data: dataWrap,
+            ...h3LayerProps(),
+            extruded: false,
+            stroked: false,
+            ...accessors,
+            updateTriggers: {getFillColor: [colourVersion, dataWrap.attributes?.getFillColor?.value]},
+            elevationScale: 20,
+            pickable: false,
+        })
+        activeH3Layer = {data, kind, valuekey, layer}
+        return layer
+    }
+
+    function refreshH3LayerColours() {
+        const active = activeH3Layer
+        const layerIndex = active ? mainLayers.indexOf(active.layer) : -1
+        if (layerIndex < 0) return
+
+        colourVersion++
+        const data = h3DeckData(active.kind, active.data, 'index', active.valuekey, writeColourForValue)
+        const layer = active.layer.clone({
+            data,
+            updateTriggers: {getFillColor: [colourVersion, data.attributes?.getFillColor?.value]},
+        })
+        active.layer = layer
+        mainLayers = mainLayers.slice()
+        mainLayers[layerIndex] = layer
+        renderLayers()
+    }
+
+    function buildH3Centers(data, kind) {
+        if (data._h3Centers) return data._h3Centers
+        const rows = kind === 'column' ? h3RowCount(data) : data.length
+        const doneCenters = detailPerfTimer('data.quantile.h3_centers', {rows})
+        const centers = new Float32Array(rows * 2)
+        const h3Target = [0, 0]
+        for (let i = 0; i < rows; i++) {
+            const [lat, lng] = cellToLatLng(h3IndexAt(data, kind, 'index', i, h3Target))
+            const offset = i * 2
+            centers[offset] = lng
+            centers[offset + 1] = lat
+        }
+        data._h3Centers = centers
+        doneCenters()
+        return centers
+    }
+
+    function longitudeInBounds(lng, west, east) {
+        let span = east - west
+        while (span < 0) span += 360
+        if (span >= 360) return true
+        return ((lng - west) % 360 + 360) % 360 <= span
+    }
+
+    function visibleMapQuantileSample(state) {
+        const bounds = map.getBounds()
+        if (!bounds) return null
+        const west = bounds.getWest()
+        const east = bounds.getEast()
+        const south = bounds.getSouth()
+        const north = bounds.getNorth()
+        const centers = buildH3Centers(state.data, state.kind)
+        const values = []
+        const weights = state.weights ? [] : null
+        let visible = 0
+
+        for (let i = 0; i < centers.length / 2; i++) {
+            const offset = i * 2
+            if (centers[offset + 1] < south || centers[offset + 1] > north || !longitudeInBounds(centers[offset], west, east)) continue
+            const value = columnValue(state.values, i)
+            if (value == null) continue
+            const sampleIndex = visible < QUANTILE_SAMPLE_SIZE ? visible : Math.floor(Math.random() * (visible + 1))
+            visible++
+            if (sampleIndex >= QUANTILE_SAMPLE_SIZE) continue
+            values[sampleIndex] = value
+            if (weights) weights[sampleIndex] = columnValue(state.weights, i)
+        }
+        return {values, weights, visible}
+    }
+
+    function assignMapQuantiles(state, getquantile) {
+        if (state.kind === 'column') {
+            state.data.quantile = assignQuantiles(state.values, getquantile, state.data.quantile)
+            return
+        }
+        for (const row of state.data) row.quantile = getquantile(row.value)
+    }
+
+    function updateViewportQuantiles(source, visibleIndices = null) {
+        const state = viewportQuantileState
+        if (!state || state.source !== source || !activeH3Layer || !mainLayers.includes(activeH3Layer.layer)) return
+
+        let sample
+        if (source === 'cartogram') {
+            const values = visibleIndices.map(i => state.cartogramValues[i])
+            sample = {values, weights: null, visible: visibleIndices.length}
+        } else {
+            sample = visibleMapQuantileSample(state)
+        }
+        if (!sample || !sample.values.some(value => value != null)) return
+
+        const doneEcdf = detailPerfTimer('viewport.quantile.ecdf', {source, visible: sample.visible})
+        const [getquantile, getvalue] = ecdf(sample.values, state.trimFactor, sample.weights)
+        doneEcdf()
+        const doneAssign = detailPerfTimer('viewport.quantile.assign', {source, rows: state.values.length})
+        assignMapQuantiles(state, getquantile)
+        if (state.cartogramValues) {
+            cartoAggCols.carto_quantile = assignQuantiles(state.cartogramValues, getquantile, cartoAggCols.carto_quantile)
+            cartogramApi?.updateData(cartoAggCols, 'carto_quantile')
+        }
+        doneAssign()
+        makeLegend(getvalue)
+        refreshH3LayerColours()
+    }
+
     function extractValues(raw, kind) {
         if (kind === 'column') return Array.from(raw.value)
         return raw.map(r => r.value)
@@ -1449,8 +1578,7 @@ function bootstrap(meta = {}){
         return raw.map(o => ({...o, quantile: getquantile(o.value)}))
     }
 
-    function assignQuantiles(values, getquantile) {
-        const quantiles = new Array(values.length)
+    function assignQuantiles(values, getquantile, quantiles = new Array(values.length)) {
         for (let i = 0; i < values.length; i++) quantiles[i] = getquantile(values[i])
         return quantiles
     }
@@ -1868,6 +1996,8 @@ function bootstrap(meta = {}){
     let reloadNum = 0
     const getHexData = async () => {
         const doneGetHexData = perfTimer('data.reload.total', {file: file_name, ext, layer: format.layer})
+        activeH3Layer = null
+        viewportQuantileState = null
         h3DataRowLookup = null
         if (clickPopup) {
             clickPopup.remove()
@@ -1923,13 +2053,16 @@ function bootstrap(meta = {}){
             const h3res = schemaHasH3Index && h3RowCount(dataCols) ? getResolution(h3IndexInputAt(dataCols, 0)) : null
             dataH3Res = h3res
             let valuekey = 'value'
+            let getquantileFn
             let getvalueFn
+            let cartoValueCol = null
 
             if (doQuantiles && !useCartogramQuantiles) {
                 setLoadStage('Calculating quantiles')
                 const doneEcdf = perfTimer('data.quantile.ecdf', {rows: values.length, weighted: !!weights})
                 const [getquantile, getvalue] = ecdf(values, trimFactor, weights)
                 doneEcdf()
+                getquantileFn = getquantile
                 getvalueFn = getvalue
                 const doneQuantileAssign = perfTimer('data.quantile.assign', {rows: values.length})
                 dataCols.quantile = assignQuantiles(values, getquantile)
@@ -1947,13 +2080,7 @@ function bootstrap(meta = {}){
 
             if (!useCartogramQuantiles || !doQuantiles) {
                 const doneDeckLayer = perfTimer('deck.hex_layer.create', {rows: dataCols.value.length, h3Precision, h3BinaryPositions, h3BinaryColors, pickable: false, h3Index: hasSplitH3Index(dataCols) ? 'split' : 'string'})
-                const accessors = hexAccessors('column', 'index', valuekey, getColour)
-                const dataWrap = h3DeckData('column', dataCols, 'index', valuekey, writeColourForValue)
-                deckLayer = new H3HexagonLayer({
-                    id: 'H3HexagonLayer', data: dataWrap,
-                    ...h3LayerProps(),
-                    extruded: false, stroked: false, ...accessors, elevationScale: 20, pickable: false
-                })
+                deckLayer = createH3Layer(dataCols, 'column', valuekey)
                 doneDeckLayer()
             }
 
@@ -1965,12 +2092,12 @@ function bootstrap(meta = {}){
                 let cartoDataCol = null
 
                 if (h3res === cartoRes) {
-                    const result = groupCartogramWithMap(dataCols, valuekey, {source: 'same-resolution', rows: h3RowCount(dataCols), h3Index: hasSplitH3Index(dataCols) ? 'split' : 'string'})
+                    const result = groupCartogramWithMap(dataCols, 'value', {source: 'same-resolution', rows: h3RowCount(dataCols), h3Index: hasSplitH3Index(dataCols) ? 'split' : 'string'})
                     cartoAggCols = result.aggCols
                     cartoDataCol = result.meanCol
                 } else {
-                    const {grouped, source} = await projectH3ToCartoResolution(dataCols, valuekey, h3res)
-                    const result = groupCartogramWithMap(grouped, valuekey, {source, rows: h3RowCount(grouped), h3Index: hasSplitH3Index(grouped) ? 'split' : 'string'})
+                    const {grouped, source} = await projectH3ToCartoResolution(dataCols, 'value', h3res)
+                    const result = groupCartogramWithMap(grouped, 'value', {source, rows: h3RowCount(grouped), h3Index: hasSplitH3Index(grouped) ? 'split' : 'string'})
                     cartoAggCols = result.aggCols
                     cartoDataCol = result.meanCol
                 }
@@ -1979,21 +2106,26 @@ function bootstrap(meta = {}){
                     await yieldToPaint('Preparing map/cartogram links')
                     const h3map = await measurePerf('cartogram.h3_to_xy.await_render', () => ensureH3ToXY())
                     setLoadStage('Preparing cartogram colours')
+                    cartoValueCol = cartoDataCol
 
                     if (useCartogramQuantiles && doQuantiles) {
                         const cartoValues = cartoAggCols[cartoDataCol]
                         const doneCartoEcdf = perfTimer('cartogram.quantile.ecdf', {rows: cartoValues.length})
                         const [getquantile, getvalue] = ecdf(cartoValues, trimFactor)
                         doneCartoEcdf()
+                        getquantileFn = getquantile
                         getvalueFn = getvalue
                         const doneDataQuantiles = perfTimer('cartogram.quantile.assign_data', {rows: values.length})
                         dataCols.quantile = assignQuantiles(values, getquantile)
                         doneDataQuantiles()
+                        valuekey = 'quantile'
+                    }
+                    if (doQuantiles && getquantileFn) {
+                        const cartoValues = cartoAggCols[cartoValueCol]
                         const doneCartoQuantiles = perfTimer('cartogram.quantile.assign_cartogram', {rows: cartoValues.length})
-                        cartoAggCols['carto_quantile'] = assignQuantiles(cartoValues, getquantile)
+                        cartoAggCols.carto_quantile = assignQuantiles(cartoValues, getquantileFn)
                         doneCartoQuantiles()
                         cartoDataCol = 'carto_quantile'
-                        valuekey = 'quantile'
                         makeLegend(getvalueFn)
                     }
 
@@ -2010,6 +2142,7 @@ function bootstrap(meta = {}){
                             get_color: getCssColour,
                             include_outer_borders: true,
                             data_col: cartoDataCol,
+                            onviewchange_callback: (data, visibleIndices) => updateViewportQuantiles('cartogram', visibleIndices),
                             onclick_callback: (data, event, i) => {
                                 try {
                                     syncLog('cartogram.click.callback', {
@@ -2082,6 +2215,7 @@ function bootstrap(meta = {}){
                 const doneEcdf = perfTimer('data.quantile.ecdf', {rows: values.length, weighted: !!weights, fallback: 'no-cartogram'})
                 const [getquantile, getvalue] = ecdf(values, trimFactor, weights)
                 doneEcdf()
+                getquantileFn = getquantile
                 getvalueFn = getvalue
                 const doneQuantileAssign = perfTimer('data.quantile.assign', {rows: values.length, fallback: 'no-cartogram'})
                 dataCols.quantile = assignQuantiles(values, getquantile)
@@ -2090,16 +2224,22 @@ function bootstrap(meta = {}){
                 makeLegend(getvalueFn)
             }
 
+            if (doQuantiles && getquantileFn) {
+                viewportQuantileState = {
+                    source: useCartogramQuantiles && cartoValueCol ? 'cartogram' : 'map',
+                    trimFactor,
+                    data: dataCols,
+                    kind: 'column',
+                    values,
+                    weights,
+                    cartogramValues: cartoValueCol ? cartoAggCols[cartoValueCol] : null,
+                }
+            }
+
             if (!deckLayer) {
                 setLoadStage('Preparing map layer')
                 const doneDeckLayer = perfTimer('deck.hex_layer.create', {rows: dataCols.value.length, h3Precision, h3BinaryPositions, h3BinaryColors, pickable: false, h3Index: hasSplitH3Index(dataCols) ? 'split' : 'string'})
-                const accessors = hexAccessors('column', 'index', valuekey, getColour)
-                const dataWrap = h3DeckData('column', dataCols, 'index', valuekey, writeColourForValue)
-                deckLayer = new H3HexagonLayer({
-                    id: 'H3HexagonLayer', data: dataWrap,
-                    ...h3LayerProps(),
-                    extruded: false, stroked: false, ...accessors, elevationScale: 20, pickable: false
-                })
+                deckLayer = createH3Layer(dataCols, 'column', valuekey)
                 doneDeckLayer()
             }
 
@@ -2185,6 +2325,17 @@ function bootstrap(meta = {}){
             }
             valuekey = 'quantile'
             makeLegend(getvalue)
+            if (format.layer === 'hex') {
+                viewportQuantileState = {
+                    source: 'map',
+                    trimFactor,
+                    data,
+                    kind: format.kind,
+                    values,
+                    weights,
+                    cartogramValues: null,
+                }
+            }
             setLoadStage('Quantiles ready')
         } else {
             data = raw
@@ -2193,21 +2344,10 @@ function bootstrap(meta = {}){
 
         if (format.layer === 'hex') {
             setLoadStage('Preparing map layer')
-            const accessors = hexAccessors(format.kind, 'index', valuekey, getColour)
             if (format.kind === 'column') window._columnData = data
             const rows = format.kind === 'column' ? data.value.length : data.length
             const doneDeckLayer = perfTimer('deck.hex_layer.create', {rows, h3Precision, h3BinaryPositions, h3BinaryColors, pickable: false, h3Index: format.kind === 'column' && hasSplitH3Index(data) ? 'split' : 'string'})
-            const dataWrap = h3DeckData(format.kind, data, 'index', valuekey, writeColourForValue)
-            const layer = new H3HexagonLayer({
-                id: 'H3HexagonLayer',
-                data: dataWrap,
-                ...h3LayerProps(),
-                extruded: false,
-                stroked: false,
-                ...accessors,
-                elevationScale: 20,
-                pickable: false
-            })
+            const layer = createH3Layer(data, format.kind, valuekey)
             doneDeckLayer()
             doneGetHexData({rows, h3Index: format.kind === 'column' && hasSplitH3Index(data) ? 'split' : 'string'})
             return layer
@@ -2803,6 +2943,7 @@ function bootstrap(meta = {}){
                 zoom: z,
             })
         }
+        updateViewportQuantiles('map')
         if (cartogramEnabled && shouldSyncCartogram) fitCartogramToMapBounds()
     })
 
@@ -2838,9 +2979,9 @@ function bootstrap(meta = {}){
                 if (weights) validWeights.push(weights[i])
             }
         }
-        const sampleSize = Math.min(8192, valid.length)
+        const sampleSize = Math.min(QUANTILE_SAMPLE_SIZE, valid.length)
         if (sampleSize === 0) return [() => null, () => null]
-        const indices = Array.from({length: sampleSize}, () => Math.floor(Math.random()*valid.length))
+        const indices = Array.from({length: sampleSize}, (_, i) => valid.length <= QUANTILE_SAMPLE_SIZE ? i : Math.floor(Math.random() * valid.length))
         const pairs = indices.map(i => [valid[i], validWeights.length ? validWeights[i] : 1])
         pairs.sort((a, b) => a[0] - b[0])
         const mini_array = pairs.map(([v]) => v)

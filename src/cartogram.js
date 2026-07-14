@@ -33,6 +33,7 @@ export function render_cartogram(container, data, options = {}) {
         get_color = defaultGetColour,
         onclick_callback = console.log,
         onmove_callback = () => {},
+        onviewchange_callback = () => {},
     } = options
 
     const HTML_ESCAPES = {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}
@@ -121,6 +122,7 @@ export function render_cartogram(container, data, options = {}) {
     let highlightedIndices = []
     let latestTransform = d3.zoomIdentity
     let fitToBoundsActive = false
+    let fitToBoundsToken = 0
     let cartogramGestureActive = false
     let cartogramGestureMoved = false
     let pendingTransform = null
@@ -882,8 +884,10 @@ export function render_cartogram(container, data, options = {}) {
                 endSourceEventType: e.sourceEvent ? e.sourceEvent.type : null,
                 moved: gestureMoved,
             })
-            if (!fitToBoundsActive && onmove_callback && cartogramGestureActive && cartogramGestureMoved && latestTransform) {
-                const visible = visibleIndices(latestTransform)
+            const viewChanged = fitToBoundsActive || (cartogramGestureActive && cartogramGestureMoved)
+            const visible = viewChanged && latestTransform ? visibleIndices(latestTransform) : null
+            if (visible && onviewchange_callback) onviewchange_callback(currentData, visible, e.sourceEvent)
+            if (!fitToBoundsActive && onmove_callback && cartogramGestureActive && cartogramGestureMoved && visible) {
                 debugLog('zoom.end', {
                     sourceEventType: e.sourceEvent ? e.sourceEvent.type : null,
                     visible: visible.length,
@@ -959,6 +963,7 @@ export function render_cartogram(container, data, options = {}) {
             const cy = (top + bottom) / 2
             const viewportCx = (viewport.xMin + viewport.xMax) / 2
             const viewportCy = (viewport.yMin + viewport.yMax) / 2
+            const fitToken = ++fitToBoundsToken
             fitToBoundsActive = true
             const transform = d3.zoomIdentity.translate(viewportCx - cx * k, viewportCy - cy * k).scale(k)
             const cssTransform = viewToCssTransform(transform)
@@ -985,11 +990,11 @@ export function render_cartogram(container, data, options = {}) {
             canvasSelection.transition().duration(duration)
                 .call(zoom.transform, cssTransform)
                 .on("end", () => {
-                    fitToBoundsActive = false
+                    if (fitToken === fitToBoundsToken) fitToBoundsActive = false
                     svgPerfLog('fit_to_bounds.end', {latestTransform: transformDetails(latestTransform)})
                 })
                 .on("interrupt", () => {
-                    fitToBoundsActive = false
+                    if (fitToken === fitToBoundsToken) fitToBoundsActive = false
                     svgPerfLog('fit_to_bounds.interrupt', {latestTransform: transformDetails(latestTransform)})
                 })
         }
