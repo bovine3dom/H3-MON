@@ -1514,7 +1514,7 @@ function bootstrap(meta = {}){
         for (let i = 0; i < centers.length / 2; i++) {
             const offset = i * 2
             if (centers[offset + 1] < south || centers[offset + 1] > north || !longitudeInBounds(centers[offset], west, east)) continue
-            const value = columnValue(state.values, i)
+            const value = toFiniteNumber(columnValue(state.values, i))
             if (value == null) continue
             const sampleIndex = visible < QUANTILE_SAMPLE_SIZE ? visible : Math.floor(Math.random() * (visible + 1))
             visible++
@@ -1539,16 +1539,17 @@ function bootstrap(meta = {}){
 
         let sample
         if (source === 'cartogram') {
-            const values = visibleIndices.map(i => state.cartogramValues[i])
+            const values = {length: visibleIndices.length, get: i => columnValue(state.cartogramValues, visibleIndices[i])}
             sample = {values, weights: null, visible: visibleIndices.length}
         } else {
             sample = visibleMapQuantileSample(state)
         }
-        if (!sample || !sample.values.some(value => value != null)) return
+        if (!sample) return
 
         const doneEcdf = detailPerfTimer('viewport.quantile.ecdf', {source, visible: sample.visible})
-        const [getquantile, getvalue] = ecdf(sample.values, state.trimFactor, sample.weights)
+        const [getquantile, getvalue, sampleSize] = ecdf(sample.values, state.trimFactor, sample.weights)
         doneEcdf()
+        if (!sampleSize) return
         const doneAssign = detailPerfTimer('viewport.quantile.assign', {source, rows: state.values.length})
         assignMapQuantiles(state, getquantile)
         if (state.cartogramValues) {
@@ -1561,13 +1562,13 @@ function bootstrap(meta = {}){
     }
 
     function extractValues(raw, kind) {
-        if (kind === 'column') return Array.from(raw.value)
-        return raw.map(r => r.value)
+        if (kind === 'column') return raw.value
+        return {length: raw.length, get: i => raw[i].value}
     }
 
     function extractWeights(raw, kind) {
-        if (kind === 'column') return raw.weight ? Array.from(raw.weight) : null
-        return raw.length > 0 && raw[0].weight != null ? raw.map(r => r.weight) : null
+        if (kind === 'column') return raw.weight || null
+        return raw.length > 0 && Object.prototype.hasOwnProperty.call(raw[0], 'weight') ? {length: raw.length, get: i => raw[i].weight} : null
     }
 
     function applyQuantiles(raw, kind, getquantile) {
@@ -2971,28 +2972,92 @@ function bootstrap(meta = {}){
     }
 
     function ecdf(array, trimFactor=0.01, weights=null) {
-        const valid = []
-        const validWeights = []
-        for (let i = 0; i < array.length; i++) {
-            if (array[i] != null) {
-                valid.push(array[i])
-                if (weights) validWeights.push(weights[i])
+        const values = []
+        const sampledWeights = weights ? [] : null
+        const store = (rowIndex, sampleIndex, value = toFiniteNumber(columnValue(array, rowIndex))) => {
+            if (value == null) return false
+            values[sampleIndex] = value
+            if (sampledWeights) {
+                const weight = toFiniteNumber(columnValue(weights, rowIndex))
+                sampledWeights[sampleIndex] = weight != null && weight >= 0 ? weight : 0
+            }
+            return true
+        }
+        const reservoirSample = () => {
+            values.length = 0
+            if (sampledWeights) sampledWeights.length = 0
+            let validCount = 0
+            for (let i = 0; i < array.length; i++) {
+                const value = toFiniteNumber(columnValue(array, i))
+                if (value == null) continue
+                const sampleIndex = validCount < QUANTILE_SAMPLE_SIZE ? validCount : Math.floor(Math.random() * (validCount + 1))
+                validCount++
+                if (sampleIndex < QUANTILE_SAMPLE_SIZE) store(i, sampleIndex, value)
             }
         }
-        const sampleSize = Math.min(QUANTILE_SAMPLE_SIZE, valid.length)
-        if (sampleSize === 0) return [() => null, () => null]
-        const indices = Array.from({length: sampleSize}, (_, i) => valid.length <= QUANTILE_SAMPLE_SIZE ? i : Math.floor(Math.random() * valid.length))
-        const pairs = indices.map(i => [valid[i], validWeights.length ? validWeights[i] : 1])
+
+        if (array.length <= QUANTILE_SAMPLE_SIZE * 4) {
+            reservoirSample()
+        } else {
+            const sampledRows = new Set()
+            const maxAttempts = QUANTILE_SAMPLE_SIZE * 32
+            let attempts = 0
+            while (values.length < QUANTILE_SAMPLE_SIZE && sampledRows.size < array.length && attempts++ < maxAttempts) {
+                const rowIndex = Math.floor(Math.random() * array.length)
+                if (sampledRows.has(rowIndex)) continue
+                sampledRows.add(rowIndex)
+                store(rowIndex, values.length)
+            }
+            if (values.length < Math.min(QUANTILE_SAMPLE_SIZE / 2, array.length)) reservoirSample()
+        }
+        if (!values.length) return [() => null, () => null, 0]
+
+        const unweighted = () => {
+            values.sort((a, b) => a - b)
+            return [
+                target => {
+                    const value = toFiniteNumber(target)
+                    return value == null ? null : upperBound(values, value) / values.length
+                },
+                target => {
+                    const quantile = toFiniteNumber(target)
+                    if (quantile == null) return null
+                    if (quantile < trimFactor) return values[0]
+                    if (quantile >= 1 - trimFactor) return values[values.length - 1]
+                    return values[Math.min(values.length - 1, Math.floor(quantile * values.length))]
+                },
+                values.length,
+            ]
+        }
+        if (!sampledWeights) return unweighted()
+
+        const pairs = values.map((value, i) => [value, sampledWeights[i]])
         pairs.sort((a, b) => a[0] - b[0])
-        const mini_array = pairs.map(([v]) => v)
-        const sortedWeights = pairs.map(([, w]) => w)
+        const sortedValues = new Array(pairs.length)
+        const cumulativeWeights = new Float64Array(pairs.length)
+        let maxWeight = 0
+        for (const weight of sampledWeights) if (weight > maxWeight) maxWeight = weight
+        if (!(maxWeight > 0)) return unweighted()
         let cumW = 0
-        const totalW = sortedWeights.reduce((s, w) => s + w, 0)
-        const quantile = sortedWeights.map(w => { cumW += w; return cumW / totalW })
-        
+        for (let i = 0; i < pairs.length; i++) {
+            sortedValues[i] = pairs[i][0]
+            cumW += pairs[i][1] / maxWeight
+            cumulativeWeights[i] = cumW
+        }
+        for (let i = 0; i < cumulativeWeights.length; i++) cumulativeWeights[i] /= cumW
+
         return [
-            target => target == null ? null : quantile[upperBound(mini_array, target)] ?? 1,
-            target => target == null ? null : (mini_array[upperBoundClamped(quantile, target, trimFactor, 1 - trimFactor)] ?? mini_array[mini_array.length - 1])
+            target => {
+                const value = toFiniteNumber(target)
+                if (value == null) return null
+                const index = upperBound(sortedValues, value)
+                return index ? cumulativeWeights[index - 1] : 0
+            },
+            target => {
+                const quantile = toFiniteNumber(target)
+                return quantile == null ? null : (sortedValues[upperBoundClamped(cumulativeWeights, quantile, trimFactor, 1 - trimFactor)] ?? sortedValues[sortedValues.length - 1])
+            },
+            values.length,
         ]
     }
 }
