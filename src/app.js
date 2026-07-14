@@ -1,6 +1,7 @@
 import {MapboxOverlay} from '@deck.gl/mapbox'
 import {H3HexagonLayer, TileLayer} from '@deck.gl/geo-layers'
-import {BitmapLayer, GeoJsonLayer} from '@deck.gl/layers'
+import {BitmapLayer, GeoJsonLayer } from '@deck.gl/layers'
+import {PackedH3HexagonLayer} from 'faster-h3-for-deckgl'
 import {CSVLoader} from '@loaders.gl/csv'
 import {ArrowLoader} from '@loaders.gl/arrow'
 import {ParquetWasmLoader} from '@loaders.gl/parquet'
@@ -31,8 +32,6 @@ function parseH3Precision(value) {
     return settingEnabled(value, false)
 }
 const h3Precision = parseH3Precision(params.get('h3precision')) ?? true
-const h3BinaryPositions = h3Precision !== true
-const h3BinaryColors = true
 function h3LayerProps() {
     return {highPrecision: h3Precision}
 }
@@ -1356,15 +1355,6 @@ function bootstrap(meta = {}){
         return target
     }
     const getColour = v => writeColourForValue(v, [0, 0, 0, 0])
-    const writeColour = (target, colour) => {
-        if (!target) return colour
-        target[0] = colour[0]
-        target[1] = colour[1]
-        target[2] = colour[2]
-        target[3] = colour[3] ?? 255
-        return target
-    }
-
     function rowH3IndexInput(row, indexkey, target = [0, 0]) {
         if (row && row[H3_INDEX_LOWER] != null && row[H3_INDEX_UPPER] != null) {
             target[0] = toNumber(row[H3_INDEX_LOWER])
@@ -1379,82 +1369,42 @@ function bootstrap(meta = {}){
         return rowH3IndexInput(data[i], indexkey, target)
     }
 
-    function buildH3PositionAttribute(data, kind, indexkey, rows) {
-        if (data._h3Positions) return data._h3Positions
-        const donePositions = perfTimer('deck.h3_binary.positions', {rows})
-        const positions = new Float64Array(rows * 3)
-        const h3Target = [0, 0]
-        for (let i = 0; i < rows; i++) {
-            const [lat, lng] = cellToLatLng(h3IndexAt(data, kind, indexkey, i, h3Target))
-            const offset = i * 3
-            positions[offset] = lng
-            positions[offset + 1] = lat
-            positions[offset + 2] = 0
-        }
-        data._h3Positions = positions
-        donePositions()
-        return positions
-    }
-
-    function buildH3FillColorAttribute(data, kind, valuekey, writeColourValue, rows) {
-        const doneColors = perfTimer('deck.h3_binary.colors', {rows})
-        const colors = new Uint8Array(rows * 4)
-        for (let i = 0; i < rows; i++) {
-            const value = kind === 'column' ? columnValue(data[valuekey], i) : data[i][valuekey]
-            const offset = i * 4
-            writeColourValue(value, colors, offset)
-        }
-        doneColors()
-        return colors
-    }
-
-    function h3DeckData(kind, data, indexkey, valuekey, writeColourValue) {
+    function h3DeckSource(kind, data) {
         const rows = kind === 'column' ? h3RowCount(data) : data.length
         let dataWrap = kind === 'column' ? h3DeckDataCache.get(data) : data
         if (!dataWrap || dataWrap.length !== rows) {
             dataWrap = kind === 'column' ? {src: data, length: rows} : data
             if (kind === 'column') h3DeckDataCache.set(data, dataWrap)
         }
-        const attributes = {...dataWrap.attributes}
-        if (h3BinaryPositions && !attributes.getPosition) attributes.getPosition = {value: buildH3PositionAttribute(data, kind, indexkey, rows), size: 3}
-        if (h3BinaryColors) attributes.getFillColor = {value: buildH3FillColorAttribute(data, kind, valuekey, writeColourValue, rows), size: 4, type: 'unorm8'}
-        dataWrap.attributes = attributes
-        dataWrap.startIndices = null
         return dataWrap
     }
 
-    function hexAccessors(kind, indexkey, valuekey, getColour) {
+    function hexAccessors(kind, indexkey, valuekey, writeColourValue) {
         if (kind === 'column') {
             return {
                 getHexagon: (_, {index, data, target}) => h3IndexInputAt(data.src, index, target),
                 getFillColor: (_, {index, data, target}) => {
                     const v = columnValue(data.src[valuekey], index)
-                    const colour = getColour(v)
-                    return writeColour(target, colour)
+                    return writeColourValue(v, target)
                 }
             }
         }
         return {
             getHexagon: (d, {target} = {}) => rowH3IndexInput(d, indexkey, target),
-            getFillColor: (d, {target} = {}) => writeColour(target, getColour(d[valuekey]))
+            getFillColor: (d, {target} = {}) => writeColourValue(d[valuekey], target || [0, 0, 0, 0])
         }
     }
 
     function createH3Layer(data, kind, valuekey) {
-        const accessors = hexAccessors(kind, 'index', valuekey, getColour)
-        const dataWrap = h3DeckData(kind, data, 'index', valuekey, writeColourForValue)
-        const layer = new H3HexagonLayer({
+        const accessors = hexAccessors(kind, 'index', valuekey, writeColourForValue)
+        const layer = new PackedH3HexagonLayer({
             id: 'H3HexagonLayer',
-            data: dataWrap,
-            ...h3LayerProps(),
-            extruded: false,
-            stroked: false,
+            data: h3DeckSource(kind, data),
             ...accessors,
-            updateTriggers: {getFillColor: [colourVersion, dataWrap.attributes?.getFillColor?.value]},
-            elevationScale: 20,
+            updateTriggers: {getFillColor: [colourVersion]},
             pickable: false,
         })
-        activeH3Layer = {data, kind, valuekey, layer}
+        activeH3Layer = {layer}
         return layer
     }
 
@@ -1464,11 +1414,7 @@ function bootstrap(meta = {}){
         if (layerIndex < 0) return
 
         colourVersion++
-        const data = h3DeckData(active.kind, active.data, 'index', active.valuekey, writeColourForValue)
-        const layer = active.layer.clone({
-            data,
-            updateTriggers: {getFillColor: [colourVersion, data.attributes?.getFillColor?.value]},
-        })
+        const layer = active.layer.clone({updateTriggers: {getFillColor: [colourVersion]}})
         active.layer = layer
         mainLayers = mainLayers.slice()
         mainLayers[layerIndex] = layer
@@ -2080,7 +2026,7 @@ function bootstrap(meta = {}){
             let deckLayer
 
             if (!useCartogramQuantiles || !doQuantiles) {
-                const doneDeckLayer = perfTimer('deck.hex_layer.create', {rows: dataCols.value.length, h3Precision, h3BinaryPositions, h3BinaryColors, pickable: false, h3Index: hasSplitH3Index(dataCols) ? 'split' : 'string'})
+                const doneDeckLayer = perfTimer('deck.hex_layer.create', {rows: dataCols.value.length, renderer: 'packed', pickable: false, h3Index: hasSplitH3Index(dataCols) ? 'split' : 'string'})
                 deckLayer = createH3Layer(dataCols, 'column', valuekey)
                 doneDeckLayer()
             }
@@ -2239,7 +2185,7 @@ function bootstrap(meta = {}){
 
             if (!deckLayer) {
                 setLoadStage('Preparing map layer')
-                const doneDeckLayer = perfTimer('deck.hex_layer.create', {rows: dataCols.value.length, h3Precision, h3BinaryPositions, h3BinaryColors, pickable: false, h3Index: hasSplitH3Index(dataCols) ? 'split' : 'string'})
+                const doneDeckLayer = perfTimer('deck.hex_layer.create', {rows: dataCols.value.length, renderer: 'packed', pickable: false, h3Index: hasSplitH3Index(dataCols) ? 'split' : 'string'})
                 deckLayer = createH3Layer(dataCols, 'column', valuekey)
                 doneDeckLayer()
             }
@@ -2347,7 +2293,7 @@ function bootstrap(meta = {}){
             setLoadStage('Preparing map layer')
             if (format.kind === 'column') window._columnData = data
             const rows = format.kind === 'column' ? data.value.length : data.length
-            const doneDeckLayer = perfTimer('deck.hex_layer.create', {rows, h3Precision, h3BinaryPositions, h3BinaryColors, pickable: false, h3Index: format.kind === 'column' && hasSplitH3Index(data) ? 'split' : 'string'})
+            const doneDeckLayer = perfTimer('deck.hex_layer.create', {rows, renderer: 'packed', pickable: false, h3Index: format.kind === 'column' && hasSplitH3Index(data) ? 'split' : 'string'})
             const layer = createH3Layer(data, format.kind, valuekey)
             doneDeckLayer()
             doneGetHexData({rows, h3Index: format.kind === 'column' && hasSplitH3Index(data) ? 'split' : 'string'})
@@ -2756,7 +2702,7 @@ function bootstrap(meta = {}){
     }
 
     const update = () => {
-        const doneMapReady = perfTimer('app.load_to_map_ready', {file: file_name, ext, layer: format.layer, h3Precision, h3BinaryPositions, h3BinaryColors, pickable: false, cartogramWeightsFile})
+        const doneMapReady = perfTimer('app.load_to_map_ready', {file: file_name, ext, layer: format.layer, renderer: 'packed', pickable: false, cartogramWeightsFile})
         if (loadProgress.complete) resetLoadProgress('Reloading data')
         getHexData()
             .then(async x => {

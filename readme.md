@@ -17,7 +17,6 @@ Prerequisites: yarn. A web browser. A CSV file of index, value for [H3 Hexagon i
 3. `yarn serve&; yarn watch`, open localhost:1983/?data=h3_data{,.csv, .arrow, .parquet}
 4. data will be refreshed with a file watcher
 
-
 # Cartogram mapping spec
 
 Cartograms are maps with complex projections, most commonly used for visualising data with uniform populations rather than geographic projections which attempt to preserve land area.
