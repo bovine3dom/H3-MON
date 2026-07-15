@@ -85,6 +85,7 @@ const LOAD_PROGRESS_DEFAULTS = {
     'data.arrow_column.value': 2,
     'data.quantile.ecdf': 15,
     'data.quantile.assign': 25,
+    'data.h3_row_lookup.build': 100,
     'cartogram.js_group.data_map': 100,
     'cartogram.js_group.accumulate': 650,
     'cartogram.js_group.output': 5,
@@ -126,6 +127,7 @@ const LOAD_PROGRESS_DEFAULT_PROFILE = [
     'data.arrow_column.value',
     'data.quantile.ecdf',
     'data.quantile.assign',
+    'data.h3_row_lookup.build',
     'cartogram.js_group.data_map',
     'cartogram.js_group.accumulate',
     'cartogram.js_group.output',
@@ -165,6 +167,7 @@ const LOAD_PROGRESS_LABELS = {
     'data.arrow_column.value': 'Reading values',
     'data.quantile.ecdf': 'Calculating quantiles',
     'data.quantile.assign': 'Assigning quantiles',
+    'data.h3_row_lookup.build': 'Indexing map cells',
     'cartogram.js_group.data_map': 'Indexing data by H3',
     'cartogram.js_group.accumulate': 'Aggregating cartogram cells',
     'cartogram.js_group.output': 'Preparing cartogram values',
@@ -1357,7 +1360,14 @@ function bootstrap(meta = {}){
     const colourRamp = d3.scaleSequential(doCyclical ? d3.interpolateRainbow : d3.interpolateSpectral).domain(flip ? [1,0] : [0,1])
     const file_path = `data/${file_name}`
     let h3DataRowLookup = null
-    let clickPopup = null
+    const mapHoverTooltip = document.createElement('div')
+    mapHoverTooltip.className = 'h3-hover-tooltip'
+    mapHoverTooltip.style.display = 'none'
+    mapContainer.appendChild(mapHoverTooltip)
+    let hoveredMapH3 = null
+    let pendingMapHover = null
+    let mapHoverRaf = null
+    let suppressMapHoverUntil = 0
     const sidePane = document.getElementById('side-pane')
     const cartogramContainer = document.getElementById('cartogram')
     if (settings.t) document.title = settings.t
@@ -2048,10 +2058,7 @@ function bootstrap(meta = {}){
         activeH3Layer = null
         viewportQuantileState = null
         h3DataRowLookup = null
-        if (clickPopup) {
-            clickPopup.remove()
-            clickPopup = null
-        }
+        hideMapHoverTooltip()
         if (!loadProgress.totalWork) configureLoadProgress()
         setLoadStage('Loading data')
 
@@ -2208,19 +2215,15 @@ function bootstrap(meta = {}){
                                     })
                                     if (cartogramApi) cartogramApi.highlightCells([i])
                                     const cartoRefs = cartogramCellH3Strings(i)
-                                    const popupH3 = dataH3ForCartogramH3s(cartoRefs)
                                     syncLog('cartogram.click.resolve', {
                                         row: i,
                                         cartoH3Refs: cartoRefs.length,
                                         firstCartoRefs: cartoRefs.slice(0, 5),
-                                        popupH3,
-                                        popupRow: popupH3 ? lookupDataRowForH3(popupH3) : null,
                                         cartoRes,
                                         dataH3Res,
                                     })
                                     if (cartoRefs.length) hex(cartoRefs, {fit: true})
                                     else syncLog('cartogram.click.skip_no_carto_refs', {row: i})
-                                    showClickPopupForH3AfterMapMove(popupH3)
                                 } catch (e) {
                                     console.warn('Cartogram click failed', {row: i, cartoRes, dataH3Res}, e)
                                 }
@@ -2455,22 +2458,39 @@ function bootstrap(meta = {}){
         pickable: false
     })
 
+    function splitH3LookupSlot(lower, upper, mask) {
+        let hash = Math.imul(lower ^ (lower >>> 16), 0x45d9f3b)
+        hash ^= Math.imul(upper ^ (upper >>> 16), 0x119de1f3)
+        return (hash ^ (hash >>> 16)) & mask
+    }
+
     function buildH3DataRowLookup(cols = window._columnData) {
         if (!cols || !hasH3Index(cols)) return null
         const rows = h3RowCount(cols)
         const split = hasSplitH3Index(cols)
         const doneLookup = perfTimer('data.h3_row_lookup.build', {rows, h3Index: split ? 'split' : 'string'})
         if (split) {
-            const root = new Map()
+            let capacity = 1
+            while (capacity < rows * 1.5) capacity *= 2
+            const mask = capacity - 1
+            const lowerBySlot = new Uint32Array(capacity)
+            const upperBySlot = new Uint32Array(capacity)
+            const rowBySlot = new Uint32Array(capacity)
             const lowerCol = cols[H3_INDEX_LOWER]
             const upperCol = cols[H3_INDEX_UPPER]
             for (let i = 0; i < rows; i++) {
-                const lower = toNumber(columnValue(lowerCol, i))
-                const upper = toNumber(columnValue(upperCol, i))
-                if (!splitMapHas(root, lower, upper)) splitMapSet(root, lower, upper, i)
+                const lower = toNumber(columnValue(lowerCol, i)) >>> 0
+                const upper = toNumber(columnValue(upperCol, i)) >>> 0
+                let slot = splitH3LookupSlot(lower, upper, mask)
+                while (rowBySlot[slot] && (lowerBySlot[slot] !== lower || upperBySlot[slot] !== upper)) slot = (slot + 1) & mask
+                if (!rowBySlot[slot]) {
+                    lowerBySlot[slot] = lower
+                    upperBySlot[slot] = upper
+                    rowBySlot[slot] = i + 1
+                }
             }
-            doneLookup()
-            return {split: true, root}
+            doneLookup({capacity})
+            return {split: true, lowerBySlot, upperBySlot, rowBySlot, mask}
         }
 
         const map = new Map()
@@ -2487,74 +2507,18 @@ function bootstrap(meta = {}){
         if (!h3DataRowLookup) h3DataRowLookup = buildH3DataRowLookup(window._columnData)
         if (!h3DataRowLookup) return null
         if (h3DataRowLookup.split) {
-            const [lower, upper] = h3IndexToSplitLong(String(h3Index))
-            return splitMapGet(h3DataRowLookup.root, lower, upper) ?? null
-        }
-        return h3DataRowLookup.map.get(String(h3Index)) ?? null
-    }
-
-    function firstH3WithDataRow(h3s) {
-        for (const h3 of h3s) {
-            const row = lookupDataRowForH3(h3)
-            if (row != null) {
-                syncLog('cartogram.click.data_row_match', {h3, row})
-                return h3
+            const [rawLower, rawUpper] = h3IndexToSplitLong(String(h3Index))
+            const lower = rawLower >>> 0
+            const upper = rawUpper >>> 0
+            const {lowerBySlot, upperBySlot, rowBySlot, mask} = h3DataRowLookup
+            let slot = splitH3LookupSlot(lower, upper, mask)
+            while (rowBySlot[slot]) {
+                if (lowerBySlot[slot] === lower && upperBySlot[slot] === upper) return rowBySlot[slot] - 1
+                slot = (slot + 1) & mask
             }
-        }
-        return null
-    }
-
-    function dataH3ForCartogramH3s(cartoH3s) {
-        if (!cartoH3s || !cartoH3s.length) {
-            syncLog('cartogram.click.resolve.skip_no_carto_h3')
             return null
         }
-        const firstCartoH3 = cartoH3s[0]
-        if (dataH3Res == null || dataH3Res === cartoRes) {
-            const matched = firstH3WithDataRow(cartoH3s)
-            const selected = matched || firstCartoH3
-            syncLog('cartogram.click.resolve.same_res', {cartoH3Refs: cartoH3s.length, selected, matched: !!matched, dataH3Res, cartoRes})
-            return selected
-        }
-
-        if (dataH3Res < cartoRes) {
-            const parents = []
-            const seen = new Set()
-            for (const cartoH3 of cartoH3s) {
-                const parent = cellToParent(cartoH3, dataH3Res)
-                if (seen.has(parent)) continue
-                seen.add(parent)
-                parents.push(parent)
-            }
-            const matched = firstH3WithDataRow(parents)
-            const selected = matched || parents[0] || firstCartoH3
-            syncLog('cartogram.click.resolve.parent', {cartoH3Refs: cartoH3s.length, parents: parents.length, selected, matched: !!matched, dataH3Res, cartoRes})
-            return selected
-        }
-
-        let scannedChildren = 0
-        const maxChildScan = 5000
-        if ((7 ** (dataH3Res - cartoRes)) > maxChildScan) {
-            syncLog('cartogram.click.child_scan_skip', {cartoH3Refs: cartoH3s.length, cartoRes, dataH3Res, maxChildScan})
-            return firstCartoH3
-        }
-        for (const cartoH3 of cartoH3s) {
-            const children = cellToChildren(cartoH3, dataH3Res)
-            for (const child of children) {
-                scannedChildren++
-                const row = lookupDataRowForH3(child)
-                if (row != null) {
-                    syncLog('cartogram.click.resolve.child', {cartoH3Refs: cartoH3s.length, selected: child, row, scannedChildren, dataH3Res, cartoRes})
-                    return child
-                }
-                if (scannedChildren >= maxChildScan) {
-                    syncLog('cartogram.click.child_scan_limit', {cartoH3Refs: cartoH3s.length, cartoRes, dataH3Res, scannedChildren})
-                    return firstCartoH3
-                }
-            }
-        }
-        syncLog('cartogram.click.resolve.fallback_first_carto_h3', {cartoH3Refs: cartoH3s.length, firstCartoH3, scannedChildren, dataH3Res, cartoRes})
-        return firstCartoH3
+        return h3DataRowLookup.map.get(String(h3Index)) ?? null
     }
 
     function formatDataValue(v) {
@@ -2564,12 +2528,12 @@ function bootstrap(meta = {}){
         return v
     }
 
-    function clickPopupHtml(h3Index, rowIndex) {
+    function mapTooltipHtml(h3Index, rowIndex) {
         const cols = window._columnData
         const rows = [['index', h3Index]]
         if (cols && rowIndex != null) {
             const preferred = ['value', 'quantile', 'weight', 'weight_mean']
-            const used = new Set(['index', H3_INDEX_LOWER, H3_INDEX_UPPER, 'quantile', ...preferred])
+            const used = new Set(['index', H3_INDEX_LOWER, H3_INDEX_UPPER, ...preferred])
             for (const key of preferred) {
                 if (cols[key]) rows.push([key, columnValue(cols[key], rowIndex)])
             }
@@ -2577,8 +2541,6 @@ function bootstrap(meta = {}){
                 if (used.has(key) || key.startsWith('_')) continue
                 rows.push([key, columnValue(cols[key], rowIndex)])
             }
-        } else {
-            rows.push(['data', 'No row for clicked H3'])
         }
         return rows
             .filter(([, value]) => value != null && value !== '')
@@ -2586,55 +2548,67 @@ function bootstrap(meta = {}){
             .join('')
     }
 
-    function showClickPopup(point, h3Index, rowIndex) {
-        if (clickPopup) clickPopup.remove()
-        const popup = document.createElement('div')
-        popup.className = 'h3-click-popup'
-        popup.innerHTML = `<button class="h3-click-popup-close" type="button" aria-label="Close">×</button><div class="h3-click-popup-body">${clickPopupHtml(h3Index, rowIndex)}</div>`
-        popup.style.left = `${Math.min(Math.max(point.x + 12, 8), mapContainer.clientWidth - 328)}px`
-        popup.style.top = `${Math.min(Math.max(point.y + 12, 8), mapContainer.clientHeight - 160)}px`
-        popup.querySelector('.h3-click-popup-close').addEventListener('click', event => {
-            event.stopPropagation()
-            popup.remove()
-            if (clickPopup === popup) clickPopup = null
-        })
-        mapContainer.appendChild(popup)
-        clickPopup = popup
+    function hideMapHoverTooltip() {
+        pendingMapHover = null
+        if (mapHoverRaf !== null) {
+            cancelAnimationFrame(mapHoverRaf)
+            mapHoverRaf = null
+        }
+        hoveredMapH3 = null
+        mapHoverTooltip.style.display = 'none'
     }
 
-    function showClickPopupForH3(h3Index) {
-        if (!h3Index) {
-            syncLog('cartogram.click.popup.skip_no_h3')
+    function positionMapHoverTooltip(point) {
+        const rect = mapContainer.getBoundingClientRect()
+        const cursorX = rect.left + point.x
+        const cursorY = rect.top + point.y
+        const width = mapHoverTooltip.offsetWidth
+        const height = mapHoverTooltip.offsetHeight
+        const preferredLeft = cursorX + 12
+        const preferredTop = cursorY + 12
+        const left = preferredLeft + width <= window.innerWidth - 8 ? preferredLeft : cursorX - width - 12
+        const top = preferredTop + height <= window.innerHeight - 8 ? preferredTop : cursorY - height - 12
+        mapHoverTooltip.style.left = `${Math.max(8, left)}px`
+        mapHoverTooltip.style.top = `${Math.max(8, top)}px`
+    }
+
+    function updateMapHoverTooltip() {
+        mapHoverRaf = null
+        const hover = pendingMapHover
+        pendingMapHover = null
+        if (!hover || updateRunning || dataH3Res == null || (typeof map.isMoving === 'function' && map.isMoving())) {
+            hideMapHoverTooltip()
             return
         }
         try {
-            const [lat, lng] = cellToLatLng(h3Index)
-            const point = map.project([lng, lat])
-            const row = lookupDataRowForH3(h3Index)
-            syncLog('cartogram.click.popup.show', {h3Index, row, lat, lng, point, mapMoving: typeof map.isMoving === 'function' ? map.isMoving() : null})
-            showClickPopup(point, h3Index, row)
-        } catch (e) {
-            console.warn('Failed to show H3 popup', h3Index, e)
+            const h3Index = latLngToCell(hover.lat, hover.lng, dataH3Res)
+            if (h3Index !== hoveredMapH3) {
+                const rowIndex = lookupDataRowForH3(h3Index)
+                if (rowIndex == null) {
+                    hideMapHoverTooltip()
+                    return
+                }
+                hoveredMapH3 = h3Index
+                mapHoverTooltip.innerHTML = mapTooltipHtml(h3Index, rowIndex)
+                mapHoverTooltip.style.display = 'block'
+            }
+            positionMapHoverTooltip(hover.point)
+        } catch (_) {
+            hideMapHoverTooltip()
         }
     }
 
-    function showClickPopupForH3AfterMapMove(h3Index) {
-        if (!h3Index) {
-            syncLog('cartogram.click.popup.schedule.skip_no_h3')
+    function scheduleMapHoverTooltip(event) {
+        if (now() < suppressMapHoverUntil || event.originalEvent?.sourceCapabilities?.firesTouchEvents) {
+            hideMapHoverTooltip()
             return
         }
-        requestAnimationFrame(() => {
-            const moving = typeof map.isMoving === 'function' && map.isMoving()
-            syncLog('cartogram.click.popup.schedule', {h3Index, moving})
-            if (moving) {
-                map.once('moveend', () => {
-                    syncLog('cartogram.click.popup.moveend', {h3Index})
-                    showClickPopupForH3(h3Index)
-                })
-            } else {
-                showClickPopupForH3(h3Index)
-            }
-        })
+        pendingMapHover = {
+            point: {x: event.point.x, y: event.point.y},
+            lat: event.lngLat.lat,
+            lng: event.lngLat.lng,
+        }
+        if (mapHoverRaf === null) mapHoverRaf = requestAnimationFrame(updateMapHoverTooltip)
     }
 
     async function focusCartogramForH3(h3Index) {
@@ -2685,17 +2659,27 @@ function bootstrap(meta = {}){
     map.addControl(mapOverlay)
     map.addControl(new maplibregl.NavigationControl())
 
+    map.on('mousemove', scheduleMapHoverTooltip)
+    map.on('movestart', hideMapHoverTooltip)
+    mapContainer.addEventListener('mouseleave', hideMapHoverTooltip)
+    mapContainer.addEventListener('touchstart', () => {
+        suppressMapHoverUntil = now() + 1000
+        hideMapHoverTooltip()
+    }, {capture: true, passive: true})
+    mapContainer.addEventListener('mousemove', event => {
+        if (event.target?.closest?.('#search-container, .maplibregl-ctrl, .pane-btn')) hideMapHoverTooltip()
+    }, {capture: true})
+
     mapContainer.addEventListener('click', async event => {
+        hideMapHoverTooltip()
         if (updateRunning || dataH3Res == null || event.button !== 0) return
         const target = event.target
-        if (target?.closest && target.closest('#search-container, .maplibregl-ctrl, .maplibregl-popup, .h3-click-popup, .pane-btn')) return
+        if (target?.closest && target.closest('#search-container, .maplibregl-ctrl, .maplibregl-popup, .pane-btn')) return
         try {
             const rect = mapContainer.getBoundingClientRect()
             const point = {x: event.clientX - rect.left, y: event.clientY - rect.top}
             const lngLat = map.unproject([point.x, point.y])
             const h3Index = latLngToCell(lngLat.lat, lngLat.lng, dataH3Res)
-            const rowIndex = lookupDataRowForH3(h3Index)
-            showClickPopup(point, h3Index, rowIndex)
             syncLog('map.click.h3_fallback', {h3Index, dataH3Res})
             await focusCartogramForH3(h3Index)
         } catch (e) {
@@ -2854,6 +2838,10 @@ function bootstrap(meta = {}){
             const layer = await getHexData(publishLayer, publishEarly)
             if (!mapReady) {
                 await publishLayer(layer)
+            }
+            if (!h3DataRowLookup && dataH3Res != null && window._columnData) {
+                await yieldToPaint('Indexing map cells')
+                h3DataRowLookup = buildH3DataRowLookup(window._columnData)
             }
             finishLoadProgress()
         } catch (e) {
