@@ -1511,9 +1511,7 @@ function bootstrap(meta = {}){
             data: h3DeckSource(kind, data),
             ...accessors,
             updateTriggers: {getFillColor: [colourVersion]},
-            _subLayerProps: {
-                'hexagon-cell-packed': {transitions: {getFillColor: colourTransition}}
-            },
+            // Binary colour transitions allocate large transform-feedback buffers and fail on mobile WebGL.
             pickable: false,
         })
         activeH3Layer = {layer}
