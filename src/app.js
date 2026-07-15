@@ -1,7 +1,7 @@
 import {MapboxOverlay} from '@deck.gl/mapbox'
 import {H3HexagonLayer, TileLayer} from '@deck.gl/geo-layers'
 import {BitmapLayer, GeoJsonLayer } from '@deck.gl/layers'
-import {PackedH3FillTransition, PackedH3HexagonLayer} from 'faster-h3-for-deckgl'
+import {PackedH3FillTransition, PackedH3HexagonLayer, packH3Geometry} from 'faster-h3-for-deckgl'
 import {CSVLoader} from '@loaders.gl/csv'
 import {ArrowLoader} from '@loaders.gl/arrow'
 import {ParquetWasmLoader} from '@loaders.gl/parquet'
@@ -9,6 +9,7 @@ import {load, parse} from '@loaders.gl/core'
 import maplibregl from 'maplibre-gl'
 import * as d3 from 'd3'
 import {cellToBoundary, cellToLatLng, latLngToCell, getResolution, cellToParent, cellToChildren, h3IndexToSplitLong, splitLongToH3Index} from 'h3-js'
+import {createMapLibreMatrixLayer, createPackedH3Renderer} from './webgpu/packed-h3-renderer.js'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import * as observablehq from './vendor/observablehq' // from https://observablehq.com/@d3/color-legend
 import {getCitiesStartsWith} from 'tiny-geocoder'
@@ -23,6 +24,10 @@ function settingEnabled(value, fallback = false) {
 
 function flagEnabled(name) {
     return params.has(name) && settingEnabled(params.get(name), true)
+}
+function rendererSetting(value) {
+    const renderer = String(value || 'deck').trim().toLowerCase()
+    return ['auto', 'webgpu', 'deck'].includes(renderer) ? renderer : 'deck'
 }
 const perfEnabled = flagEnabled('perf')
 const svgPerfEnabled = flagEnabled('svgperf')
@@ -572,6 +577,7 @@ function computeH3Bounds(indices, options = {}) {
 
 let highlightLayer = null
 let renderLayers = null
+let updateVisibleH3Chunks = null
 let hex_flying = false
 let hexFlyToken = 0
 let h3toXY = null
@@ -642,6 +648,9 @@ const H3_INDEX_UPPER = 'index_upper'
 const COLOUR_PALETTE_SIZE = 1024
 const QUANTILE_SAMPLE_SIZE = 8192
 const COLOUR_TRANSITION_DURATION = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 1000
+const H3_CHUNK_LOAD_PADDING = 0.5
+const H3_CHUNK_RETAIN_PADDING = 0.75
+const H3_CHUNK_MAX_COUNT = 512
 
 function hasSplitH3Index(cols) {
     return Boolean(cols && cols[H3_INDEX_LOWER] && cols[H3_INDEX_UPPER])
@@ -1220,6 +1229,7 @@ window.addEventListener('pointerup', clearInactiveMapGesture, {capture: true, pa
 window.addEventListener('pointercancel', clearInactiveMapGesture, {capture: true, passive: true})
 
 map.on('movestart', (event) => {
+    updateVisibleH3Chunks?.()
     const original = event && event.originalEvent
     if (mapGestureStarted || eventStartedInMap(original)) {
         mapGestureMoved = true
@@ -1242,6 +1252,7 @@ map.on('movestart', (event) => {
 })
 
 map.on('move', (event) => {
+    updateVisibleH3Chunks?.()
     if (!svgPerfEnabled || !mapMovePerf) return
     mapMovePerf.moves++
     const t = now()
@@ -1372,6 +1383,7 @@ fetch(`data/${meta_name}`).then(r => r.json()).then(meta => {
 
 function bootstrap(meta = {}){
     const settings = Object.assign({}, meta, Object.fromEntries(params.entries()))
+    const requestedRenderer = rendererSetting(settings.renderer)
     cartogramInit = null
     cartogramWeightsFile = null
     cartogramEnabled = cartogramFile(settings.cartogram) !== null
@@ -1450,7 +1462,15 @@ function bootstrap(meta = {}){
         : null
     let colourVersion = 0
     let activeH3Layer = null
+    let activeWebgpuChunkSet = null
     let viewportQuantileState = null
+    let activeH3Renderer = 'deck'
+    let webgpuRenderer = null
+    let webgpuMatrixLayer = null
+    let webgpuRendererInit = null
+    let webgpuRendererGeneration = 0
+    let webgpuFallback = null
+    let nextH3ChunkSetId = 1
     const h3DeckDataCache = new WeakMap()
     for (let i = 0; i < COLOUR_PALETTE_SIZE; i++) {
         const css = colourRamp(i / (COLOUR_PALETTE_SIZE - 1)) ?? transparentCss
@@ -1521,14 +1541,13 @@ function bootstrap(meta = {}){
         return dataWrap
     }
 
-    function hexAccessors(kind, indexkey, valuekey, writeColourValue) {
+    function deckHexAccessors(kind, indexkey, valuekey, writeColourValue) {
         if (kind === 'column') {
             return {
                 getHexagon: (_, {index, data, target}) => h3IndexInputAt(data.src, index, target),
                 getFillColor: (_, {index, data, target}) => {
                     const column = data.src[valuekey]
-                    const v = column ? columnValue(column, index) : null
-                    return writeColourValue(v, target)
+                    return writeColourValue(column ? columnValue(column, index) : null, target)
                 }
             }
         }
@@ -1538,8 +1557,25 @@ function bootstrap(meta = {}){
         }
     }
 
+    function chunkHexAccessors(kind, indexkey, valuekey, writeColourValue) {
+        if (kind === 'column') {
+            return {
+                getHexagon: (_, {index, data, target}) => h3IndexInputAt(data.src, data.rowIndices[index], target),
+                getFillColor: (_, {index, data, target}) => {
+                    const column = data.src[valuekey]
+                    const v = column ? columnValue(column, data.rowIndices[index]) : null
+                    return writeColourValue(v, target)
+                }
+            }
+        }
+        return {
+            getHexagon: (_, {index, data, target}) => rowH3IndexInput(data.src[data.rowIndices[index]], indexkey, target),
+            getFillColor: (_, {index, data, target}) => writeColourValue(data.src[data.rowIndices[index]][valuekey], target || [0, 0, 0, 0])
+        }
+    }
+
     function createH3Layer(data, kind, valuekey) {
-        const accessors = hexAccessors(kind, 'index', valuekey, writeColourForValue)
+        const accessors = deckHexAccessors(kind, 'index', valuekey, writeColourForValue)
         const layer = new PackedH3HexagonLayer({
             id: 'H3HexagonLayer',
             data: h3DeckSource(kind, data),
@@ -1552,7 +1588,419 @@ function bootstrap(meta = {}){
         return layer
     }
 
+    function waitForMapStyle() {
+        if (map.isStyleLoaded()) return Promise.resolve()
+        return new Promise((resolve, reject) => {
+            const timer = setTimeout(() => finish(new Error('MapLibre style load timed out')), 15000)
+            const finish = error => {
+                clearTimeout(timer)
+                cleanup()
+                if (error) reject(error)
+                else resolve()
+            }
+            const onLoad = () => {
+                finish()
+            }
+            const onRemove = () => finish(new Error('MapLibre map was removed before its style loaded'))
+            const cleanup = () => {
+                map.off('style.load', onLoad)
+                map.off('remove', onRemove)
+            }
+            map.on('style.load', onLoad)
+            map.on('remove', onRemove)
+        })
+    }
+
+    function assertMercatorProjection() {
+        const projection = map.getProjection?.()
+        const type = projection?.type || projection?.name || 'mercator'
+        if (type !== 'mercator') throw new Error(`WebGPU H3 renderer supports Mercator only; received ${type}`)
+    }
+
+    function webgpuChunkColors(chunkSet, chunk) {
+        const colors = new Uint8Array(chunk.data.length * 4)
+        for (let i = 0; i < chunk.data.length; i++) {
+            const rowIndex = chunk.data.rowIndices[i]
+            const value = chunkSet.kind === 'column'
+                ? columnValue(chunkSet.data[chunkSet.valuekey], rowIndex)
+                : chunkSet.data[rowIndex][chunkSet.valuekey]
+            writeColourForValue(value, colors, i * 4)
+        }
+        return colors
+    }
+
+    function removeWebgpuMatrixLayer(layer = webgpuMatrixLayer) {
+        if (webgpuMatrixLayer === layer) webgpuMatrixLayer = null
+        if (layer && map.getLayer(layer.id)) map.removeLayer(layer.id)
+    }
+
+    function destroyWebgpuRenderer(renderer = webgpuRenderer, layer = webgpuMatrixLayer) {
+        if (webgpuRenderer === renderer) {
+            webgpuRenderer = null
+            webgpuRendererInit = null
+        }
+        try {
+            removeWebgpuMatrixLayer(layer)
+        } catch (cleanupError) {
+            console.warn('Failed to remove WebGPU H3 layer', cleanupError)
+        }
+        try {
+            renderer?.destroy()
+        } catch (cleanupError) {
+            console.warn('Failed to destroy WebGPU H3 renderer', cleanupError)
+        }
+    }
+
+    async function fallBackToDeck(error, renderer = webgpuRenderer, layer = webgpuMatrixLayer, generation = webgpuRendererGeneration) {
+        if (generation !== webgpuRendererGeneration) return false
+        webgpuRendererGeneration++
+        destroyWebgpuRenderer(renderer, layer)
+        if (requestedRenderer === 'webgpu') {
+            activeH3Renderer = 'failed'
+            mainLayers = []
+            renderLayers?.(false)
+            console.error('WebGPU H3 renderer failed', error)
+            setLoadProgress(100, 'WebGPU renderer failed')
+            return false
+        }
+        if (webgpuFallback) return webgpuFallback
+        console.warn('WebGPU H3 renderer unavailable; using deck', error)
+        activeH3Renderer = 'deck'
+        const chunkSet = activeWebgpuChunkSet
+        const fallback = (async () => {
+            if (chunkSet?.committed && activeWebgpuChunkSet === chunkSet) {
+                releaseWebgpuChunkSet(chunkSet, null)
+                activeWebgpuChunkSet = null
+                const layer = createH3Layer(chunkSet.data, chunkSet.kind, chunkSet.valuekey)
+                mainLayers = [layer]
+                await renderLayers?.(false)
+            }
+            return true
+        })()
+        webgpuFallback = fallback
+        try {
+            return await fallback
+        } finally {
+            if (webgpuFallback === fallback) webgpuFallback = null
+        }
+    }
+
+    async function ensureH3Renderer() {
+        if (requestedRenderer === 'deck') return 'deck'
+        if (webgpuRenderer) return 'webgpu'
+        if (!webgpuRendererInit) {
+            const generation = ++webgpuRendererGeneration
+            webgpuRendererInit = (async () => {
+                const done = perfTimer('webgpu.renderer.init')
+                let renderer = null
+                let layer = null
+                try {
+                    await waitForMapStyle()
+                    assertMercatorProjection()
+                    renderer = await createPackedH3Renderer({
+                        mapCanvas: map.getCanvas(),
+                        requestRender: () => map.triggerRepaint(),
+                        transitionDuration: COLOUR_TRANSITION_DURATION,
+                        onDeviceLost: (info, failedRenderer) => {
+                            const loss = new Error(info?.message || info?.reason || 'WebGPU device lost')
+                            void fallBackToDeck(loss, failedRenderer, layer, generation)
+                        },
+                    })
+                    if (!renderer) throw new Error('WebGPU adapter or canvas context unavailable')
+                    if (generation !== webgpuRendererGeneration) throw new Error('WebGPU renderer initialization was superseded')
+                    layer = createMapLibreMatrixLayer(renderer)
+                    map.addLayer(layer)
+                    webgpuRenderer = renderer
+                    webgpuMatrixLayer = layer
+                    done({renderer: 'webgpu'})
+                    return 'webgpu'
+                } catch (error) {
+                    done({renderer: 'deck', failed: true})
+                    if (generation === webgpuRendererGeneration) webgpuRendererInit = null
+                    await fallBackToDeck(error, renderer, layer, generation)
+                    if (requestedRenderer === 'webgpu') throw error
+                    return 'deck'
+                }
+            })()
+        }
+        return webgpuRendererInit
+    }
+
+    function configuredH3ChunkResolution(dataResolution) {
+        const value = settings.h3chunkres
+        if (value != null && ['off', 'false', 'none'].includes(String(value).trim().toLowerCase())) return null
+        if (value != null && value !== '') {
+            const resolution = Number(value)
+            if (Number.isInteger(resolution) && resolution >= 0 && resolution < dataResolution) return resolution
+            console.warn(`Ignoring invalid h3chunkres=${value}; expected an integer from 0 to ${dataResolution - 1}, or "off"`)
+        }
+        return dataResolution > 0 ? Math.max(0, dataResolution - 5) : null
+    }
+
+    function stringH3Parent(h3Index, resolution) {
+        let hex = h3Index.toLowerCase()
+        if (hex.length === 16 && hex[0] === '0') hex = hex.slice(1)
+        // A parent retains its prefix and sets every unused 3-bit child digit to 7.
+        const trailingBits = 3 * (15 - resolution)
+        const trailingChars = Math.floor(trailingBits / 4)
+        const partialBits = trailingBits % 4
+        const boundary = hex.length - trailingChars - (partialBits ? 1 : 0)
+        let parent = hex.slice(0, boundary)
+        if (partialBits) parent += (parseInt(hex[boundary], 16) | (2 ** partialBits - 1)).toString(16)
+        parent += 'f'.repeat(trailingChars)
+        return parent[0] + resolution.toString(16) + parent.slice(2)
+    }
+
+    function groupH3Rows(data, kind, rows, chunkResolution) {
+        const groups = new Map()
+        const splitGroups = new Map()
+        const h3Target = [0, 0]
+        for (let i = 0; i < rows; i++) {
+            const h3Index = h3IndexAt(data, kind, 'index', i, h3Target)
+            let chunkKey = 'all'
+            let group = chunkResolution == null ? groups.get(chunkKey) : null
+            let splitUpper = null
+            let splitLower
+            if (chunkResolution != null) {
+                if (typeof h3Index === 'string') {
+                    const hex = h3Index.length === 16 && h3Index[0] === '0' ? h3Index.slice(1) : h3Index
+                    const sourceResolution = parseInt(hex[1], 16)
+                    chunkKey = stringH3Parent(hex, Math.min(chunkResolution, sourceResolution))
+                    group = groups.get(chunkKey)
+                } else {
+                    let [lower, upper] = h3Index
+                    lower >>>= 0
+                    const sourceResolution = (upper >>> 20) & 15
+                    const parentResolution = Math.min(chunkResolution, sourceResolution)
+                    // The resolution occupies bits 20-23 of the upper word; unused digits are low bits.
+                    upper = ((upper >>> 0) & ~(15 << 20)) | (parentResolution << 20)
+                    const trailingBits = 3 * (15 - parentResolution)
+                    if (trailingBits >= 32) {
+                        lower = 0xffffffff
+                        upper |= 2 ** (trailingBits - 32) - 1
+                    } else {
+                        lower |= 2 ** trailingBits - 1
+                    }
+                    lower >>>= 0
+                    upper >>>= 0
+                    splitUpper = upper
+                    splitLower = lower
+                    group = splitGroups.get(upper)?.get(lower)
+                    if (!group) {
+                        chunkKey = splitLongToH3Index(lower, upper)
+                        group = groups.get(chunkKey)
+                    }
+                }
+            }
+            if (!group) {
+                group = {key: chunkKey, rows: []}
+                groups.set(chunkKey, group)
+            }
+            if (splitUpper != null) {
+                let byLower = splitGroups.get(splitUpper)
+                if (!byLower) splitGroups.set(splitUpper, byLower = new Map())
+                byLower.set(splitLower, group)
+            }
+            group.rows.push(i)
+        }
+        return groups
+    }
+
+    function mapBoundsWithPadding(padding = 0) {
+        const bounds = map.getBounds()
+        if (!bounds) return null
+        const rawWest = bounds.getWest()
+        let longitudeSpan = bounds.getEast() - rawWest
+        while (longitudeSpan < 0) longitudeSpan += 360
+        const longitudeCenter = rawWest + longitudeSpan / 2
+        longitudeSpan = Math.min(360, longitudeSpan * (1 + padding * 2))
+
+        const rawSouth = bounds.getSouth()
+        const rawNorth = bounds.getNorth()
+        const latitudeCenter = (rawSouth + rawNorth) / 2
+        const latitudeSpan = Math.min(180, (rawNorth - rawSouth) * (1 + padding * 2))
+        return {
+            west: longitudeCenter - longitudeSpan / 2,
+            east: longitudeCenter + longitudeSpan / 2,
+            south: Math.max(-90, latitudeCenter - latitudeSpan / 2),
+            north: Math.min(90, latitudeCenter + latitudeSpan / 2),
+            longitudeSpan,
+        }
+    }
+
+    function chunkIntersectsBounds(chunk, bounds) {
+        if (!bounds || chunk.bounds.north < bounds.south || chunk.bounds.south > bounds.north) return false
+        if (bounds.longitudeSpan >= 360 || chunk.bounds.longitudeSpan >= 360) return true
+        const viewportCenter = (bounds.west + bounds.east) / 2
+        const chunkCenter = (chunk.bounds.west + chunk.bounds.east) / 2
+        const shift = Math.round((viewportCenter - chunkCenter) / 360) * 360
+        return chunk.bounds.west + shift <= bounds.east && chunk.bounds.east + shift >= bounds.west
+    }
+
+    function packedChunkBounds(geometry, chunkKey) {
+        if (chunkKey === 'all') return {west: -180, east: 180, south: -90, north: 90, longitudeSpan: 360}
+        const [, referenceLongitude] = cellToLatLng(chunkKey)
+        let west = Infinity, east = -Infinity, south = Infinity, north = -Infinity
+        for (let i = 0; i < geometry.positions.length; i += 2) {
+            const rawLongitude = geometry.positions[i]
+            const longitude = referenceLongitude + ((rawLongitude - referenceLongitude + 540) % 360) - 180
+            const latitude = geometry.positions[i + 1]
+            if (longitude < west) west = longitude
+            if (longitude > east) east = longitude
+            if (latitude < south) south = latitude
+            if (latitude > north) north = latitude
+        }
+        return {west, east, south, north, longitudeSpan: east - west}
+    }
+
+    function selectWebgpuChunks(chunkSet, retainCurrent = true) {
+        const renderer = webgpuRenderer
+        if (!renderer) throw new Error('WebGPU H3 renderer is unavailable')
+        const startedAt = now()
+        const loadBounds = mapBoundsWithPadding(H3_CHUNK_LOAD_PADDING)
+        const retainBounds = retainCurrent ? mapBoundsWithPadding(H3_CHUNK_RETAIN_PADDING) : null
+        const selected = []
+        for (const chunk of chunkSet.chunks) {
+            if (chunkIntersectsBounds(chunk, loadBounds) ||
+                (retainBounds && chunk.active && chunkIntersectsBounds(chunk, retainBounds))) {
+                selected.push(chunk)
+            }
+        }
+        if (selected.length === chunkSet.activeChunks.length && selected.every((chunk, i) => chunk === chunkSet.activeChunks[i])) return false
+
+        const nextChunks = new Set(selected)
+        const removed = chunkSet.activeChunks.filter(chunk => !nextChunks.has(chunk))
+        const added = selected.filter(chunk => !chunk.active)
+        const uploaded = []
+        try {
+            for (const chunk of added) {
+                renderer.addChunk(chunk.rendererId, chunk.geometry, webgpuChunkColors(chunkSet, chunk))
+                uploaded.push(chunk)
+            }
+        } catch (error) {
+            for (const chunk of uploaded) renderer.removeChunk(chunk.rendererId)
+            throw error
+        }
+        for (const chunk of removed) renderer.removeChunk(chunk.rendererId)
+        for (const chunk of removed) chunk.active = false
+        for (const chunk of added) chunk.active = true
+        chunkSet.activeChunks = selected
+        logPerf('webgpu.h3_chunks.select', now() - startedAt, {
+            chunks: selected.length,
+            rows: selected.reduce((sum, chunk) => sum + chunk.data.length, 0),
+            totalChunks: chunkSet.chunks.length,
+        })
+        if (chunkSet.committed) renderLayers(false)
+        return true
+    }
+
+    function releaseWebgpuChunkSet(chunkSet, renderer = webgpuRenderer) {
+        if (!chunkSet) return
+        for (const chunk of chunkSet.activeChunks) {
+            renderer?.removeChunk(chunk.rendererId)
+            chunk.active = false
+        }
+        chunkSet.activeChunks = []
+        chunkSet.committed = false
+    }
+
+    let chunkSelectionFrame = null
+    updateVisibleH3Chunks = immediate => {
+        const select = () => {
+            if (!activeWebgpuChunkSet || activeH3Renderer !== 'webgpu') return
+            try {
+                selectWebgpuChunks(activeWebgpuChunkSet)
+            } catch (error) {
+                if (requestedRenderer === 'auto') void fallBackToDeck(error)
+                else console.error('WebGPU H3 chunk selection failed', error)
+            }
+        }
+        if (immediate) {
+            if (chunkSelectionFrame !== null) cancelAnimationFrame(chunkSelectionFrame)
+            chunkSelectionFrame = null
+            select()
+            return
+        }
+        if (chunkSelectionFrame !== null) return
+        chunkSelectionFrame = requestAnimationFrame(() => {
+            chunkSelectionFrame = null
+            select()
+        })
+    }
+
+    function createWebgpuChunkSet(data, kind, valuekey) {
+        const chunkSetId = nextH3ChunkSetId++
+        const rows = kind === 'column' ? h3RowCount(data) : data.length
+        const accessors = chunkHexAccessors(kind, 'index', valuekey, writeColourForValue)
+        const dataResolution = rows ? getResolution(h3IndexAt(data, kind, 'index', 0)) : null
+        let chunkResolution = dataResolution == null ? null : configuredH3ChunkResolution(dataResolution)
+        if (dataResolution != null) dataH3Res = dataResolution
+
+        const doneGroup = detailPerfTimer('deck.h3_chunks.group', {rows, dataResolution, chunkResolution})
+        let groups = groupH3Rows(data, kind, rows, chunkResolution)
+        if (settings.h3chunkres == null || settings.h3chunkres === '') {
+            while (groups.size > H3_CHUNK_MAX_COUNT && chunkResolution > 0) {
+                chunkResolution--
+                groups = groupH3Rows(data, kind, rows, chunkResolution)
+            }
+        }
+        if (groups.size > H3_CHUNK_MAX_COUNT) console.warn(`H3 chunking created ${groups.size} chunks; consider a lower h3chunkres`)
+        doneGroup({chunks: groups.size, chunkResolution})
+
+        const donePack = detailPerfTimer('deck.h3_chunks.pack', {rows, chunks: groups.size, chunkResolution})
+        const chunks = []
+        let vertices = 0
+        let triangles = 0
+        for (const group of groups.values()) {
+            const rowIndices = Uint32Array.from(group.rows)
+            group.rows = null
+            const chunkData = {src: data, rowIndices, length: rowIndices.length}
+            const geometry = packH3Geometry(chunkData, {getHexagon: accessors.getHexagon})
+            vertices += geometry.vertexCount
+            triangles += geometry.triangleCount
+            chunks.push({
+                key: group.key,
+                rendererId: `${chunkSetId}:${group.key}`,
+                data: chunkData,
+                geometry,
+                bounds: packedChunkBounds(geometry, group.key),
+                active: false,
+            })
+        }
+        chunks.sort((a, b) => a.key.localeCompare(b.key))
+        donePack({vertices, triangles})
+
+        const chunkSet = {
+            isWebgpuH3: true,
+            data,
+            rowCount: rows,
+            kind,
+            valuekey,
+            accessors,
+            chunks,
+            activeChunks: [],
+            committed: false,
+        }
+        return chunkSet
+    }
+
+    async function createMainH3Renderable(data, kind, valuekey) {
+        const renderer = await ensureH3Renderer()
+        return renderer === 'webgpu'
+            ? createWebgpuChunkSet(data, kind, valuekey)
+            : createH3Layer(data, kind, valuekey)
+    }
+
     function refreshH3LayerColours() {
+        if (activeH3Renderer === 'webgpu') {
+            const active = activeWebgpuChunkSet
+            if (!active?.committed || !webgpuRenderer) return Promise.resolve()
+            for (const chunk of active.activeChunks) {
+                webgpuRenderer.updateColors(chunk.rendererId, webgpuChunkColors(active, chunk))
+            }
+            return renderLayers(false)
+        }
+
         const active = activeH3Layer
         const layerIndex = active ? mainLayers.indexOf(active.layer) : -1
         if (layerIndex < 0) return Promise.resolve()
@@ -1625,7 +2073,12 @@ function bootstrap(meta = {}){
 
     function updateViewportQuantiles(source, visibleIndices = null) {
         const state = viewportQuantileState
-        if (!state || state.source !== source || !activeH3Layer || !mainLayers.includes(activeH3Layer.layer)) return
+        if (!state || state.source !== source) return
+        if (activeH3Renderer === 'webgpu') {
+            if (!activeWebgpuChunkSet?.committed || activeWebgpuChunkSet.data !== state.data) return
+        } else if (!activeH3Layer || !mainLayers.includes(activeH3Layer.layer)) {
+            return
+        }
 
         let sample
         if (source === 'cartogram') {
@@ -2088,7 +2541,6 @@ function bootstrap(meta = {}){
     let reloadNum = 0
     const getHexData = async publishLayer => {
         const doneGetHexData = perfTimer('data.reload.total', {file: file_name, ext, layer: format.layer})
-        activeH3Layer = null
         viewportQuantileState = null
         h3DataRowLookup = null
         hideMapHoverTooltip()
@@ -2167,11 +2619,13 @@ function bootstrap(meta = {}){
             }
 
             setLoadStage('Preparing map layer')
-            const doneDeckLayer = perfTimer('deck.hex_layer.create', {rows: dataCols.value.length, renderer: 'packed', pickable: false, h3Index: hasSplitH3Index(dataCols) ? 'split' : 'string'})
-            const deckLayer = createH3Layer(dataCols, 'column', valuekey)
-            doneDeckLayer()
+            const mapRenderable = await measurePerf(
+                'deck.hex_layer.create',
+                {rows: dataCols.value.length, renderer: requestedRenderer, pickable: false, h3Index: hasSplitH3Index(dataCols) ? 'split' : 'string'},
+                () => createMainH3Renderable(dataCols, 'column', valuekey),
+            )
             // Cartogram I/O must not delay the geographic map.
-            await publishLayer(deckLayer)
+            await publishLayer(mapRenderable)
 
             const failCartogram = error => {
                 cartoValueCol = null
@@ -2344,7 +2798,7 @@ function bootstrap(meta = {}){
             }
 
             doneGetHexData({rows: dataCols.value.length, cartogramRows: cartoAggCols ? cartoAggCols.x.length : 0, h3Index: hasSplitH3Index(dataCols) ? 'split' : 'string'})
-            return deckLayer
+            return mapRenderable
         }
 
         let loaded
@@ -2446,9 +2900,7 @@ function bootstrap(meta = {}){
             setLoadStage('Preparing map layer')
             if (format.kind === 'column') window._columnData = data
             const rows = format.kind === 'column' ? data.value.length : data.length
-            const doneDeckLayer = perfTimer('deck.hex_layer.create', {rows, renderer: 'packed', pickable: false, h3Index: format.kind === 'column' && hasSplitH3Index(data) ? 'split' : 'string'})
-            const layer = createH3Layer(data, format.kind, valuekey)
-            doneDeckLayer()
+            const layer = await measurePerf('deck.hex_layer.create', {rows, renderer: requestedRenderer, pickable: false, h3Index: format.kind === 'column' && hasSplitH3Index(data) ? 'split' : 'string'}, () => createMainH3Renderable(data, format.kind, valuekey))
             doneGetHexData({rows, h3Index: format.kind === 'column' && hasSplitH3Index(data) ? 'split' : 'string'})
             return layer
         }
@@ -2815,6 +3267,8 @@ function bootstrap(meta = {}){
                 if (settled) return
                 settled = true
                 clearTimeout(timer)
+                const index = deckRenderWaiters.indexOf(finish)
+                if (index >= 0) deckRenderWaiters.splice(index, 1)
                 done()
                 resolve()
             }
@@ -2829,24 +3283,40 @@ function bootstrap(meta = {}){
         if (showTrains) {
             layers.push(choochoo)
         }
-        const rendered = waitForNextDeckRender(5000, trackProgress)
+        const deckRendered = layers.length ? waitForNextDeckRender(5000, trackProgress) : null
+        const waitingWebgpuRenderer = activeH3Renderer === 'webgpu' ? webgpuRenderer : null
+        let webgpuTimer = null
+        const webgpuRendered = waitingWebgpuRenderer
+            ? Promise.race([
+                waitingWebgpuRenderer.waitForRender(),
+                new Promise((_, reject) => {
+                    webgpuTimer = setTimeout(() => reject(new Error('WebGPU H3 render timed out')), 5000)
+                }),
+            ]).finally(() => clearTimeout(webgpuTimer)).catch(async error => {
+                if (requestedRenderer !== 'auto') throw error
+                if (webgpuRenderer === waitingWebgpuRenderer) await fallBackToDeck(error)
+            })
+            : null
         const doneSetLayers = (trackProgress ? perfTimer : detailPerfTimer)('deck.set_layers', {layers: layers.length})
         mapOverlay.setProps({layers, onAfterRender: onDeckAfterRender})
+        waitingWebgpuRenderer?.requestRender()
         doneSetLayers()
-        return rendered
+        return Promise.all([deckRendered, webgpuRendered].filter(Boolean))
     }
 
     let updateRunning = false
     let updatePending = false
 
     const updateOnce = async () => {
-        const doneMapReady = perfTimer('app.load_to_map_ready', {file: file_name, ext, layer: format.layer, renderer: 'packed', pickable: false, cartogramWeightsFile})
+        const doneMapReady = perfTimer('app.load_to_map_ready', {file: file_name, ext, layer: format.layer, renderer: requestedRenderer, pickable: false, cartogramWeightsFile})
         if (loadProgress.complete) resetLoadProgress('Reloading data')
-        const publishEarly = mainLayers.length === 0
+        const publishEarly = mainLayers.length === 0 && !activeWebgpuChunkSet?.committed
         deferLegend = !publishEarly
         pendingLegend = null
         const previousState = {
             activeH3Layer,
+            activeWebgpuChunkSet,
+            activeH3Renderer,
             viewportQuantileState,
             h3DataRowLookup,
             dataH3Res,
@@ -2867,12 +3337,33 @@ function bootstrap(meta = {}){
         let mapReady = false
         const publishLayer = async layer => {
             commitPendingLegend()
-            mainLayers = [layer]
+            const previousWebgpuSet = activeWebgpuChunkSet
+            if (layer?.isWebgpuH3) {
+                selectWebgpuChunks(layer, false)
+                activeWebgpuChunkSet = layer
+                activeH3Renderer = 'webgpu'
+                activeH3Layer = null
+                layer.committed = true
+                mainLayers = []
+                if (previousWebgpuSet && previousWebgpuSet !== layer) releaseWebgpuChunkSet(previousWebgpuSet)
+            } else {
+                if (previousWebgpuSet) releaseWebgpuChunkSet(previousWebgpuSet)
+                activeWebgpuChunkSet = null
+                activeH3Renderer = 'deck'
+                if (activeH3Layer?.layer !== layer) activeH3Layer = null
+                mainLayers = layer ? [layer] : []
+            }
             await renderLayers()
             if (!mapReady) {
-                const layerData = layer?.props?.data
+                const layerData = layer?.isWebgpuH3 ? layer.data : layer?.props?.data
                 const layerSource = layerData?.src || layerData
-                doneMapReady({rows: layerData?.length ?? null, h3Index: hasSplitH3Index(layerSource) ? 'split' : 'string'})
+                doneMapReady({
+                    rows: layer?.rowCount ?? layerData?.length ?? null,
+                    chunks: layer?.chunks?.length ?? null,
+                    visibleChunks: layer?.activeChunks?.length ?? null,
+                    renderer: activeH3Renderer,
+                    h3Index: hasSplitH3Index(layerSource) ? 'split' : 'string',
+                })
                 mapReady = true
             }
         }
@@ -2889,7 +3380,12 @@ function bootstrap(meta = {}){
             finishLoadProgress()
         } catch (e) {
             if (!mapReady) doneMapReady({failed: true})
+            if (activeWebgpuChunkSet && activeWebgpuChunkSet !== previousState.activeWebgpuChunkSet) {
+                releaseWebgpuChunkSet(activeWebgpuChunkSet)
+            }
             activeH3Layer = previousState.activeH3Layer
+            activeWebgpuChunkSet = previousState.activeWebgpuChunkSet
+            activeH3Renderer = previousState.activeH3Renderer
             viewportQuantileState = previousState.viewportQuantileState
             h3DataRowLookup = previousState.h3DataRowLookup
             dataH3Res = previousState.dataH3Res
@@ -2908,10 +3404,19 @@ function bootstrap(meta = {}){
             pendingLegend = null
             legendVersion++
             legendDiv.replaceChildren(...(previousState.legend ? [previousState.legend] : []))
-            if (mainLayers !== previousState.layers) {
+            if (activeWebgpuChunkSet && activeH3Renderer === 'webgpu') {
+                try {
+                    await ensureH3Renderer()
+                    selectWebgpuChunks(activeWebgpuChunkSet, false)
+                    activeWebgpuChunkSet.committed = true
+                    mainLayers = []
+                } catch (restoreError) {
+                    console.error('Failed to restore previous WebGPU renderer', restoreError)
+                }
+            } else if (mainLayers !== previousState.layers) {
                 mainLayers = previousState.layers
-                await renderLayers(false)
             }
+            await renderLayers(false)
             console.error(e)
             setLoadProgress(100, 'Load failed')
             loadProgress.complete = true
@@ -3006,9 +3511,14 @@ function bootstrap(meta = {}){
         const host = window.location.hostname.includes(':') ? `[${window.location.hostname}]` : window.location.hostname
         const socket = new WebSocket(`${protocol}://${host}:1990`)
         let updateStarted = false
+        let updateTimer = null
         const startUpdate = (delay = 0) => {
             updateStarted = true
-            setTimeout(update, delay)
+            clearTimeout(updateTimer)
+            updateTimer = setTimeout(() => {
+                updateTimer = null
+                update()
+            }, delay)
         }
         socket.addEventListener("error", () => {
             console.warn("WebSocket error, automatic updates disabled")
@@ -3095,6 +3605,7 @@ function bootstrap(meta = {}){
     }
 
     map.on('moveend', (event) => {
+        updateVisibleH3Chunks?.(true)
         const original = event && event.originalEvent
         const originalInMap = eventStartedInMap(original)
         const programmaticSyncReason = mapProgrammaticSyncReason
