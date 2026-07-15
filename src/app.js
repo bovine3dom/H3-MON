@@ -13,6 +13,7 @@ import 'maplibre-gl/dist/maplibre-gl.css'
 import * as observablehq from './vendor/observablehq' // from https://observablehq.com/@d3/color-legend
 import {getCitiesStartsWith} from 'tiny-geocoder'
 import {render_cartogram} from './cartogram'
+import {PackedH3FillTransitionExtension} from './packed-h3-fill-transition'
 
 const params = new URLSearchParams(window.location.search)
 function settingEnabled(value, fallback = false) {
@@ -1414,6 +1415,9 @@ function bootstrap(meta = {}){
     const colourPaletteCss = new Array(COLOUR_PALETTE_SIZE)
     const colourPaletteRgba = new Uint8Array(COLOUR_PALETTE_SIZE * 4)
     const colourTransition = {duration: COLOUR_TRANSITION_DURATION, easing: d3.easeCubicInOut}
+    const packedH3FillTransition = COLOUR_TRANSITION_DURATION
+        ? new PackedH3FillTransitionExtension(colourTransition)
+        : null
     let colourVersion = 0
     let activeH3Layer = null
     let viewportQuantileState = null
@@ -1510,8 +1514,8 @@ function bootstrap(meta = {}){
             id: 'H3HexagonLayer',
             data: h3DeckSource(kind, data),
             ...accessors,
+            extensions: packedH3FillTransition ? [packedH3FillTransition] : [],
             updateTriggers: {getFillColor: [colourVersion]},
-            // Binary colour transitions allocate large transform-feedback buffers and fail on mobile WebGL.
             pickable: false,
         })
         activeH3Layer = {layer}
