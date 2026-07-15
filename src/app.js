@@ -56,6 +56,7 @@ const loadProgress = {
     timer: null,
     estimates: {},
     complete: false,
+    finishToken: 0,
 }
 
 const LOAD_PROGRESS_ESTIMATE_KEY = 'h3mon-load-progress-estimates-v1'
@@ -277,6 +278,7 @@ function finishLoadTask(id, elapsed) {
 
 function resetLoadProgress(label = 'Loading…') {
     if (!loadProgress.root) return
+    loadProgress.finishToken++
     loadProgress.value = 0
     configureLoadProgress()
     loadProgress.complete = false
@@ -297,6 +299,7 @@ function finishLoadProgress() {
     loadProgress.active.clear()
     loadProgress.completedWork = loadProgress.totalWork
     loadProgress.complete = true
+    const finishToken = ++loadProgress.finishToken
     setLoadStage('Finishing render')
     loadProgress.bar.style.width = '100%'
 
@@ -305,13 +308,14 @@ function finishLoadProgress() {
         if (settled) return
         settled = true
         loadProgress.bar.removeEventListener('transitionend', onTransitionEnd)
+        if (finishToken !== loadProgress.finishToken) return
         loadProgress.value = 100
         loadProgress.percent.textContent = '100%'
         loadProgress.label.textContent = 'Ready'
         loadProgress.root.setAttribute('aria-valuenow', '100')
         loadProgress.root.setAttribute('aria-label', 'Ready')
         setTimeout(() => {
-            if (loadProgress.complete) document.body.classList.add('load-complete')
+            if (finishToken === loadProgress.finishToken && loadProgress.complete) document.body.classList.add('load-complete')
         }, 700)
     }
     const onTransitionEnd = event => {
@@ -1478,7 +1482,8 @@ function bootstrap(meta = {}){
             return {
                 getHexagon: (_, {index, data, target}) => h3IndexInputAt(data.src, index, target),
                 getFillColor: (_, {index, data, target}) => {
-                    const v = columnValue(data.src[valuekey], index)
+                    const column = data.src[valuekey]
+                    const v = column ? columnValue(column, index) : null
                     return writeColourValue(v, target)
                 }
             }
@@ -1508,14 +1513,14 @@ function bootstrap(meta = {}){
     function refreshH3LayerColours() {
         const active = activeH3Layer
         const layerIndex = active ? mainLayers.indexOf(active.layer) : -1
-        if (layerIndex < 0) return
+        if (layerIndex < 0) return Promise.resolve()
 
         colourVersion++
         const layer = active.layer.clone({updateTriggers: {getFillColor: [colourVersion]}})
         active.layer = layer
         mainLayers = mainLayers.slice()
         mainLayers[layerIndex] = layer
-        renderLayers()
+        return renderLayers(false)
     }
 
     function buildH3Centers(data, kind) {
@@ -2038,7 +2043,7 @@ function bootstrap(meta = {}){
     }
 
     let reloadNum = 0
-    const getHexData = async () => {
+    const getHexData = async (publishLayer, publishEarly) => {
         const doneGetHexData = perfTimer('data.reload.total', {file: file_name, ext, layer: format.layer})
         activeH3Layer = null
         viewportQuantileState = null
@@ -2096,10 +2101,21 @@ function bootstrap(meta = {}){
                 : null
             const h3res = schemaHasH3Index && h3RowCount(dataCols) ? getResolution(h3IndexInputAt(dataCols, 0)) : null
             dataH3Res = h3res
-            let valuekey = 'value'
+            const valuekey = doQuantiles ? 'quantile' : 'value'
             let getquantileFn
             let getvalueFn
             let cartoValueCol = null
+
+            window._columnData = dataCols
+            window.raw_data = dataCols
+            let deckLayer
+
+            if (publishEarly && cartogramEnabled && schemaHasH3Index) {
+                const doneDeckLayer = perfTimer('deck.hex_layer.create', {rows: dataCols.value.length, renderer: 'packed', pickable: false, h3Index: hasSplitH3Index(dataCols) ? 'split' : 'string'})
+                deckLayer = createH3Layer(dataCols, 'column', valuekey)
+                doneDeckLayer()
+                await publishLayer(deckLayer)
+            }
 
             if (doQuantiles && !useCartogramQuantiles) {
                 setLoadStage('Calculating quantiles')
@@ -2111,21 +2127,11 @@ function bootstrap(meta = {}){
                 const doneQuantileAssign = perfTimer('data.quantile.assign', {rows: values.length})
                 dataCols.quantile = assignQuantiles(values, getquantile)
                 doneQuantileAssign()
-                valuekey = 'quantile'
                 makeLegend(getvalueFn)
                 setLoadStage('Quantiles ready')
+                if (deckLayer) await refreshH3LayerColours()
             } else if (!doQuantiles) {
                 makeLegend()
-            }
-
-            window._columnData = dataCols
-            window.raw_data = dataCols
-            let deckLayer
-
-            if (!useCartogramQuantiles || !doQuantiles) {
-                const doneDeckLayer = perfTimer('deck.hex_layer.create', {rows: dataCols.value.length, renderer: 'packed', pickable: false, h3Index: hasSplitH3Index(dataCols) ? 'split' : 'string'})
-                deckLayer = createH3Layer(dataCols, 'column', valuekey)
-                doneDeckLayer()
             }
 
             if (cartogramEnabled && schemaHasH3Index) {
@@ -2162,7 +2168,7 @@ function bootstrap(meta = {}){
                         const doneDataQuantiles = perfTimer('cartogram.quantile.assign_data', {rows: values.length})
                         dataCols.quantile = assignQuantiles(values, getquantile)
                         doneDataQuantiles()
-                        valuekey = 'quantile'
+                        if (deckLayer) await refreshH3LayerColours()
                     }
                     if (doQuantiles && getquantileFn) {
                         const cartoValues = cartoAggCols[cartoValueCol]
@@ -2189,6 +2195,7 @@ function bootstrap(meta = {}){
                             data_col: cartoDataCol,
                             onviewchange_callback: (data, visibleIndices) => updateViewportQuantiles('cartogram', visibleIndices),
                             onclick_callback: (data, event, i) => {
+                                if (updateRunning) return
                                 try {
                                     syncLog('cartogram.click.callback', {
                                         row: i,
@@ -2219,6 +2226,7 @@ function bootstrap(meta = {}){
                                 }
                             },
                             onmove_callback: (data, visibleIndices) => {
+                                if (updateRunning) return
                                 keyboardTarget = 'cartogram'
                                 const contributorH3 = cartogramCellsH3Strings(visibleIndices)
                                 const anchorH3 = cartogramCellsAnchorH3Strings(visibleIndices)
@@ -2266,8 +2274,8 @@ function bootstrap(meta = {}){
                 const doneQuantileAssign = perfTimer('data.quantile.assign', {rows: values.length, fallback: 'no-cartogram'})
                 dataCols.quantile = assignQuantiles(values, getquantile)
                 doneQuantileAssign()
-                valuekey = 'quantile'
                 makeLegend(getvalueFn)
+                if (deckLayer) await refreshH3LayerColours()
             }
 
             if (doQuantiles && getquantileFn) {
@@ -2678,7 +2686,7 @@ function bootstrap(meta = {}){
     map.addControl(new maplibregl.NavigationControl())
 
     mapContainer.addEventListener('click', async event => {
-        if (dataH3Res == null || event.button !== 0) return
+        if (updateRunning || dataH3Res == null || event.button !== 0) return
         const target = event.target
         if (target?.closest && target.closest('#search-container, .maplibregl-ctrl, .maplibregl-popup, .h3-click-popup, .pane-btn')) return
         try {
@@ -2772,8 +2780,8 @@ function bootstrap(meta = {}){
         for (const resolve of waiters) resolve()
     }
 
-    function waitForNextDeckRender(timeout = 5000) {
-        const done = perfTimer('deck.after_render')
+    function waitForNextDeckRender(timeout = 5000, trackProgress = true) {
+        const done = (trackProgress ? perfTimer : detailPerfTimer)('deck.after_render')
         return new Promise(resolve => {
             let settled = false
             const finish = () => {
@@ -2788,37 +2796,111 @@ function bootstrap(meta = {}){
         })
     }
 
-    renderLayers = () => {
+    renderLayers = (trackProgress = true) => {
         const layers = [...mainLayers]
         if (highlightLayer) layers.push(highlightLayer)
         if (showTrains) {
             layers.push(choochoo)
         }
-        const rendered = waitForNextDeckRender()
-        const doneSetLayers = perfTimer('deck.set_layers', {layers: layers.length})
+        const rendered = waitForNextDeckRender(5000, trackProgress)
+        const doneSetLayers = (trackProgress ? perfTimer : detailPerfTimer)('deck.set_layers', {layers: layers.length})
         mapOverlay.setProps({layers, onAfterRender: onDeckAfterRender})
         doneSetLayers()
         return rendered
     }
 
-    const update = () => {
+    let updateRunning = false
+    let updatePending = false
+
+    const updateOnce = async () => {
         const doneMapReady = perfTimer('app.load_to_map_ready', {file: file_name, ext, layer: format.layer, renderer: 'packed', pickable: false, cartogramWeightsFile})
         if (loadProgress.complete) resetLoadProgress('Reloading data')
-        getHexData()
-            .then(async x => {
-                mainLayers = [x]
-                await renderLayers()
-                const layerData = x?.props?.data
+        const publishEarly = mainLayers.length === 0
+        deferLegend = !publishEarly
+        pendingLegend = null
+        const previousState = {
+            activeH3Layer,
+            viewportQuantileState,
+            h3DataRowLookup,
+            dataH3Res,
+            cartogramInit,
+            cartogramWeightsFile,
+            cartogramRawCols,
+            cartogramAgg,
+            cartoAggCols,
+            cartoRes,
+            h3toXY,
+            h3toXYPromise,
+            cartogramApi,
+            columnData: window._columnData,
+            rawData: window.raw_data,
+            layers: mainLayers,
+            legend: legendDiv.lastElementChild,
+        }
+        let mapReady = false
+        const publishLayer = async layer => {
+            commitPendingLegend()
+            mainLayers = [layer]
+            await renderLayers()
+            if (!mapReady) {
+                const layerData = layer?.props?.data
                 const layerSource = layerData?.src || layerData
                 doneMapReady({rows: layerData?.length ?? null, h3Index: hasSplitH3Index(layerSource) ? 'split' : 'string'})
-                finishLoadProgress()
-            })
-            .catch(e => {
-                doneMapReady({failed: true})
-                console.error(e)
-                setLoadProgress(100, 'Load failed')
-                loadProgress.complete = true
-            })
+                mapReady = true
+            }
+        }
+
+        try {
+            const layer = await getHexData(publishLayer, publishEarly)
+            if (!mapReady) {
+                await publishLayer(layer)
+            }
+            finishLoadProgress()
+        } catch (e) {
+            if (!mapReady) doneMapReady({failed: true})
+            activeH3Layer = previousState.activeH3Layer
+            viewportQuantileState = previousState.viewportQuantileState
+            h3DataRowLookup = previousState.h3DataRowLookup
+            dataH3Res = previousState.dataH3Res
+            cartogramInit = previousState.cartogramInit
+            cartogramWeightsFile = previousState.cartogramWeightsFile
+            cartogramRawCols = previousState.cartogramRawCols
+            cartogramAgg = previousState.cartogramAgg
+            cartoAggCols = previousState.cartoAggCols
+            cartoRes = previousState.cartoRes
+            h3toXY = previousState.h3toXY
+            h3toXYPromise = previousState.h3toXYPromise
+            cartogramApi = previousState.cartogramApi
+            window._columnData = previousState.columnData
+            window.raw_data = previousState.rawData
+            deferLegend = false
+            pendingLegend = null
+            legendVersion++
+            legendDiv.replaceChildren(...(previousState.legend ? [previousState.legend] : []))
+            if (mainLayers !== previousState.layers) {
+                mainLayers = previousState.layers
+                await renderLayers(false)
+            }
+            console.error(e)
+            setLoadProgress(100, 'Load failed')
+            loadProgress.complete = true
+        }
+    }
+
+    const update = async () => {
+        if (updateRunning) {
+            updatePending = true
+            return
+        }
+        updateRunning = true
+        try {
+            do {
+                updatePending = false
+                await updateOnce()
+            } while (updatePending)
+        } finally {
+            updateRunning = false
+        }
     }
 
     window.d3 = d3
@@ -2832,8 +2914,14 @@ function bootstrap(meta = {}){
     legendDiv.id = "observable_legend"
     l.insertBefore(legendDiv, l.firstChild)
     let legendVersion = 0
+    let deferLegend = false
+    let pendingLegend = null
     // todo: read impressum from metadata too
     function replaceLegend(legend) {
+        if (deferLegend) {
+            pendingLegend = legend
+            return
+        }
         const previous = legendDiv.lastElementChild
         const version = ++legendVersion
         if (!previous || !COLOUR_TRANSITION_DURATION) {
@@ -2850,6 +2938,14 @@ function bootstrap(meta = {}){
             .on('end', () => {
                 if (version === legendVersion) legendDiv.replaceChildren(legend)
             })
+    }
+
+    function commitPendingLegend() {
+        deferLegend = false
+        if (!pendingLegend) return
+        const legend = pendingLegend
+        pendingLegend = null
+        replaceLegend(legend)
     }
 
     async function makeLegend(fmt) {
