@@ -61,7 +61,7 @@ Implemented renderer features:
 `src/webgpu/direct-h3-backend.js` connects `H3ComputeModule` to a GPU
 ear-clipping pass and a procedural triangle render pipeline:
 
-- Resolutions 4 through 8 are accepted, including mixed supported resolutions.
+- Resolutions 0 through 10 are accepted, including mixed supported resolutions.
 - Up to eight triangles and 24 procedural vertices are reserved per source cell.
 - Concave boundaries are triangulated rather than rendered as a fixed fan.
 - Geometry remains GPU-resident; only a 16-byte aggregate validation record is
@@ -91,7 +91,7 @@ The API accepts little-endian lower/upper `u32` H3 ID words and emits one
 
 Implemented compute coverage:
 
-- H3 resolutions 4 through 8.
+- H3 resolutions 0 through 10.
 - Hexagons and pentagons.
 - Pentagon descendant rotation and deleted subsequence validation.
 - FaceIJK overage adjustment and face transforms.
@@ -267,6 +267,18 @@ lifecycle, triangulation, and ownership changes:
   failed closed explicitly and reached `Ready` through deck in auto mode.
 - Zoom 16 failed closed and removed the overlay explicitly; auto mode waited for
   and published a deck frame.
+- Boundary parity exhaustively covered all 122 resolution-0, 842 resolution-1,
+  5,882 resolution-2, and 41,162 resolution-3 cells. Resolutions 0-2 had no
+  `1e-7` failures; three polar resolution-3 points reached a maximum error of
+  `1.780360079361998e-7`.
+- Direct triangulation passed all 41,162 resolution-3 cells and deterministic
+  global/pentagon samples at every resolution 0-10.
+- The application reached `Ready` with one mixed chunk containing every
+  resolution 0-10. Resolution 11 failed closed explicitly and reached `Ready`
+  through deck in auto mode.
+- Resolution 11 produced a degenerate final triangle in the direct validation
+  sample, with increasingly frequent failures at resolutions 13-15. The public
+  range therefore stops at 10 rather than claiming incomplete higher support.
 
 ## Known Correctness Issues
 
@@ -280,6 +292,8 @@ These remain after the lifecycle fixes:
   resolution-5 data grouped under resolution-0 parents.
 - Direct compute emits absolute `f32` Mercator boundaries before origin
   subtraction, so zooms above 14 are deliberately rejected or sent to deck.
+- Resolutions 11-15 remain disabled until boundary output becomes origin-relative
+  before `f32` rounding and high-resolution triangulation is revalidated.
 - Parent-derived chunk bounds use a conservative heuristic rather than bounds
   proven from every member cell; unusual descendants could still be culled.
 
@@ -358,7 +372,7 @@ Resolved in the continuation:
   emit robust triangle indices/vertices from compute instead of assuming it.
 - [x] Preserve one source-cell ID per primitive for color lookup.
 - [ ] Replace absolute `f32` compute output so direct rendering can safely exceed
-  the current zoom-14 guard.
+  resolution 10 and the current zoom-14 guard.
 - [x] Fail closed and fall back if any valid source cell returns a non-success
   compute status.
 - [x] Avoid CPU `packH3Geometry()` in direct mode after screenshot parity was

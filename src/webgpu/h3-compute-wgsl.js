@@ -9,14 +9,14 @@
  * tables are adapted from H3 4.4.1. Copyright 2016-2024 Uber Technologies,
  * Inc., used under the Apache License, Version 2.0.
  *
- * This file has been modified to support complete resolutions 4-8 topology,
- * fixed Web Mercator output records, validation, and explicit status values.
+ * This file supports validated resolutions 0-10 with fixed Web Mercator output
+ * records, validation, and explicit status values.
  * Full notices are in h3-compute-NOTICES.md.
  */
 
 export const H3_COMPUTE_WGSL = /* wgsl */ `
-const H3_MIN_RESOLUTION: u32 = 4u;
-const H3_MAX_RESOLUTION: u32 = 8u;
+const H3_MIN_RESOLUTION: u32 = 0u;
+const H3_MAX_RESOLUTION: u32 = 10u;
 const H3_INDEX_MAX_RESOLUTION: u32 = 15u;
 const H3_MAX_BASE_CELL: u32 = 121u;
 const H3_UNUSED_DIGIT: u32 = 7u;
@@ -304,18 +304,24 @@ fn h3_get_face_basis_low(face: u32) -> H3FaceBasis {
 
 fn h3_get_max_dimension(resolution: u32) -> i32 {
     switch resolution {
+        case 0u: { return 2; }
+        case 2u: { return 14; }
         case 4u: { return 98; }
         case 6u: { return 686; }
         case 8u: { return 4802; }
+        case 10u: { return 33614; }
         default: { return -1; }
     }
 }
 
 fn h3_get_unit_scale(resolution: u32) -> i32 {
     switch resolution {
+        case 0u: { return 1; }
+        case 2u: { return 7; }
         case 4u: { return 49; }
         case 6u: { return 343; }
         case 8u: { return 2401; }
+        case 10u: { return 16807; }
         default: { return -1; }
     }
 }
@@ -691,19 +697,27 @@ fn h3_ijk_to_hex2d(coord: vec3<i32>) -> vec2<f32> {
 fn h3_projection_scale(resolution: u32, substrate: bool) -> vec2<f32> {
     if (substrate) {
         switch resolution {
+            case 0u: { return vec2<f32>(0.127322003750035, 5.046812967535175e-10); }
+            case 2u: { return vec2<f32>(0.01818885767857643, -7.261791723500721e-10); }
             case 4u: { return vec2<f32>(0.0025984082397966317, 9.5829241677364285e-11); }
-            case 5u: { return vec2<f32>(0.00037120117711380446, 9.5322015255042136e-12); }
             case 6u: { return vec2<f32>(0.00037120117711380451, 9.5322015797143223e-12); }
-            case 7u, 8u: { return vec2<f32>(0.000053028739587686342, -1.9739070810818535e-13); }
+            case 8u: { return vec2<f32>(0.000053028739587686342, -1.9739070810818535e-13); }
+            case 10u: { return vec2<f32>(0.00000757553422681234, -2.819866702066711e-14); }
             default: { return vec2<f32>(0.0); }
         }
     }
     switch resolution {
+        case 0u: { return vec2<f32>(0.381966011250105, -1.3387117192564801e-8); }
+        case 1u: { return vec2<f32>(0.14436958214958249, -5.152625437432334e-9); }
+        case 2u: { return vec2<f32>(0.054566573035729286, -3.158923400636837e-10); }
+        case 3u: { return vec2<f32>(0.020624226021368928, 6.218714432293382e-11); }
         case 4u: { return vec2<f32>(0.0077952247193898956, -1.7817356184196553e-10); }
         case 5u: { return vec2<f32>(0.0029463180030527025, 1.0866843752968536e-10); }
         case 6u: { return vec2<f32>(0.0011136035313414135, 5.7700435141666562e-11); }
         case 7u: { return vec2<f32>(0.00042090257186467174, 7.2086823272796141e-12); }
         case 8u: { return vec2<f32>(0.00015908621876305903, -4.2301509246400054e-12); }
+        case 9u: { return vec2<f32>(0.000060128938837810285, -5.29321974706426e-13); }
+        case 10u: { return vec2<f32>(0.00002272660268043702, -8.459599936793544e-14); }
         default: { return vec2<f32>(0.0); }
     }
 }

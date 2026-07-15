@@ -654,6 +654,7 @@ const COLOUR_TRANSITION_DURATION = window.matchMedia('(prefers-reduced-motion: r
 const H3_CHUNK_LOAD_PADDING = 0.5
 const H3_CHUNK_RETAIN_PADDING = 0.75
 const H3_CHUNK_MAX_COUNT = 512
+const H3_DIRECT_MAX_RESOLUTION = 10
 const H3_DIRECT_MAX_ZOOM = 14
 
 function hasSplitH3Index(cols) {
@@ -2153,9 +2154,12 @@ function bootstrap(meta = {}){
                 : createH3Layer(data, kind, valuekey)
         }
         const chunkSet = createWebgpuChunkSet(data, kind, valuekey)
-        const unsupported = chunkSet.resolutions.filter(resolution => resolution < 4 || resolution > 8)
+        const unsupported = chunkSet.resolutions.filter(resolution => resolution > H3_DIRECT_MAX_RESOLUTION)
         if (unsupported.length) {
-            const error = new Error(`Direct WebGPU H3 rendering supports resolutions 4-8; received ${unsupported.join(', ')}`)
+            const error = new Error(
+                `Direct WebGPU H3 rendering supports resolutions 0-${H3_DIRECT_MAX_RESOLUTION}; ` +
+                `received ${unsupported.join(', ')}`,
+            )
             error.name = 'DirectH3UnsupportedResolutionError'
             if (requestedRenderer === 'webgpu') throw error
             console.warn('Direct WebGPU H3 renderer unavailable; using deck', error)
