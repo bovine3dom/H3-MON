@@ -1,3 +1,10 @@
+import {
+    createDirectH3Backend,
+    DIRECT_H3_VERTICES_PER_CELL,
+    popGpuErrorScopes,
+    pushGpuErrorScopes,
+} from './direct-h3-backend.js'
+
 /**
  * Standalone WebGPU overlay for `faster-h3-for-deckgl` packed H3 geometry.
  *
@@ -41,6 +48,7 @@ const NO_HIGHLIGHT = 0xffffffff
 const STYLE_UNIFORM_SIZE = 16
 const MATRIX_SIZE = 16
 const MATRIX_BYTES = MATRIX_SIZE * 4
+const MAX_WORLD_COPY_RADIUS = 1024
 
 const BUFFER_USAGE = globalThis.GPUBufferUsage || {
     COPY_DST: 0x0008,
@@ -87,9 +95,8 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
     let matrix = mat4x4<f32>(input.matrix0, input.matrix1, input.matrix2, input.matrix3);
     let clip = matrix * vec4<f32>(input.position, 0.0, 1.0);
     var output: VertexOutput;
-    // This canvas is depthless. A midpoint z converts the GL matrix's depth
-    // range into WebGPU's range without changing x, y, or perspective.
-    output.position = vec4<f32>(clip.xy, clip.w * 0.5, clip.w);
+    // Convert the MapLibre/WebGL clip depth from [-w, w] to WebGPU's [0, w].
+    output.position = vec4<f32>(clip.xy, 0.5 * (clip.z + clip.w), clip.w);
     output.cell = input.cell;
     return output;
 }
@@ -127,6 +134,29 @@ function finiteNumber(value, label) {
     const number = Number(value)
     if (!Number.isFinite(number)) throw new TypeError(`${label} must be finite`)
     return number
+}
+
+function abortError(reason) {
+    if (reason instanceof Error) return reason
+    const error = new Error(reason == null ? 'Packed H3 render wait was aborted' : String(reason))
+    error.name = 'AbortError'
+    return error
+}
+
+function timeoutError(message) {
+    const error = new Error(message)
+    error.name = 'TimeoutError'
+    return error
+}
+
+export function assertMercatorProjection(map) {
+    if (!map || typeof map.getProjection !== 'function') throw new TypeError('MapLibre map must expose getProjection()')
+    const projection = map.getProjection()?.type ?? 'mercator'
+    if (projection === 'mercator') return projection
+    const error = new Error(`WebGPU packed H3 renderer supports Mercator only; received ${projection}`)
+    error.name = 'UnsupportedProjectionError'
+    error.projectionType = projection
+    throw error
 }
 
 function byte(value, label) {
@@ -360,7 +390,9 @@ function prepareWorldCopies(value) {
     if (value === true || value == null) value = 1
 
     if (typeof value === 'number') {
-        if (!Number.isInteger(value) || value < 0) throw new RangeError('worldCopies must be a non-negative radius')
+        if (!Number.isSafeInteger(value) || value < 0 || value > MAX_WORLD_COPY_RADIUS) {
+            throw new RangeError(`worldCopies must be a non-negative safe integer no greater than ${MAX_WORLD_COPY_RADIUS}`)
+        }
         return value
     }
 
@@ -371,7 +403,7 @@ function prepareWorldCopies(value) {
     const seen = new Set()
     for (const entry of value) {
         const copy = finiteNumber(entry, 'world copy')
-        if (!Number.isInteger(copy)) throw new RangeError('World copy indices must be integers')
+        if (!Number.isSafeInteger(copy)) throw new RangeError('World copy indices must be safe integers')
         if (!seen.has(copy)) {
             seen.add(copy)
             copies.push(copy)
@@ -383,8 +415,9 @@ function prepareWorldCopies(value) {
 function worldCopiesForChunk(config, centerMercatorX, originX) {
     if (typeof config !== 'number') return config
     const centerCopy = Math.round(centerMercatorX - originX)
+    if (!Number.isSafeInteger(centerCopy)) throw new RangeError('Map center produces an unsafe world copy index')
     const copies = []
-    for (let copy = centerCopy - config; copy <= centerCopy + config; copy++) copies.push(copy)
+    for (let offset = -config; offset <= config; offset++) copies.push(centerCopy + offset)
     return copies
 }
 
@@ -488,7 +521,7 @@ function createPipeline(device, format, sampleCount) {
 }
 
 class PackedH3Renderer {
-    constructor({adapter, device, context, canvas, mapCanvas, format, pipeline, bindGroupLayout, options}) {
+    constructor({adapter, device, context, canvas, mapCanvas, format, pipeline, bindGroupLayout, directBackend, options}) {
         this.adapter = adapter
         this.device = device
         this.context = context
@@ -502,11 +535,18 @@ class PackedH3Renderer {
 
         this._pipeline = pipeline
         this._bindGroupLayout = bindGroupLayout
+        this._directBackend = directBackend
         this._transitionDuration = Math.max(0, finiteNumber(options.transitionDuration ?? 0, 'transitionDuration'))
         this._worldCopiesConfig = prepareWorldCopies(options.worldCopies)
         this._centerMercatorX = 0.5
         this._requestRenderCallback = options.requestRender || null
         this._onDeviceLost = options.onDeviceLost || null
+        this._onError = options.onError || null
+        this._maxDirectCells = options.maxDirectCells ?? 500000
+        if (!Number.isSafeInteger(this._maxDirectCells) || this._maxDirectCells < 0) {
+            throw new RangeError('maxDirectCells must be a non-negative safe integer')
+        }
+        this._directCellCount = 0
         this._chunks = new Map()
         this._highlight = null
         this._matrix = null
@@ -557,12 +597,54 @@ class PackedH3Renderer {
         })
     }
 
+    _createCommonChunk(id, packedColors, buffers) {
+        const colorFromBuffer = createBuffer(
+            this.device,
+            `packed-h3 ${id} colors from`,
+            BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_DST,
+            packedColors,
+        )
+        buffers.push(colorFromBuffer)
+        const colorToBuffer = createBuffer(
+            this.device,
+            `packed-h3 ${id} colors to`,
+            BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_DST,
+            packedColors,
+        )
+        buffers.push(colorToBuffer)
+        const styleBuffer = this.device.createBuffer({
+            label: `packed-h3 ${id} style`,
+            size: STYLE_UNIFORM_SIZE,
+            usage: BUFFER_USAGE.UNIFORM | BUFFER_USAGE.COPY_DST,
+        })
+        buffers.push(styleBuffer)
+        const styleStaging = new ArrayBuffer(STYLE_UNIFORM_SIZE)
+        return {
+            id,
+            cellCount: packedColors.length,
+            colorFromBuffer,
+            colorToBuffer,
+            styleBuffer,
+            styleStaging,
+            styleFloats: new Float32Array(styleStaging),
+            styleUints: new Uint32Array(styleStaging),
+            colorsFrom: packedColors,
+            colorsTo: packedColors,
+            transitionStart: 0,
+            transitionDuration: 0,
+            matrixByteOffset: 0,
+            frameWorldCopies: [],
+        }
+    }
+
     _destroyChunk(chunk) {
-        chunk.positionBuffer.destroy()
-        chunk.indexBuffer.destroy()
+        chunk.positionBuffer?.destroy()
+        chunk.indexBuffer?.destroy()
+        chunk.direct?.destroy()
         chunk.colorFromBuffer.destroy()
         chunk.colorToBuffer.destroy()
         chunk.styleBuffer.destroy()
+        if (chunk.kind === 'direct') this._directCellCount = Math.max(0, this._directCellCount - chunk.cellCount)
     }
 
     _releaseGpuResources() {
@@ -574,6 +656,9 @@ class PackedH3Renderer {
         this._matrixStaging = null
         this._msaaTexture?.destroy()
         this._msaaTexture = null
+        this._directBackend?.destroy()
+        this._directBackend = null
+        this._directCellCount = 0
         this.context.unconfigure?.()
     }
 
@@ -684,19 +769,24 @@ class PackedH3Renderer {
         for (const waiter of waiters) waiter.reject(error)
     }
 
-    _finishWaiters(frame) {
+    _finishWaiters(frame, scopeError = Promise.resolve(null)) {
         const waiters = this._waiters.splice(0)
-        if (!waiters.length) return
-        let completion
+        let submitted
         try {
-            completion = typeof this.device.queue.onSubmittedWorkDone === 'function'
+            submitted = typeof this.device.queue.onSubmittedWorkDone === 'function'
                 ? this.device.queue.onSubmittedWorkDone()
                 : Promise.resolve()
         } catch (error) {
             for (const waiter of waiters) waiter.reject(error)
+            this._handleAsyncError(error)
             return
         }
-        completion.then(() => {
+        Promise.all([submitted, scopeError]).then(([, gpuError]) => {
+            if (gpuError) {
+                for (const waiter of waiters) waiter.reject(gpuError)
+                this._handleAsyncError(gpuError)
+                return
+            }
             if (this.state === 'ready') {
                 for (const waiter of waiters) waiter.resolve(frame)
             } else {
@@ -705,6 +795,7 @@ class PackedH3Renderer {
             }
         }, error => {
             for (const waiter of waiters) waiter.reject(error)
+            this._handleAsyncError(error)
         })
     }
 
@@ -719,13 +810,41 @@ class PackedH3Renderer {
         this._rejectWaiters(this._terminalError)
         this._releaseGpuResources()
         this.canvas.style.visibility = 'hidden'
+        this.canvas.remove()
         if (this._onDeviceLost) {
             try {
-                this._onDeviceLost(info, this)
+                Promise.resolve(this._onDeviceLost(info, this)).catch(error => {
+                    console.error('Packed H3 onDeviceLost callback failed', error)
+                })
             } catch (error) {
                 console.error('Packed H3 onDeviceLost callback failed', error)
             }
         }
+    }
+
+    _handleAsyncError(error) {
+        if (this.state !== 'ready') return
+        this.state = 'failed'
+        this._terminalError = error instanceof Error
+            ? error
+            : new Error(error?.message || String(error), {cause: error})
+        this._requestQueued = false
+        this._requestRenderCallback = null
+        this._resizeObserver?.disconnect()
+        this._rejectWaiters(this._terminalError)
+        this._releaseGpuResources()
+        this.canvas.style.visibility = 'hidden'
+        this.canvas.remove()
+        if (this._onError) {
+            try {
+                Promise.resolve(this._onError(this._terminalError, this)).catch(callbackError => {
+                    console.error('Packed H3 onError callback failed', callbackError)
+                })
+            } catch (callbackError) {
+                console.error('Packed H3 onError callback failed', callbackError)
+            }
+        }
+        if (this.state !== 'destroyed') this.device.destroy()
     }
 
     /**
@@ -745,64 +864,125 @@ class PackedH3Renderer {
         this._checkBufferSize(packedColors.byteLength, `Chunk "${id}" colors`, true)
 
         const buffers = []
+        let scopes = null
         try {
+            scopes = pushGpuErrorScopes(this.device)
             const positionBuffer = createBuffer(this.device, `packed-h3 ${id} vertices`, BUFFER_USAGE.VERTEX, prepared.vertexData)
             buffers.push(positionBuffer)
             const indexBuffer = createBuffer(this.device, `packed-h3 ${id} indices`, BUFFER_USAGE.INDEX, prepared.indices)
             buffers.push(indexBuffer)
-            const colorFromBuffer = createBuffer(
-                this.device,
-                `packed-h3 ${id} colors from`,
-                BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_DST,
-                packedColors,
-            )
-            buffers.push(colorFromBuffer)
-            const colorToBuffer = createBuffer(
-                this.device,
-                `packed-h3 ${id} colors to`,
-                BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_DST,
-                packedColors,
-            )
-            buffers.push(colorToBuffer)
-            const styleBuffer = this.device.createBuffer({
-                label: `packed-h3 ${id} style`,
-                size: STYLE_UNIFORM_SIZE,
-                usage: BUFFER_USAGE.UNIFORM | BUFFER_USAGE.COPY_DST,
-            })
-            buffers.push(styleBuffer)
-
-            const styleStaging = new ArrayBuffer(STYLE_UNIFORM_SIZE)
             const chunk = {
-                id,
-                cellCount: prepared.cellCount,
+                ...this._createCommonChunk(id, packedColors, buffers),
+                kind: 'packed',
+                ready: false,
                 indexCount: prepared.indices.length,
                 originX: prepared.originX,
                 originY: prepared.originY,
                 positionBuffer,
                 indexBuffer,
-                colorFromBuffer,
-                colorToBuffer,
-                styleBuffer,
-                styleStaging,
-                styleFloats: new Float32Array(styleStaging),
-                styleUints: new Uint32Array(styleStaging),
-                colorsFrom: packedColors,
-                colorsTo: packedColors,
-                transitionStart: 0,
-                transitionDuration: 0,
                 bindGroup: null,
-                matrixByteOffset: 0,
-                frameWorldCopies: [],
             }
             chunk.bindGroup = this._createBindGroup(chunk)
             this._chunks.set(id, chunk)
+            const scopeError = popGpuErrorScopes(this.device, scopes)
+            scopes = null
+            chunk.readyPromise = scopeError.then(gpuError => {
+                if (gpuError) throw gpuError
+                if (this.state !== 'ready' || this._chunks.get(id) !== chunk) {
+                    throw this._terminalError || new Error(`Packed H3 chunk "${id}" was removed before it became ready`)
+                }
+                chunk.ready = true
+                this._markDirty()
+                return true
+            }).catch(error => {
+                chunk.error = error
+                if (this.state === 'ready' && this._chunks.get(id) === chunk) this._handleAsyncError(error)
+                throw error
+            })
+            void chunk.readyPromise.catch(() => {})
         } catch (error) {
+            if (scopes) void popGpuErrorScopes(this.device, scopes).catch(() => {})
             for (const buffer of buffers) buffer.destroy()
             throw error
         }
 
         this._markDirty()
         return this
+    }
+
+    /** Add source-order H3 ID words and generate boundaries and triangles on the GPU. */
+    addH3Chunk(id, ids, colors, {origin} = {}) {
+        this._assertReady()
+        if (!this._directBackend) throw new Error('Direct H3 compute was not enabled for this renderer')
+        if (typeof id !== 'string' || !id) throw new TypeError('Chunk id must be a non-empty string')
+        if (this._chunks.has(id)) throw new Error(`Chunk "${id}" already exists`)
+        const lower = ids?.lower
+        const upper = ids?.upper
+        if (!(lower instanceof Uint32Array) || !(upper instanceof Uint32Array) || lower.length !== upper.length) {
+            throw new TypeError('Direct H3 ids require equal-length Uint32Array lower and upper words')
+        }
+        if (this._directCellCount + lower.length > this._maxDirectCells) {
+            const error = new Error(`Direct H3 chunks would contain ${this._directCellCount + lower.length} cells, exceeding maxDirectCells ${this._maxDirectCells}`)
+            error.name = 'DirectH3CapacityError'
+            throw error
+        }
+
+        const packedColors = packColors(colors, lower.length)
+        this._checkBufferSize(packedColors.byteLength, `Chunk "${id}" colors`, true)
+        const buffers = []
+        let direct = null
+        let scopes = null
+        try {
+            scopes = pushGpuErrorScopes(this.device)
+            const chunk = {
+                ...this._createCommonChunk(id, packedColors, buffers),
+                kind: 'direct',
+                ready: false,
+                direct: null,
+                bindGroup: null,
+            }
+            direct = this._directBackend.createChunk(id, {lower, upper}, origin, chunk)
+            const scopeError = popGpuErrorScopes(this.device, scopes)
+            scopes = null
+            chunk.direct = direct
+            chunk.originX = direct.originX
+            chunk.originY = direct.originY
+            chunk.bindGroup = direct.renderBindGroup
+            this._chunks.set(id, chunk)
+            this._directCellCount += chunk.cellCount
+            chunk.readyPromise = Promise.all([direct.ready, scopeError]).then(([, gpuError]) => {
+                if (gpuError) throw gpuError
+                if (this.state !== 'ready' || this._chunks.get(id) !== chunk) {
+                    throw this._terminalError || new Error(`Direct H3 chunk "${id}" was removed before it became ready`)
+                }
+                chunk.ready = true
+                this._markDirty()
+                return true
+            }).catch(error => {
+                chunk.error = error
+                if (this.state === 'ready' && this._chunks.get(id) === chunk) this._handleAsyncError(error)
+                throw error
+            })
+            void chunk.readyPromise.catch(() => {})
+        } catch (error) {
+            if (scopes) void popGpuErrorScopes(this.device, scopes).catch(() => {})
+            direct?.destroy()
+            for (const buffer of buffers) buffer.destroy()
+            throw error
+        }
+
+        this._markDirty()
+        return this
+    }
+
+    /** Resolve after the named chunks pass GPU status validation. */
+    waitForChunks(ids) {
+        this._assertReady()
+        return Promise.all(Array.from(ids, id => {
+            const chunk = this._chunks.get(id)
+            if (!chunk) throw new Error(`Unknown chunk "${id}"`)
+            return chunk.readyPromise || true
+        }))
     }
 
     /** Remove a chunk and immediately destroy all of its GPU buffers. */
@@ -933,16 +1113,50 @@ class PackedH3Renderer {
      */
     render(matrix, options = {}) {
         if (this.state !== 'ready') return false
-        if (matrix !== undefined) this._setView(matrix, options)
         this._requestQueued = false
+        let scopes = null
+        try {
+            scopes = pushGpuErrorScopes(this.device)
+            const result = this._renderFrame(matrix, options)
+            const scopeError = popGpuErrorScopes(this.device, scopes)
+            scopes = null
+            if (!result) {
+                this._finishWaiters(this._frame, scopeError)
+                return false
+            }
+            this._finishWaiters(result.frame, scopeError)
+            if (result.transitioning) this._scheduleRenderRequest()
+            return true
+        } catch (error) {
+            if (scopes) void popGpuErrorScopes(this.device, scopes).catch(() => {})
+            this._needsRender = false
+            this._rejectWaiters(error)
+            throw error
+        }
+    }
+
+    _renderFrame(matrix, options) {
+        if (matrix !== undefined) this._setView(matrix, options)
         this._syncCanvasSize()
-        if (!this.canvas.width || !this.canvas.height) return false
+        if (!this.canvas.width || !this.canvas.height) {
+            this._needsRender = false
+            this._rejectWaiters(new Error('Packed H3 overlay canvas has zero area'))
+            return false
+        }
 
         const drawChunks = []
         let matrixCount = 0
+        let pendingChunks = false
+        for (const chunk of this._chunks.values()) {
+            if (!chunk.ready) {
+                pendingChunks = true
+                break
+            }
+        }
         if (this._matrix) {
             for (const chunk of this._chunks.values()) {
-                if (!chunk.indexCount) continue
+                if (!chunk.ready) continue
+                if (chunk.kind === 'packed' ? !chunk.indexCount : !chunk.cellCount) continue
                 chunk.frameWorldCopies = worldCopiesForChunk(
                     this._worldCopiesConfig,
                     this._centerMercatorX,
@@ -996,41 +1210,44 @@ class PackedH3Renderer {
             this.device.queue.writeBuffer(chunk.styleBuffer, 0, chunk.styleStaging)
         }
 
-        try {
-            const encoder = this.device.createCommandEncoder({label: 'packed-h3 frame'})
-            const canvasView = this.context.getCurrentTexture().createView()
-            const pass = encoder.beginRenderPass({
-                label: 'packed-h3 transparent overlay',
-                colorAttachments: [{
-                    view: this._msaaTexture ? this._msaaTexture.createView() : canvasView,
-                    resolveTarget: this._msaaTexture ? canvasView : undefined,
-                    clearValue: {r: 0, g: 0, b: 0, a: 0},
-                    loadOp: 'clear',
-                    storeOp: this._msaaTexture ? 'discard' : 'store',
-                }],
-            })
-            if (matrixCount) {
-                pass.setPipeline(this._pipeline)
-                for (const chunk of drawChunks) {
-                    pass.setBindGroup(0, chunk.bindGroup)
+        const encoder = this.device.createCommandEncoder({label: 'packed-h3 frame'})
+        const canvasView = this.context.getCurrentTexture().createView()
+        const pass = encoder.beginRenderPass({
+            label: 'packed-h3 transparent overlay',
+            colorAttachments: [{
+                view: this._msaaTexture ? this._msaaTexture.createView() : canvasView,
+                resolveTarget: this._msaaTexture ? canvasView : undefined,
+                clearValue: {r: 0, g: 0, b: 0, a: 0},
+                loadOp: 'clear',
+                storeOp: this._msaaTexture ? 'discard' : 'store',
+            }],
+        })
+        if (matrixCount) {
+            let pipeline = null
+            for (const chunk of drawChunks) {
+                const nextPipeline = chunk.kind === 'direct' ? this._directBackend.renderPipeline : this._pipeline
+                if (pipeline !== nextPipeline) {
+                    pipeline = nextPipeline
+                    pass.setPipeline(pipeline)
+                }
+                pass.setBindGroup(0, chunk.bindGroup)
+                if (chunk.kind === 'direct') {
+                    pass.setVertexBuffer(0, this._matrixBuffer, chunk.matrixByteOffset)
+                    pass.draw(DIRECT_H3_VERTICES_PER_CELL * chunk.cellCount, chunk.frameWorldCopies.length)
+                } else {
                     pass.setVertexBuffer(0, chunk.positionBuffer)
                     pass.setVertexBuffer(1, this._matrixBuffer, chunk.matrixByteOffset)
                     pass.setIndexBuffer(chunk.indexBuffer, 'uint32')
                     pass.drawIndexed(chunk.indexCount, chunk.frameWorldCopies.length)
                 }
             }
-            pass.end()
-            this.device.queue.submit([encoder.finish()])
-        } catch (error) {
-            this._rejectWaiters(error)
-            throw error
         }
+        pass.end()
+        this.device.queue.submit([encoder.finish()])
 
         const frame = ++this._frame
-        this._needsRender = transitioning
-        this._finishWaiters(frame)
-        if (transitioning) this._scheduleRenderRequest()
-        return true
+        this._needsRender = transitioning || pendingChunks
+        return {frame, pendingChunks, transitioning}
     }
 
     /** Submit only a transparent clear, retaining chunks and the matrix. */
@@ -1050,9 +1267,52 @@ class PackedH3Renderer {
      * This requests a host frame but does not invent a render loop when no
      * `requestRender` callback is configured.
      */
-    waitForRender() {
+    waitForRender({timeout = 5000, signal} = {}) {
         if (this.state !== 'ready') return Promise.reject(this._terminalError || new Error(`Packed H3 renderer is ${this.state}`))
-        const promise = new Promise((resolve, reject) => this._waiters.push({resolve, reject}))
+        try {
+            timeout = finiteNumber(timeout, 'timeout')
+        } catch (error) {
+            return Promise.reject(error)
+        }
+        if (timeout < 0) return Promise.reject(new RangeError('timeout must be non-negative'))
+        if (signal?.aborted) return Promise.reject(abortError(signal.reason))
+
+        const ownerDocument = this.canvas.ownerDocument
+        let waiter
+        const promise = new Promise((resolve, reject) => {
+            let settled = false
+            let timer = null
+            let remaining = timeout
+            let visibleSince = null
+            const settle = (callback, value) => {
+                if (settled) return
+                settled = true
+                clearTimeout(timer)
+                signal?.removeEventListener?.('abort', onAbort)
+                ownerDocument?.removeEventListener?.('visibilitychange', armTimer)
+                const index = this._waiters.indexOf(waiter)
+                if (index >= 0) this._waiters.splice(index, 1)
+                callback(value)
+            }
+            const onAbort = () => waiter.reject(abortError(signal.reason))
+            const armTimer = () => {
+                if (visibleSince !== null) remaining -= now() - visibleSince
+                visibleSince = null
+                clearTimeout(timer)
+                if (ownerDocument?.hidden) return
+                visibleSince = now()
+                timer = setTimeout(() => waiter.reject(timeoutError(`Packed H3 render timed out after ${timeout} visible ms`)), Math.max(0, remaining))
+            }
+            waiter = {
+                resolve: value => settle(resolve, value),
+                reject: error => settle(reject, error),
+            }
+            this._waiters.push(waiter)
+            signal?.addEventListener?.('abort', onAbort, {once: true})
+            ownerDocument?.addEventListener?.('visibilitychange', armTimer)
+            if (signal?.aborted) onAbort()
+            else armTimer()
+        })
         this._markDirty()
         return promise
     }
@@ -1090,6 +1350,8 @@ export function isWebGPUSupported() {
  * - `worldCopies`: false, true, integer radius, or exact world-index iterable.
  * - `powerPreference`, `forceFallbackAdapter`, `deviceDescriptor`: WebGPU init.
  * - `onDeviceLost(info, renderer)`: terminal device-loss notification.
+ * - `onError(error, renderer)`: asynchronous compute/validation failure.
+ * - `enableH3Compute`: initialize the direct H3 boundary backend.
  * - `className`, `zIndex`: overlay canvas presentation hooks.
  */
 export async function createPackedH3Renderer(options = {}) {
@@ -1101,6 +1363,9 @@ export async function createPackedH3Renderer(options = {}) {
     }
     if (options.onDeviceLost != null && typeof options.onDeviceLost !== 'function') {
         throw new TypeError('onDeviceLost must be a function')
+    }
+    if (options.onError != null && typeof options.onError !== 'function') {
+        throw new TypeError('onError must be a function')
     }
     const sampleCount = options.sampleCount ?? 4
     if (![1, 4].includes(sampleCount)) throw new RangeError('sampleCount must be 1 or 4')
@@ -1116,6 +1381,7 @@ export async function createPackedH3Renderer(options = {}) {
     let device
     let canvas
     let context
+    let directBackend
     try {
         device = await adapter.requestDevice(options.deviceDescriptor)
         canvas = createOverlayCanvas(mapCanvas, options)
@@ -1128,6 +1394,9 @@ export async function createPackedH3Renderer(options = {}) {
         const format = gpu.getPreferredCanvasFormat()
         context.configure({device, format, alphaMode: 'premultiplied'})
         const {pipeline, bindGroupLayout} = await createPipeline(device, format, sampleCount)
+        directBackend = options.enableH3Compute
+            ? await createDirectH3Backend(device, format, sampleCount)
+            : null
         return new PackedH3Renderer({
             adapter,
             device,
@@ -1137,9 +1406,11 @@ export async function createPackedH3Renderer(options = {}) {
             format,
             pipeline,
             bindGroupLayout,
+            directBackend,
             options,
         })
     } catch (error) {
+        directBackend?.destroy()
         context?.unconfigure?.()
         canvas?.remove()
         device?.destroy()
@@ -1160,31 +1431,64 @@ export function createMapLibreMatrixLayer(renderer, {
     id = 'webgpu-packed-h3-matrix',
     worldCopies = 1,
     destroyOnRemove = false,
+    onRenderError = null,
+    onLayerRemove = null,
 } = {}) {
     if (!renderer || typeof renderer.render !== 'function') throw new TypeError('A packed H3 renderer is required')
+    if (onRenderError != null && typeof onRenderError !== 'function') throw new TypeError('onRenderError must be a function')
+    if (onLayerRemove != null && typeof onLayerRemove !== 'function') throw new TypeError('onLayerRemove must be a function')
     worldCopies = prepareWorldCopies(worldCopies)
     let map = null
+    let errorQueued = false
+
+    function reportRenderError(error) {
+        if (!onRenderError) throw error
+        if (errorQueued) return
+        errorQueued = true
+        const failedMap = map
+        const report = () => {
+            errorQueued = false
+            if (map !== failedMap) return
+            try {
+                Promise.resolve(onRenderError(error, renderer)).catch(callbackError => {
+                    console.error('Packed H3 onRenderError callback failed', callbackError)
+                })
+            } catch (callbackError) {
+                console.error('Packed H3 onRenderError callback failed', callbackError)
+            }
+        }
+        if (typeof queueMicrotask === 'function') queueMicrotask(report)
+        else Promise.resolve().then(report)
+    }
+
     return {
         id,
         type: 'custom',
         renderingMode: '2d',
         onAdd(mapInstance) {
             map = mapInstance
+            assertMercatorProjection(map)
             renderer.setRequestRender(() => map?.triggerRepaint())
             renderer.requestRender()
         },
         render(_gl, renderArgs) {
-            const matrix = renderArgs?.modelViewProjectionMatrix
-            if (!matrix || renderer.state !== 'ready') return
-            const longitude = Number(map?.getCenter().lng) || 0
-            const worldSize = MAPLIBRE_WORLD_SIZE_AT_ZOOM_ZERO * 2 ** map.getZoom()
-            renderer.render(matrix, {
-                worldCopies,
-                centerMercatorX: (longitude + 180) / 360,
-                worldSize,
-            })
+            try {
+                assertMercatorProjection(map)
+                const matrix = renderArgs?.modelViewProjectionMatrix
+                if (!matrix || renderer.state !== 'ready') return
+                const longitude = Number(map.getCenter().lng) || 0
+                const worldSize = MAPLIBRE_WORLD_SIZE_AT_ZOOM_ZERO * 2 ** map.getZoom()
+                renderer.render(matrix, {
+                    worldCopies,
+                    centerMercatorX: (longitude + 180) / 360,
+                    worldSize,
+                })
+            } catch (error) {
+                reportRenderError(error)
+            }
         },
         onRemove() {
+            errorQueued = false
             renderer.setRequestRender(null)
             if (destroyOnRemove) {
                 renderer.destroy()
@@ -1196,6 +1500,15 @@ export function createMapLibreMatrixLayer(renderer, {
                 }
             }
             map = null
+            if (onLayerRemove) {
+                try {
+                    Promise.resolve(onLayerRemove(renderer)).catch(error => {
+                        console.error('Packed H3 onLayerRemove callback failed', error)
+                    })
+                } catch (error) {
+                    console.error('Packed H3 onLayerRemove callback failed', error)
+                }
+            }
         },
     }
 }

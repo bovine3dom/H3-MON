@@ -17,7 +17,9 @@ The intended end state is:
 
 ## Current Status
 
-The proof of concept has two separate pieces. They are not connected yet.
+The compute and rendering paths are now integrated. The CPU-packed renderer
+remains the default WebGPU geometry mode and A/B reference; direct GPU geometry
+is opt-in with `h3gpu=compute`.
 
 ### Live WebGPU overlay
 
@@ -30,10 +32,13 @@ The proof of concept has two separate pieces. They are not connected yet.
 | `renderer=webgpu` | Explicit WebGPU overlay; errors are surfaced |
 | `renderer=auto` | Attempts WebGPU and falls back to deck.gl |
 
-The live WebGPU renderer currently receives geometry produced by the CPU
-`packH3Geometry()` function. It proves camera alignment, color transitions,
-chunk activation, transparent composition, world copies, and buffer handling,
-but it does **not** yet remove the expensive H3 CPU packing step.
+`h3gpu=packed` uses CPU-packed geometry and remains the default.
+`h3gpu=compute` uploads source-order H3 IDs and colors, computes boundaries and
+ear-clipped triangles on the renderer's existing GPU device, and renders without
+geometry readback.
+
+The packed mode receives geometry produced by `packH3Geometry()`. Direct mode
+does not invoke it unless auto mode needs to fall back to deck.gl.
 
 Implemented renderer features:
 
@@ -47,6 +52,25 @@ Implemented renderer features:
 - Four-sample MSAA.
 - Render completion promises, resource destruction, and device-loss handling.
 - WebGPU absence is non-fatal in `renderer=auto`.
+- Transactional direct-chunk validation before old chunks are removed.
+- Frame-level WebGPU validation, internal-error, and out-of-memory scopes.
+- Renderer-generation ownership across initialization, removal, and fallback.
+
+### Direct H3 rendering
+
+`src/webgpu/direct-h3-backend.js` connects `H3ComputeModule` to a GPU
+ear-clipping pass and a procedural triangle render pipeline:
+
+- Resolutions 4 through 8 are accepted, including mixed supported resolutions.
+- Up to eight triangles and 24 procedural vertices are reserved per source cell.
+- Concave boundaries are triangulated rather than rendered as a fixed fan.
+- Geometry remains GPU-resident; only a 16-byte aggregate validation record is
+  read back before a chunk becomes visible.
+- Per-cell world shifting handles antimeridian cells before origin subtraction.
+- Duplicate and numerically collinear projected vertices are reduced.
+- Direct mode is currently limited to zoom 14 and 500,000 resident cells.
+- Unsupported input or a GPU validation failure fails closed in explicit mode
+  and switches to deck.gl in auto mode.
 
 ### H3 compute kernel
 
@@ -78,7 +102,7 @@ Implemented compute coverage:
   the first f32 trigonometric implementation.
 
 The compute module can create its own adapter/device or use a caller-owned
-device. Supplying the renderer's device is the likely integration route.
+device. Direct rendering supplies the packed renderer's existing device.
 
 ## Existing H3 Chunking
 
@@ -104,6 +128,10 @@ unchunked path, including antimeridian views and viewport recoloring.
 - `npm run build` passes.
 - `node --check` passes for the standalone compute JavaScript modules.
 - `git diff --check` passes.
+
+The continuation re-ran `npm run build`, `node --check` for `src/app.js`, the
+packed renderer, and the direct backend, and `git diff --check` after the final
+changes.
 
 ### Packed WebGPU renderer
 
@@ -145,8 +173,16 @@ The post-fix software-Vulkan parity run reported:
 
 The run reported no status, topology, boundary-count, unused-slot, or `1e-7`
 tolerance failures. This final shader revision has not been independently
-re-run on a native hardware WebGPU adapter and must be validated there before
-integration.
+re-run exhaustively on a native hardware WebGPU adapter and must still receive
+broader hardware coverage before integration.
+
+A forced-WebGPU Firefox 151.0.4 smoke run on the current machine compared 2,032
+cells across resolutions 4-8 at tolerance `1e-7`. It included all pentagons,
+pentagon neighbors, polar and antimeridian samples, and boundaries with 5, 6,
+7, and 10 vertices. It reported zero failures over 12,372 points and maximum
+normalized-Mercator error `8.677707064030926e-8`. Firefox did not expose
+adapter-identification fields, so this is useful native-machine evidence but
+not a substitute for the exhaustive, adapter-identified run.
 
 Even `1e-7` normalized-world error can become visible at extreme zooms. At
 zoom 22 it is roughly 215 world pixels before matrix/perspective effects.
@@ -179,36 +215,93 @@ of this software setup rather than representative fallback behavior.
 Do not use this laptop's timings or device-loss behavior to make production
 decisions.
 
+## Current Firefox Machine
+
+The continuation used:
+
+- Firefox 151.0.4 with `dom.webgpu.enabled=true` and
+  `gfx.webgpu.force-enabled=true`.
+- geckodriver 0.37.0 in headless mode.
+- Linux 6.18.35-1-lts.
+- NVIDIA GeForce GTX 1080 Ti with NVIDIA driver 570.211.01.
+
+Firefox reported a software compositor and disabled its shared-texture
+swapchain because `GBM_FORMAT_ARGB8888` was unavailable. It withheld WebGPU
+adapter vendor/device fields, so browser timings remain unsuitable for
+production decisions even though compute and moderate renderer workloads ran.
+
+Observed correctness results:
+
+- `renderer=deck` reached `Ready` with `h3_data.csv` and the 29,324-cell
+  `h3_data_old_2.csv` fixture.
+- `renderer=webgpu` and `renderer=auto` reached `Ready` with the 63-cell and
+  29,324-cell fixtures and retained the overlay across viewport chunk changes.
+- Deck/WebGPU screenshots for `h3_data_old_2.csv` had normalized RMSE
+  `0.00851785` at the default view.
+- Explicit WebGPU exhausted Firefox's headless WebGPU memory budget while
+  uploading the visible 771,009 cells from `h3_data.csv`; it failed closed and
+  removed the overlay.
+- `renderer=auto` recovered from that same out-of-memory event, created 135
+  deck chunks, waited for the replacement deck frame, and reached `Ready`.
+- Chromium 149 with WebGPU disabled reached `Ready` through adapter-absence
+  fallback. Chromium headless with WebGPU enabled destroyed its device and
+  also failed to produce a replacement WebGL frame, matching the prior
+  software/backend limitation.
+- `population_density_hilo.arrow` is not present under `www/data/` on this
+  checkout, so it was not retested.
+
+### Direct renderer validation
+
+The integrated direct path was tested in forced-WebGPU Firefox after the final
+lifecycle, triangulation, and ownership changes:
+
+- A 26-cell fixture covering resolutions 4-8, the concave
+  `85006da3fffffff` counterexample, polar cells, and antimeridian cells reached
+  `Ready` with no GPU validation failures.
+- The 29,324-cell `h3_data_old_2.csv` fixture reached `Ready` and remained ready
+  after a viewport change to zoom 10.
+- A targeted packed/direct screenshot at the concave-cell view had RMSE `0`.
+- A 2,032-cell resolutions 4-8 compute parity sample retained zero failures and
+  maximum normalized-Mercator error `8.677707064030926e-8` at tolerance `1e-7`.
+- Mixed input whose first row was supported and second row was unsupported
+  failed closed explicitly and reached `Ready` through deck in auto mode.
+- Zoom 16 failed closed and removed the overlay explicitly; auto mode waited for
+  and published a deck frame.
+
 ## Known Correctness Issues
 
-These were identified in review and remain to be fixed:
+These remain after the lifecycle fixes:
 
-- Device loss during asynchronous initialization can publish a renderer that
-  has already entered the lost state.
-- Fallback removes the matrix layer but does not always destroy the failed
-  renderer, canvas, observer, and buffers.
-- `waitForRender()` can remain unresolved when the canvas has zero area or an
-  error occurs before command submission.
-- The application has no timeout around the WebGPU render waiter.
-- Chunk activation and data reload are not transactional; a failed upload can
-  leave renderer resources and application bookkeeping inconsistent.
-- `waitForMapStyle()` rejects on any map-wide error, including unrelated tile
-  or source errors.
-- The vertex shader currently forces midpoint depth instead of converting the
-  WebGL clip depth with `0.5 * (clip.z + clip.w)`.
 - Only three world copies are rendered, regardless of viewport width, and the
   code does not honor `map.getRenderWorldCopies()`.
-- Mercator-only operation is documented but not enforced.
 - Separate `mix-blend-mode: multiply` canvases change composition when deck.gl
   highlight or train layers overlap the WebGPU H3 layer.
-- Fallback completion does not wait for the first replacement deck.gl frame.
 - Coarse chunk origins can still lose precision at high zooms, especially for
   resolution-5 data grouped under resolution-0 parents.
+- Direct compute emits absolute `f32` Mercator boundaries before origin
+  subtraction, so zooms above 14 are deliberately rejected or sent to deck.
+- Parent-derived chunk bounds use a conservative heuristic rather than bounds
+  proven from every member cell; unusual descendants could still be culled.
+
+Resolved in the continuation:
+
+- Renderer ownership is published only after style readiness, Mercator
+  validation, custom-layer insertion, and a final ready-state check.
+- Initialization, render, layer-removal, device-loss, and fallback paths now
+  destroy their renderer, canvas, observer, and GPU resources.
+- The complete render preamble and submission are inside one error boundary.
+- Render waits support timeout and abort cancellation, pause their timeout
+  budget while the document is hidden, and reject on zero-area canvases.
+- Deck replacement waits require a real frame and also pause while hidden.
+- Chunk additions are staged before removals and rolled back on upload failure;
+  dataset-qualified renderer IDs permit staging a replacement dataset before
+  releasing the current one.
+- Style readiness no longer treats unrelated map-wide errors as style errors.
+- WebGL-to-WebGPU clip depth conversion and Mercator-only enforcement are in
+  place, including runtime projection changes.
 
 ## Performance Work Still Needed
 
-- Avoid calling `packH3Geometry()` for every chunk in the WebGPU path.
-- Avoid packing chunks that have never entered the padded viewport.
 - Retain or cache uploaded chunk buffers instead of recreating them after every
   deactivate/reactivate cycle.
 - Write style uniforms only when colors, highlighting, or transition progress
@@ -222,17 +315,17 @@ These were identified in review and remain to be fixed:
 
 ### P0: establish a trustworthy baseline
 
-- [ ] Run `npm run build` and `git diff --check` before browser testing.
+- [x] Run `npm run build` and `git diff --check` before browser testing.
 - [ ] Use a native hardware WebGPU adapter; do not force SwiftShader for
   performance measurements.
 - [ ] Confirm `renderer=deck` still loads both test datasets and record baseline
   screenshots and timings.
 - [ ] Confirm `renderer=webgpu` loads both datasets without browser flags beyond
   those genuinely required by that browser/platform.
-- [ ] Re-run `h3-compute-parity.js` against the final shader at tolerance
-  `1e-7` on the native adapter.
-- [ ] Include ordinary, pentagon, face-crossing, antimeridian, and polar cells
-  at every supported resolution.
+- [x] Re-run `h3-compute-parity.js` against the final shader at tolerance
+  `1e-7` on the forced Firefox adapter (representative smoke, not exhaustive).
+- [x] Include ordinary, pentagon, face-crossing, antimeridian, and polar cells
+  at every supported resolution in that smoke run.
 - [ ] Record adapter/browser/driver details with all parity and performance
   results.
 - [ ] Compare deck.gl and WebGPU screenshots at zooms 0, 5, 10, 16, and 22,
@@ -240,44 +333,43 @@ These were identified in review and remain to be fixed:
 
 ### P0: fix renderer lifecycle before compute integration
 
-- [ ] Wait for the MapLibre style before allocating the WebGPU renderer.
-- [ ] Publish `webgpuRenderer` only after the custom layer is added and the
+- [x] Wait for the MapLibre style before allocating the WebGPU renderer.
+- [x] Publish `webgpuRenderer` only after the custom layer is added and the
   renderer is still in the ready state.
-- [ ] Destroy the local or active renderer in every initialization/fallback
+- [x] Destroy the local or active renderer in every initialization/fallback
   failure path.
-- [ ] Wrap the entire render preamble and command submission in error handling
+- [x] Wrap the entire render preamble and command submission in error handling
   that rejects pending waiters.
-- [ ] Add a bounded timeout/cancellation path to WebGPU render waits.
-- [ ] Make chunk selection and reload transactional, with rollback on failed
+- [x] Add a bounded timeout/cancellation path to WebGPU render waits.
+- [x] Make chunk selection and reload transactional, with rollback on failed
   uploads.
-- [ ] Correct clip-depth conversion.
-- [ ] Restrict or fall back when MapLibre is not using Mercator projection.
+- [x] Correct clip-depth conversion.
+- [x] Restrict or fall back when MapLibre is not using Mercator projection.
 
 ### P1: connect compute output to rendering
 
-- [ ] Initialize `H3ComputeModule` with the packed renderer's existing device;
+- [x] Initialize `H3ComputeModule` with the packed renderer's existing device;
   do not request a second device.
-- [ ] Store lower/upper H3 words per chunk in source-cell order.
-- [ ] Dispatch the compute shader when a chunk is first uploaded.
-- [ ] Keep compute output on the GPU; do not add a production readback.
-- [ ] Add a render pipeline that consumes boundary records directly.
-- [ ] Prove a fixed triangle fan is valid for every emitted H3 boundary, or
+- [x] Store lower/upper H3 words per chunk in source-cell order.
+- [x] Dispatch the compute shader when a chunk is first uploaded.
+- [x] Keep compute output on the GPU; only read aggregate validation status.
+- [x] Add a render pipeline that consumes boundary records directly.
+- [x] Prove a fixed triangle fan is invalid and
   emit robust triangle indices/vertices from compute instead of assuming it.
-- [ ] Preserve one source-cell ID per primitive for color lookup.
-- [ ] Make compute output chunk-relative or use high/low coordinate components
-  so absolute f32 Mercator values do not fail at high zoom.
-- [ ] Fail closed and fall back if any valid source cell returns a non-success
+- [x] Preserve one source-cell ID per primitive for color lookup.
+- [ ] Replace absolute `f32` compute output so direct rendering can safely exceed
+  the current zoom-14 guard.
+- [x] Fail closed and fall back if any valid source cell returns a non-success
   compute status.
-- [ ] Remove CPU `packH3Geometry()` only after direct-GPU screenshot parity is
-  established.
-- [ ] Keep the current packed geometry renderer temporarily as an A/B reference
-  while integrating direct GPU boundaries.
+- [x] Avoid CPU `packH3Geometry()` in direct mode after screenshot parity was
+  established; retain it lazily for packed mode and deck fallback.
+- [x] Keep the current packed geometry renderer as an A/B reference.
 
 ### P1: fallback and composition
 
 - [ ] Test true adapter absence, denied device creation, shader compilation
   failure, upload failure, render failure, and runtime device loss.
-- [ ] Ensure `renderer=auto` renders a deck.gl frame before resolving load-ready.
+- [x] Ensure `renderer=auto` renders a deck.gl frame before resolving load-ready.
 - [ ] Decide whether H3, highlights, and train layers should share one overlay
   composition group so multiply blending occurs once.
 - [ ] Derive world-copy count from viewport width and MapLibre's world-copy
@@ -310,6 +402,12 @@ Small dataset:
 http://127.0.0.1:1983/?data=h3_data.csv&cartogram=none&renderer=webgpu&perf=1
 ```
 
+Direct supported-resolution dataset:
+
+```text
+http://127.0.0.1:1983/?data=h3_data_old_2.csv&cartogram=none&renderer=webgpu&h3gpu=compute
+```
+
 Large dataset:
 
 ```text
@@ -324,6 +422,7 @@ For every scenario, repeat with `renderer=deck` and `renderer=auto`.
 | --- | --- |
 | `src/app.js` | Renderer selection, H3 chunking, colors, lifecycle, and fallback integration |
 | `src/webgpu/packed-h3-renderer.js` | Currently integrated CPU-packed WebGPU renderer |
+| `src/webgpu/direct-h3-backend.js` | Direct GPU triangulation, validation, and rendering |
 | `src/webgpu/h3-compute-wgsl.js` | Experimental H3 4.4.1 boundary compute kernel |
 | `src/webgpu/h3-compute.js` | Compute pipeline, upload, dispatch, readback, and cleanup API |
 | `src/webgpu/h3-compute-parity.js` | Browser parity comparison helpers |
@@ -334,17 +433,14 @@ For every scenario, repeat with `renderer=deck` and `renderer=auto`.
 
 ## Worktree Notes
 
-No commit was created. At handoff time, the WebGPU/chunking work consists of a
-modified `src/app.js` and untracked files under `src/webgpu/`, plus this handoff
-file.
+The original WebGPU/chunking proof is tracked in commit `07e989a`. The
+continuation modifies `src/app.js`, `src/webgpu/packed-h3-renderer.js`, and this
+handoff file, and adds `src/webgpu/direct-h3-backend.js`. No new commit was
+created.
 
-The following pre-existing untracked files are unrelated and must not be
-modified or removed while continuing this work:
-
-- `bun.lock`
-- `ecdf.patch`
-- `h3_layer_optimisation_plan.md`
-- `stable_colour.patch`
+The current pre-existing untracked files are unrelated and must not be modified
+or removed while continuing this work: `scratch.js`, `scratch/`, `sratch.sql`,
+and `style.patch`.
 
 Existing editor/LSP errors for the extensionless local imports
 `./vendor/observablehq` and `./cartogram` predate this WebGPU work; the esbuild
