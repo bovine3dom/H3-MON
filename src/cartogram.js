@@ -995,6 +995,36 @@ export function render_cartogram(container, data, options = {}) {
         delegatedEventListeners: 4,
     })
 
+    function stopMovement() {
+        fitToBoundsActive = false
+        cartogramGestureActive = false
+        cartogramGestureMoved = false
+        canvasSelection.interrupt()
+        hideTooltip()
+    }
+
+    function moveBy([x, y], factor) {
+        let transform = d3.zoomTransform(canvas)
+        transform = transform.translate(-x / transform.k, -y / transform.k)
+        const k = Math.min(100, Math.max(0.5, transform.k * factor))
+        if (k !== transform.k) {
+            const ratio = k / transform.k
+            const center = [canvas.clientWidth / 2, canvas.clientHeight / 2]
+            transform = d3.zoomIdentity
+                .translate(center[0] - (center[0] - transform.x) * ratio, center[1] - (center[1] - transform.y) * ratio)
+                .scale(k)
+        }
+        canvasSelection.call(zoom.transform, transform)
+    }
+
+    function finishMovement() {
+        flushTransform()
+        const sourceEvent = {type: 'keyboard', target: canvas}
+        const visible = visibleIndices(latestTransform)
+        onviewchange_callback(currentData, visible, sourceEvent)
+        onmove_callback(currentData, visible, sourceEvent)
+    }
+
     return {
         updateData: (newData, newDataCol) => {
             const doneUpdate = perfTimer('update_data', {rows: newData.x ? newData.x.length : 0})
@@ -1015,6 +1045,9 @@ export function render_cartogram(container, data, options = {}) {
             drawCanvas(latestTransform)
             doneHighlight()
         },
+        stop: stopMovement,
+        moveBy,
+        finishMove: finishMovement,
         fitToBounds: ([[x1, y1, x2, y2]], duration = 500) => {
             const doneFit = perfTimer('fit_to_bounds')
             const left = getX(x1)

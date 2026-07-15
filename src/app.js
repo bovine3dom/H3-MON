@@ -1142,6 +1142,7 @@ window.addEventListener('resize', () => map.resize())
 window.addEventListener('orientationchange', () => map.resize())
 
 const mapContainer = map.getContainer()
+let keyboardTarget = 'map'
 let mapGestureStarted = false
 let mapGestureMoved = false
 let mapWheelResetTimer = null
@@ -1182,7 +1183,10 @@ window.addEventListener('pointercancel', clearInactiveMapGesture, {capture: true
 
 map.on('movestart', (event) => {
     const original = event && event.originalEvent
-    if (mapGestureStarted || eventStartedInMap(original)) mapGestureMoved = true
+    if (mapGestureStarted || eventStartedInMap(original)) {
+        mapGestureMoved = true
+        keyboardTarget = 'map'
+    }
     if (svgPerfEnabled) {
         const center = map.getCenter()
         mapMovePerf = {
@@ -1219,6 +1223,94 @@ map.on('move', (event) => {
         zoom: map.getZoom(),
     })
 })
+
+const KEYBOARD_PAN_SPEED = 400
+const KEYBOARD_ZOOM_SPEED = 1
+const KEYBOARD_KEYS = new Set(['arrowup', 'w', 'arrowdown', 's', 'arrowleft', 'a', 'arrowright', 'd', 'q', 'e'])
+const heldKeyboardKeys = new Set()
+let keyboardFrame = null
+let keyboardFrameTime = 0
+let keyboardMoveTarget = null
+let keyboardMoved = false
+
+function finishKeyboardMove() {
+    if (keyboardFrame !== null) cancelAnimationFrame(keyboardFrame)
+    keyboardFrame = null
+    const target = keyboardMoveTarget
+    keyboardMoveTarget = null
+    const moved = keyboardMoved
+    keyboardMoved = false
+    if (!target || !moved) return
+
+    if (target === 'cartogram') {
+        cartogramApi?.finishMove()
+    } else {
+        syncCartogramAfterNextMapMove('keyboard')
+        map.fire('moveend')
+    }
+}
+
+function moveWithKeyboard(timestamp) {
+    const elapsed = Math.min((timestamp - keyboardFrameTime) / 1000, 0.25)
+    keyboardFrameTime = timestamp
+    const panX = (heldKeyboardKeys.has('arrowright') || heldKeyboardKeys.has('d') ? 1 : 0) -
+        (heldKeyboardKeys.has('arrowleft') || heldKeyboardKeys.has('a') ? 1 : 0)
+    const panY = (heldKeyboardKeys.has('arrowdown') || heldKeyboardKeys.has('s') ? 1 : 0) -
+        (heldKeyboardKeys.has('arrowup') || heldKeyboardKeys.has('w') ? 1 : 0)
+    const zoom = (heldKeyboardKeys.has('e') ? 1 : 0) - (heldKeyboardKeys.has('q') ? 1 : 0)
+    const panScale = panX && panY ? Math.SQRT1_2 : 1
+    const pan = [panX * KEYBOARD_PAN_SPEED * elapsed * panScale, panY * KEYBOARD_PAN_SPEED * elapsed * panScale]
+
+    if (panX || panY || zoom) {
+        keyboardMoved = true
+        if (keyboardMoveTarget === 'cartogram' && cartogramApi) {
+            cartogramApi.moveBy(pan, 2 ** (zoom * KEYBOARD_ZOOM_SPEED * elapsed))
+        } else {
+            const center = map.project(map.getCenter())
+            map.jumpTo({
+                center: map.unproject([center.x + pan[0], center.y + pan[1]]),
+                zoom: map.getZoom() + zoom * KEYBOARD_ZOOM_SPEED * elapsed,
+            }, {keyboardMoving: true})
+        }
+    }
+    keyboardFrame = requestAnimationFrame(moveWithKeyboard)
+}
+
+document.addEventListener('keydown', event => {
+    const target = event.target
+    if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey || helpPopup.classList.contains('open') ||
+        target instanceof Element && target.closest('input, textarea, select, button, a, [contenteditable]:not([contenteditable="false"])')) return
+
+    const key = event.key.toLowerCase()
+    if (!KEYBOARD_KEYS.has(key)) return
+
+    event.preventDefault()
+    event.stopPropagation()
+    heldKeyboardKeys.add(key)
+    if (keyboardFrame === null) {
+        keyboardMoveTarget = keyboardTarget === 'cartogram' && cartogramApi ? 'cartogram' : 'map'
+        keyboardTarget = keyboardMoveTarget
+        map.stop()
+        cartogramApi?.stop()
+        keyboardFrameTime = performance.now()
+        keyboardFrame = requestAnimationFrame(moveWithKeyboard)
+    }
+}, true)
+
+document.addEventListener('keyup', event => {
+    const key = event.key.toLowerCase()
+    if (!heldKeyboardKeys.delete(key)) return
+    event.preventDefault()
+    event.stopPropagation()
+    if (!heldKeyboardKeys.size) finishKeyboardMove()
+}, true)
+
+function releaseKeyboard() {
+    heldKeyboardKeys.clear()
+    finishKeyboardMove()
+}
+window.addEventListener('blur', releaseKeyboard)
+document.addEventListener('visibilitychange', () => document.hidden && releaseKeyboard())
 
     window.addEventListener("hashchange", () => {
         const pos = Object.fromEntries(new URLSearchParams(window.location.hash.slice(1)))
@@ -2127,6 +2219,7 @@ function bootstrap(meta = {}){
                                 }
                             },
                             onmove_callback: (data, visibleIndices) => {
+                                keyboardTarget = 'cartogram'
                                 const contributorH3 = cartogramCellsH3Strings(visibleIndices)
                                 const anchorH3 = cartogramCellsAnchorH3Strings(visibleIndices)
                                 const fitH3 = anchorH3.length ? anchorH3 : contributorH3
@@ -2885,6 +2978,7 @@ function bootstrap(meta = {}){
         mapGestureMoved = false
         mapProgrammaticSyncReason = null
         clearTimeout(mapWheelResetTimer)
+        if (event.keyboardMoving) return
         const pos = map.getCenter()
         const z = map.getZoom()
         history.replaceState(null, '', `#x=${pos.lng.toFixed(4)}&y=${pos.lat.toFixed(4)}&z=${z.toFixed(4)}`)
