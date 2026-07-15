@@ -1,6 +1,6 @@
 # WebGPU H3 Progress And Handoff
 
-Last updated: 2026-07-15
+Last updated: 2026-07-16
 
 ## Goal
 
@@ -325,6 +325,116 @@ Resolved in the continuation:
 - Measure compute dispatch, upload bandwidth, render time, memory use, and
   reload latency separately.
 
+## Packaging And Anti-Rot Plan
+
+The WebGPU implementation has a reusable package boundary, but moving all of
+`src/webgpu/` into a separate repository immediately would not by itself prevent
+rot. Extraction is worthwhile only if the package owns durable tests and H3-MON
+continues consuming it as an integration test.
+
+Recommended sequence:
+
+1. Add permanent browser parity, rendering, lifecycle, and fallback tests in
+   this repository. Do not extract code that is only covered by ad hoc scripts.
+2. Create an internal workspace package without changing runtime behavior.
+3. Add TypeScript declarations, capability reporting, package exports, notices,
+   and explicit ownership contracts.
+4. Make H3-MON consume the workspace package while retaining all application
+   policy in `src/app.js`.
+5. After the API and tests remain stable, move the package to a separate
+   repository and pin H3-MON to released versions or exact commits.
+
+### Proposed package boundary
+
+Generic code suitable for extraction:
+
+- `h3-compute.js` and `h3-compute-wgsl.js`.
+- `direct-h3-backend.js`, initially as an internal renderer implementation.
+- Generic rendering and resource-lifecycle code from
+  `packed-h3-renderer.js`, renamed around H3 rather than packed geometry.
+- `h3-compute-parity.js` under a testing-only export.
+- `h3-compute-NOTICES.md` and all required license material.
+
+Code that should remain in H3-MON:
+
+- Arrow/row H3 normalization and application data schemas.
+- H3 parent grouping, chunk bounds, viewport residency, and hysteresis.
+- Quantile/color generation and cartogram integration.
+- Deck layer construction and Deck/WebGPU fallback policy.
+- Map style ownership, load progress, query parameters, and update generations.
+
+MapLibre integration should be an optional adapter export. Consolidate the
+integrated `createMapLibreMatrixLayer()` path with, or remove, the unused
+`maplibre-camera-bridge.js` path before publishing both as public APIs.
+
+### Proposed exports
+
+The package should have small explicit entry points rather than exposing every
+class, shader, and GPU buffer layout:
+
+```js
+import {
+    createH3ComputeModule,
+    createH3WebGPURenderer,
+} from 'h3-webgpu'
+
+import {createMapLibreH3Layer} from 'h3-webgpu/maplibre'
+import {runH3ComputeParity} from 'h3-webgpu/testing'
+```
+
+The public renderer should expose `addPackedChunk()` and `addH3Chunk()` rather
+than retaining the now-incomplete `PackedH3Renderer` name. It should report its
+tested envelope directly:
+
+```js
+renderer.capabilities
+// {
+//     h3Version: '4.4.1',
+//     minResolution: 0,
+//     maxResolution: 10,
+//     projection: 'web-mercator',
+//     maxTestedZoom: 14
+// }
+```
+
+Keep these internal initially:
+
+- Raw WGSL strings and binding layouts.
+- `DirectH3Backend` and its procedural vertex ABI.
+- GPU error-scope helpers.
+- Internal color, style-uniform, matrix, and validation-buffer layouts.
+
+Before publishing, explicitly define:
+
+- Canvas, `GPUDevice`, and resource ownership.
+- Matrix coordinate and clip-depth conventions.
+- Render scheduling and completion semantics.
+- Device-loss, chunk-validation, and terminal-error behavior.
+- Packed geometry compatibility with `faster-h3-for-deckgl`.
+- Separate-canvas composition limitations: no shared depth, terrain occlusion,
+  MapLibre style ordering, Deck ordering, globe projection, or picking.
+- A neutral package blend-mode default; H3-MON should request `multiply`
+  explicitly if it retains the current appearance.
+
+### Maintenance policy
+
+Keep `renderer=deck` as the application default and direct WebGPU explicitly
+opt-in. Do not resume resolution 11-15 or performance work until browser support
+justifies it. The package should have:
+
+- A deterministic fixture covering resolutions 0-10, pentagons, face crossings,
+  poles, the antimeridian, and `85006da3fffffff`.
+- A resolution-11 fixture proving explicit failure and Deck fallback.
+- Pull-request build, syntax, shader-compilation, and adapter-absence tests.
+- A scheduled native-GPU parity and screenshot run on the existing Firefox
+  machine; software adapters may check correctness but never performance.
+- Exact H3 oracle and `faster-h3-for-deckgl` commit/version pins.
+- Full package tests before H3, MapLibre, Deck, or browser-runner upgrades.
+
+Packaging should isolate the reusable renderer from application churn. It is
+not a substitute for CI, and a detached package without an active consumer
+would rot faster than code kept in this repository.
+
 ## Prioritized Todo On The WebGPU Machine
 
 ### P0: establish a trustworthy baseline
@@ -391,14 +501,19 @@ Resolved in the continuation:
 
 ### P2: cleanup after proof
 
+- [ ] Add durable tests and fixtures before extracting the WebGPU package.
+- [ ] Create an internal `h3-webgpu` workspace package and make H3-MON consume
+  it without changing renderer or fallback behavior.
+- [ ] Add package declarations, capabilities, subpath exports, notices, and
+  explicit canvas/device ownership contracts.
+- [ ] Move the package to a separate repository only after its API and tests are
+  stable and H3-MON is a pinned external consumer.
 - [ ] Remove `src/webgpu/maplibre-camera-bridge.js` if its unused duplicate
   camera bridge is not selected for consolidation.
 - [ ] Remove unused WebGPU highlight state if highlighting remains in deck.gl.
 - [ ] Consider dynamic deck.gl loading only after fallback behavior is stable.
 - [ ] Consider moving GeoJSON and railway rendering to native MapLibre later;
   this is not required for the H3 compute proof.
-- [ ] Add durable browser parity and lifecycle tests rather than keeping only
-  ad hoc DevTools scripts.
 - [ ] Document supported H3 resolutions, projections, precision limits, and
   fallback behavior for users.
 
