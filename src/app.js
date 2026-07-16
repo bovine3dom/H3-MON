@@ -585,7 +585,7 @@ let dataH3Res = null
 let cartogramAgg = null
 let cartogramRawCols = null
 let h3toXYPromise = null
-const MAX_CARTOGRAM_RESOLUTION_GAP = 3
+const MAX_CARTOGRAM_RESOLUTION_GAP = 2
 
 function addCount(counts, value) {
     counts.set(value, (counts.get(value) || 0) + 1)
