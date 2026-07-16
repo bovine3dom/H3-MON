@@ -607,9 +607,10 @@ export function render_cartogram(container, data, options = {}) {
         })
     }
 
+    let longTaskObserver = null
     if (svgPerf && typeof PerformanceObserver !== 'undefined') {
         try {
-            const observer = new PerformanceObserver((list) => {
+            longTaskObserver = new PerformanceObserver((list) => {
                 if (!svgPerfGesture) return
                 for (const entry of list.getEntries()) {
                     svgPerfGesture.longTasks++
@@ -617,8 +618,9 @@ export function render_cartogram(container, data, options = {}) {
                     if (entry.duration > svgPerfGesture.maxLongTaskMs) svgPerfGesture.maxLongTaskMs = entry.duration
                 }
             })
-            observer.observe({entryTypes: ['longtask']})
+            longTaskObserver.observe({entryTypes: ['longtask']})
         } catch (e) {
+            longTaskObserver = null
             svgPerfLog('longtask_observer_unavailable', {message: e && e.message})
         }
     }
@@ -1057,11 +1059,13 @@ export function render_cartogram(container, data, options = {}) {
         })
     canvasSelection.call(zoom)
 
+    let resizeObserver = null
+    const onWindowResize = () => scheduleTransform(latestTransform)
     if (typeof ResizeObserver !== 'undefined') {
-        const resizeObserver = new ResizeObserver(() => scheduleTransform(latestTransform))
+        resizeObserver = new ResizeObserver(onWindowResize)
         resizeObserver.observe(root.node())
     } else {
-        window.addEventListener('resize', () => scheduleTransform(latestTransform))
+        window.addEventListener('resize', onWindowResize)
     }
 
     drawCanvas(latestTransform)
@@ -1111,16 +1115,50 @@ export function render_cartogram(container, data, options = {}) {
     return {
         updateData: (newData, newDataCol) => {
             const doneUpdate = perfTimer('update_data', {rows: newData.x ? newData.x.length : 0})
-            currentData = newData
-            if (newDataCol !== undefined) currentDataCol = newDataCol
-            const col = currentData[currentDataCol]
+            const nextDataCol = newDataCol ?? currentDataCol
+            const col = newData[nextDataCol]
             if (!col) {
-                console.warn(`Column "${currentDataCol}" not found in updateData`)
-                doneUpdate({missingColumn: currentDataCol})
+                console.warn(`Column "${nextDataCol}" not found in updateData`)
+                doneUpdate({missingColumn: nextDataCol})
                 return
             }
+            currentData = newData
+            currentDataCol = nextDataCol
             updateColorsWithTransition(col)
             doneUpdate()
+        },
+        snapshotState: () => ({
+            data: currentData,
+            dataCol: currentDataCol,
+            highlightedIndices: [...highlightedIndices],
+        }),
+        restoreState: state => {
+            if (!state?.data?.[state.dataCol]) throw new Error('Invalid cartogram render state')
+            stopMovement()
+            if (colorTransitionRaf !== null) cancelAnimationFrame(colorTransitionRaf)
+            colorTransitionRaf = null
+            colorTransition = null
+            currentData = state.data
+            currentDataCol = state.dataCol
+            highlightedIndices = [...state.highlightedIndices]
+            hoveredCellIndex = null
+            updateColors(currentData[currentDataCol])
+            drawCanvas(latestTransform)
+        },
+        destroy: () => {
+            stopMovement()
+            for (const frame of [colorTransitionRaf, transformRaf, svgPerfFrameRaf]) {
+                if (frame !== null) cancelAnimationFrame(frame)
+            }
+            colorTransitionRaf = transformRaf = svgPerfFrameRaf = null
+            pendingTransform = null
+            longTaskObserver?.disconnect()
+            resizeObserver?.disconnect()
+            window.removeEventListener('resize', onWindowResize)
+            d3.select(canvas.ownerDocument.defaultView).on('mousemove.zoom mouseup.zoom', null)
+            d3.dragEnable(canvas.ownerDocument.defaultView)
+            canvasSelection.on('.cell', null).on('.zoom', null).remove()
+            tooltip.remove()
         },
         highlightCells: (indices) => {
             const doneHighlight = perfTimer('highlight_cells', {rows: numRows, highlighted: indices.length})

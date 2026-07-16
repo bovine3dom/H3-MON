@@ -21,6 +21,7 @@ import {
  * if (renderer) {
  *     renderer.addChunk('0', packedGeometry, rgbaBytes)
  *     map.addLayer(createMapLibreMatrixLayer(renderer))
+ *     await renderer.waitForChunks(['0'])
  *     await renderer.waitForRender()
  * }
  * ```
@@ -44,6 +45,8 @@ import {
 
 const MAX_MERCATOR_LATITUDE = 85.0511287798066
 const MAPLIBRE_WORLD_SIZE_AT_ZOOM_ZERO = 512
+export const DIRECT_H3_MAX_ZOOM = 14
+const DIRECT_H3_MAX_WORLD_SIZE = MAPLIBRE_WORLD_SIZE_AT_ZOOM_ZERO * 2 ** DIRECT_H3_MAX_ZOOM
 const NO_HIGHLIGHT = 0xffffffff
 const STYLE_UNIFORM_SIZE = 16
 const MATRIX_SIZE = 16
@@ -134,6 +137,13 @@ function finiteNumber(value, label) {
     const number = Number(value)
     if (!Number.isFinite(number)) throw new TypeError(`${label} must be finite`)
     return number
+}
+
+function assertDirectH3WorldSize(worldSize) {
+    if (worldSize <= DIRECT_H3_MAX_WORLD_SIZE) return
+    const error = new Error(`Direct WebGPU H3 rendering is limited to zoom ${DIRECT_H3_MAX_ZOOM} pending high-precision output`)
+    error.name = 'DirectH3PrecisionError'
+    throw error
 }
 
 function abortError(reason) {
@@ -571,6 +581,9 @@ class PackedH3Renderer {
         this._scheduleRenderRequest()
     }
 
+    get directCellCount() { return this._directCellCount }
+    get maxDirectCells() { return this._maxDirectCells }
+
     _assertReady() {
         if (this.state !== 'ready') throw this._terminalError || new Error(`Packed H3 renderer is ${this.state}`)
     }
@@ -852,10 +865,11 @@ class PackedH3Renderer {
      * `cellCount * 4` RGBA byte channels or one RGB/RGBA array per source cell.
      * Source-cell order is exactly the order represented by `startIndices`.
      */
-    addChunk(id, geometry, colors) {
+    addChunk(id, geometry, colors, {visible = true} = {}) {
         this._assertReady()
         if (typeof id !== 'string' || !id) throw new TypeError('Chunk id must be a non-empty string')
         if (this._chunks.has(id)) throw new Error(`Chunk "${id}" already exists`)
+        if (typeof visible !== 'boolean') throw new TypeError('Chunk visibility must be boolean')
 
         const prepared = prepareGeometry(geometry)
         const packedColors = packColors(colors, prepared.cellCount)
@@ -875,6 +889,7 @@ class PackedH3Renderer {
                 ...this._createCommonChunk(id, packedColors, buffers),
                 kind: 'packed',
                 ready: false,
+                visible,
                 indexCount: prepared.indices.length,
                 originX: prepared.originX,
                 originY: prepared.originY,
@@ -911,11 +926,13 @@ class PackedH3Renderer {
     }
 
     /** Add source-order H3 ID words and generate boundaries and triangles on the GPU. */
-    addH3Chunk(id, ids, colors, {origin} = {}) {
+    addH3Chunk(id, ids, colors, {origin, visible = true} = {}) {
         this._assertReady()
         if (!this._directBackend) throw new Error('Direct H3 compute was not enabled for this renderer')
         if (typeof id !== 'string' || !id) throw new TypeError('Chunk id must be a non-empty string')
         if (this._chunks.has(id)) throw new Error(`Chunk "${id}" already exists`)
+        if (typeof visible !== 'boolean') throw new TypeError('Chunk visibility must be boolean')
+        if (this._worldSize !== null) assertDirectH3WorldSize(this._worldSize)
         const lower = ids?.lower
         const upper = ids?.upper
         if (!(lower instanceof Uint32Array) || !(upper instanceof Uint32Array) || lower.length !== upper.length) {
@@ -938,6 +955,7 @@ class PackedH3Renderer {
                 ...this._createCommonChunk(id, packedColors, buffers),
                 kind: 'direct',
                 ready: false,
+                visible,
                 direct: null,
                 bindGroup: null,
             }
@@ -983,6 +1001,20 @@ class PackedH3Renderer {
             if (!chunk) throw new Error(`Unknown chunk "${id}"`)
             return chunk.readyPromise || true
         }))
+    }
+
+    /** Atomically show or hide named chunks on the next frame. */
+    setChunksVisible(ids, visible = true) {
+        this._assertReady()
+        if (typeof visible !== 'boolean') throw new TypeError('Chunk visibility must be boolean')
+        const chunks = Array.from(ids, id => {
+            const chunk = this._chunks.get(id)
+            if (!chunk) throw new Error(`Unknown chunk "${id}"`)
+            return chunk
+        })
+        for (const chunk of chunks) chunk.visible = visible
+        if (chunks.length) this._markDirty()
+        return this
     }
 
     /** Remove a chunk and immediately destroy all of its GPU buffers. */
@@ -1075,6 +1107,7 @@ class PackedH3Renderer {
             if (worldSize <= 0) throw new RangeError('worldSize must be positive')
         }
         if (worldSize === null) throw new TypeError('worldSize is required with a MapLibre modelViewProjectionMatrix')
+        if (this._directCellCount) assertDirectH3WorldSize(worldSize)
         if (options.centerMercatorX !== undefined) {
             centerMercatorX = finiteNumber(options.centerMercatorX, 'centerMercatorX')
         }
@@ -1155,7 +1188,7 @@ class PackedH3Renderer {
         }
         if (this._matrix) {
             for (const chunk of this._chunks.values()) {
-                if (!chunk.ready) continue
+                if (!chunk.ready || !chunk.visible) continue
                 if (chunk.kind === 'packed' ? !chunk.indexCount : !chunk.cellCount) continue
                 chunk.frameWorldCopies = worldCopiesForChunk(
                     this._worldCopiesConfig,
@@ -1424,12 +1457,12 @@ export async function createPackedH3Renderer(options = {}) {
  * renderer repaint requests to `map.triggerRepaint()`. It is a synchronization
  * hook only: the separate canvas remains above all MapLibre style layers.
  *
- * `worldCopies` defaults to radius 1 around the current unwrapped map world.
+ * `worldCopies` defaults to MapLibre's setting and the current visible bounds.
  * Set `destroyOnRemove` when the layer exclusively owns the renderer.
  */
 export function createMapLibreMatrixLayer(renderer, {
     id = 'webgpu-packed-h3-matrix',
-    worldCopies = 1,
+    worldCopies = null,
     destroyOnRemove = false,
     onRenderError = null,
     onLayerRemove = null,
@@ -1437,7 +1470,8 @@ export function createMapLibreMatrixLayer(renderer, {
     if (!renderer || typeof renderer.render !== 'function') throw new TypeError('A packed H3 renderer is required')
     if (onRenderError != null && typeof onRenderError !== 'function') throw new TypeError('onRenderError must be a function')
     if (onLayerRemove != null && typeof onLayerRemove !== 'function') throw new TypeError('onLayerRemove must be a function')
-    worldCopies = prepareWorldCopies(worldCopies)
+    const followMapWorldCopies = worldCopies == null
+    if (!followMapWorldCopies) worldCopies = prepareWorldCopies(worldCopies)
     let map = null
     let errorQueued = false
 
@@ -1478,8 +1512,22 @@ export function createMapLibreMatrixLayer(renderer, {
                 if (!matrix || renderer.state !== 'ready') return
                 const longitude = Number(map.getCenter().lng) || 0
                 const worldSize = MAPLIBRE_WORLD_SIZE_AT_ZOOM_ZERO * 2 ** map.getZoom()
+                let frameWorldCopies = worldCopies
+                if (followMapWorldCopies) {
+                    const bounds = map.getBounds()
+                    let first = Math.floor((Math.min(bounds.getWest(), bounds.getEast()) + 180) / 360) - 1
+                    let last = Math.floor((Math.max(bounds.getWest(), bounds.getEast()) + 180) / 360) + 1
+                    if (last - first > MAX_WORLD_COPY_RADIUS * 2) {
+                        const center = Math.floor((longitude + 180) / 360)
+                        first = center - MAX_WORLD_COPY_RADIUS
+                        last = center + MAX_WORLD_COPY_RADIUS
+                    }
+                    frameWorldCopies = map.getRenderWorldCopies()
+                        ? Array.from({length: last - first + 1}, (_, i) => first + i)
+                        : [0]
+                }
                 renderer.render(matrix, {
-                    worldCopies,
+                    worldCopies: frameWorldCopies,
                     centerMercatorX: (longitude + 180) / 360,
                     worldSize,
                 })

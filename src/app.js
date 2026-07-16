@@ -9,7 +9,7 @@ import {load, parse} from '@loaders.gl/core'
 import maplibregl from 'maplibre-gl'
 import * as d3 from 'd3'
 import {cellToBoundary, cellToLatLng, latLngToCell, getResolution, cellToParent, cellToChildren, h3IndexToSplitLong, splitLongToH3Index} from 'h3-js'
-import {assertMercatorProjection, createMapLibreMatrixLayer, createPackedH3Renderer} from './webgpu/packed-h3-renderer.js'
+import {assertMercatorProjection, createMapLibreMatrixLayer, createPackedH3Renderer, DIRECT_H3_MAX_ZOOM as H3_DIRECT_MAX_ZOOM} from './webgpu/packed-h3-renderer.js'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import * as observablehq from './vendor/observablehq' // from https://observablehq.com/@d3/color-legend
 import {getCitiesStartsWith} from 'tiny-geocoder'
@@ -655,7 +655,6 @@ const H3_CHUNK_LOAD_PADDING = 0.5
 const H3_CHUNK_RETAIN_PADDING = 0.75
 const H3_CHUNK_MAX_COUNT = 512
 const H3_DIRECT_MAX_RESOLUTION = 10
-const H3_DIRECT_MAX_ZOOM = 14
 
 function hasSplitH3Index(cols) {
     return Boolean(cols && cols[H3_INDEX_LOWER] && cols[H3_INDEX_UPPER])
@@ -1612,7 +1611,7 @@ function bootstrap(meta = {}){
     }
 
     function waitForMapStyle() {
-        if (map.isStyleLoaded()) return Promise.resolve()
+        if (map.getStyle()) return Promise.resolve()
         return new Promise((resolve, reject) => {
             const timer = setTimeout(() => finish(new Error('MapLibre style load timed out')), 15000)
             const finish = error => {
@@ -1728,7 +1727,8 @@ function bootstrap(meta = {}){
         if (requestedRenderer === 'auto' && webgpuFailure) return 'deck'
         if (!webgpuRendererInit) {
             const generation = ++webgpuRendererGeneration
-            webgpuRendererInit = (async () => {
+            let initialization
+            initialization = Promise.resolve().then(async () => {
                 const done = perfTimer('webgpu.renderer.init')
                 let renderer = null
                 let layer = null
@@ -1752,6 +1752,7 @@ function bootstrap(meta = {}){
                     })
                     if (!renderer) throw new Error('WebGPU adapter or canvas context unavailable')
                     if (generation !== webgpuRendererGeneration) throw new Error('WebGPU renderer initialization was superseded')
+                    if (renderer.state !== 'ready') throw new Error(`WebGPU H3 renderer is ${renderer.state}`)
                     layer = createMapLibreMatrixLayer(renderer, {
                         id: webgpuMatrixLayerId,
                         destroyOnRemove: true,
@@ -1774,12 +1775,13 @@ function bootstrap(meta = {}){
                     return 'webgpu'
                 } catch (error) {
                     done({renderer: 'deck', failed: true})
-                    if (generation === webgpuRendererGeneration) webgpuRendererInit = null
+                    if (webgpuRendererInit === initialization) webgpuRendererInit = null
                     await fallBackToDeck(error, renderer, layer, generation)
                     if (requestedRenderer === 'webgpu') throw error
                     return 'deck'
                 }
-            })()
+            })
+            webgpuRendererInit = initialization
         }
         return webgpuRendererInit
     }
@@ -1967,11 +1969,12 @@ function bootstrap(meta = {}){
                     chunk.rendererId,
                     ensureH3ChunkIds(chunkSet, chunk),
                     colors,
-                    {origin: ensureH3ChunkOrigin(chunk)},
+                    {origin: ensureH3ChunkOrigin(chunk), visible: false},
                 )
             } else {
-                renderer.addChunk(chunk.rendererId, ensurePackedChunkGeometry(chunkSet, chunk), colors)
+                renderer.addChunk(chunk.rendererId, ensurePackedChunkGeometry(chunkSet, chunk), colors, {visible: false})
             }
+            chunk.resident = true
             uploaded.push(chunk)
         }
         await renderer.waitForChunks(chunks.map(chunk => chunk.rendererId))
@@ -1983,9 +1986,18 @@ function bootstrap(meta = {}){
         }
     }
 
+    function removeWebgpuChunks(renderer, chunks, deactivate = false) {
+        for (const chunk of chunks) {
+            if (chunk.resident) renderer?.removeChunk(chunk.rendererId)
+            chunk.resident = false
+            if (deactivate) chunk.active = false
+        }
+    }
+
     async function selectWebgpuChunks(chunkSet, retainCurrent = true) {
         const renderer = webgpuRenderer
         if (!renderer) throw new Error('WebGPU H3 renderer is unavailable')
+        const releaseVersion = chunkSet.releaseVersion
         if (webgpuGeometryMode === 'compute' && map.getZoom() > H3_DIRECT_MAX_ZOOM) {
             const error = new Error(`Direct WebGPU H3 rendering is limited to zoom ${H3_DIRECT_MAX_ZOOM} pending high-precision output`)
             error.name = 'DirectH3PrecisionError'
@@ -1994,30 +2006,57 @@ function bootstrap(meta = {}){
         const startedAt = now()
         const loadBounds = mapBoundsWithPadding(H3_CHUNK_LOAD_PADDING)
         const retainBounds = retainCurrent ? mapBoundsWithPadding(H3_CHUNK_RETAIN_PADDING) : null
-        const selected = []
+        let selected = []
+        const retained = new Set()
         for (const chunk of chunkSet.chunks) {
-            if (chunkIntersectsBounds(chunk, loadBounds) ||
-                (retainBounds && chunk.active && chunkIntersectsBounds(chunk, retainBounds))) {
+            if (chunkIntersectsBounds(chunk, loadBounds)) {
                 selected.push(chunk)
+            } else if (retainBounds && chunk.active && chunkIntersectsBounds(chunk, retainBounds)) {
+                selected.push(chunk)
+                retained.add(chunk)
             }
+        }
+        if (webgpuGeometryMode === 'compute' && retained.size &&
+            renderer.directCellCount + selected.filter(chunk => !chunk.resident).reduce((sum, chunk) => sum + chunk.data.length, 0) > renderer.maxDirectCells) {
+            selected = selected.filter(chunk => !retained.has(chunk))
         }
         if (selected.length === chunkSet.activeChunks.length && selected.every((chunk, i) => chunk === chunkSet.activeChunks[i])) return false
 
         const nextChunks = new Set(selected)
-        const removed = chunkSet.activeChunks.filter(chunk => !nextChunks.has(chunk))
-        const added = selected.filter(chunk => !chunk.active)
+        const previousActiveChunks = chunkSet.activeChunks
+        const removed = previousActiveChunks.filter(chunk => !nextChunks.has(chunk))
+        const added = selected.filter(chunk => !chunk.resident)
         const uploaded = []
-        for (const chunk of removed) renderer.removeChunk(chunk.rendererId)
+        const evictBeforeUpload = webgpuGeometryMode === 'compute' && removed.length &&
+            renderer.directCellCount + added.reduce((sum, chunk) => sum + chunk.data.length, 0) > renderer.maxDirectCells
+        if (evictBeforeUpload) {
+            removeWebgpuChunks(renderer, removed, true)
+            chunkSet.activeChunks = previousActiveChunks.filter(chunk => nextChunks.has(chunk))
+        }
         try {
             await uploadWebgpuChunks(renderer, chunkSet, added, uploaded)
         } catch (error) {
-            for (const chunk of uploaded) renderer.removeChunk(chunk.rendererId)
-            try {
-                await uploadWebgpuChunks(renderer, chunkSet, removed, [])
-            } catch (_) {}
+            removeWebgpuChunks(renderer, uploaded)
+            if (releaseVersion !== chunkSet.releaseVersion) return false
+            if (evictBeforeUpload) {
+                const restored = []
+                try {
+                    await uploadWebgpuChunks(renderer, chunkSet, removed, restored)
+                    renderer.setChunksVisible(removed.map(chunk => chunk.rendererId))
+                    for (const chunk of removed) chunk.active = true
+                    chunkSet.activeChunks = previousActiveChunks
+                } catch (_) {
+                    removeWebgpuChunks(renderer, restored)
+                }
+            }
             throw error
         }
-        for (const chunk of removed) chunk.active = false
+        if (releaseVersion !== chunkSet.releaseVersion) {
+            removeWebgpuChunks(renderer, uploaded)
+            return false
+        }
+        renderer.setChunksVisible(added.map(chunk => chunk.rendererId))
+        removeWebgpuChunks(renderer, removed, true)
         for (const chunk of added) chunk.active = true
         chunkSet.activeChunks = selected
         logPerf('webgpu.h3_chunks.select', now() - startedAt, {
@@ -2031,10 +2070,8 @@ function bootstrap(meta = {}){
 
     function releaseWebgpuChunkSet(chunkSet, renderer = webgpuRenderer) {
         if (!chunkSet) return
-        for (const chunk of chunkSet.activeChunks) {
-            renderer?.removeChunk(chunk.rendererId)
-            chunk.active = false
-        }
+        chunkSet.releaseVersion++
+        removeWebgpuChunks(renderer, chunkSet.chunks, true)
         chunkSet.activeChunks = []
         chunkSet.committed = false
     }
@@ -2124,6 +2161,7 @@ function bootstrap(meta = {}){
                 geometry,
                 bounds: geometry ? packedChunkBounds(geometry, group.key) : h3ChunkBounds(group.key),
                 active: false,
+                resident: false,
             })
         }
         chunks.sort((a, b) => a.key.localeCompare(b.key))
@@ -2141,6 +2179,7 @@ function bootstrap(meta = {}){
             chunks,
             activeChunks: [],
             committed: false,
+            releaseVersion: 0,
         }
         return chunkSet
     }
@@ -2884,6 +2923,13 @@ function bootstrap(meta = {}){
                         doneCartoQuantiles()
                         cartoDataCol = 'carto_quantile'
                     }
+                    if (useCartogramQuantiles && doQuantiles) {
+                        const doneDataQuantiles = perfTimer('cartogram.quantile.assign_data', {rows: values.length})
+                        dataCols.quantile = assignQuantiles(values, getquantileFn)
+                        doneDataQuantiles()
+                        await refreshH3LayerColours()
+                        makeLegend(getvalueFn)
+                    }
 
                     if (!cartogramApi) {
                         setLoadStage('Showing cartogram pane')
@@ -2960,13 +3006,6 @@ function bootstrap(meta = {}){
                         cartogramApi.highlightCells([])
                         cartogramApi.updateData(cartoAggCols, cartoDataCol)
                         doneUpdateCartogram()
-                    }
-                    if (useCartogramQuantiles && doQuantiles) {
-                        const doneDataQuantiles = perfTimer('cartogram.quantile.assign_data', {rows: values.length})
-                        dataCols.quantile = assignQuantiles(values, getquantileFn)
-                        doneDataQuantiles()
-                        await refreshH3LayerColours()
-                        makeLegend(getvalueFn)
                     }
                     document.body.classList.add('cartogram-ready')
                     setLoadStage('Rendering map')
@@ -3455,20 +3494,38 @@ function bootstrap(meta = {}){
         const done = (trackProgress ? perfTimer : detailPerfTimer)('deck.after_render')
         return new Promise((resolve, reject) => {
             let settled = false
+            let timer = null
+            let remaining = timeout
+            let visibleSince = null
             const finish = error => {
                 if (settled) return
                 settled = true
                 clearTimeout(timer)
+                document.removeEventListener('visibilitychange', armTimer)
+                map.off('remove', onRemove)
                 const index = deckRenderWaiters.indexOf(finish)
                 if (index >= 0) deckRenderWaiters.splice(index, 1)
                 done()
                 if (error) reject(error)
                 else resolve()
             }
-            const timer = setTimeout(() => {
-                finish(rejectOnTimeout ? new Error(`Deck render timed out after ${timeout} ms`) : null)
-            }, timeout)
+            const armTimer = () => {
+                if (visibleSince !== null) remaining -= now() - visibleSince
+                visibleSince = null
+                clearTimeout(timer)
+                if (document.hidden) return
+                visibleSince = now()
+                timer = setTimeout(() => {
+                    const error = new Error(`Deck render timed out after ${timeout} visible ms`)
+                    error.name = 'TimeoutError'
+                    finish(rejectOnTimeout ? error : null)
+                }, Math.max(0, remaining))
+            }
+            const onRemove = () => finish(new Error('MapLibre map was removed before deck rendered'))
+            document.addEventListener('visibilitychange', armTimer)
+            map.on('remove', onRemove)
             deckRenderWaiters.push(finish)
+            armTimer()
         })
     }
 
@@ -3534,6 +3591,8 @@ function bootstrap(meta = {}){
             h3toXY,
             h3toXYPromise,
             cartogramApi,
+            cartogramRenderState: cartogramApi?.snapshotState(),
+            cartogramReady: document.body.classList.contains('cartogram-ready'),
             columnData: window._columnData,
             rawData: window.raw_data,
             layers: mainLayers,
@@ -3547,13 +3606,22 @@ function bootstrap(meta = {}){
             let requireDeckFrame = false
             webgpuCommitRunning = true
             try {
+                await chunkSelectionPromise
                 if (renderable?.isWebgpuH3) {
                     const renderer = webgpuRenderer
                     const rendererLayer = webgpuMatrixLayer
                     const rendererGeneration = webgpuRendererGeneration
-                    if (previousWebgpuSet && previousWebgpuSet !== renderable) releaseWebgpuChunkSet(previousWebgpuSet)
+                    let previousReleased = false
                     try {
-                        await selectWebgpuChunks(renderable, false)
+                        try {
+                            await selectWebgpuChunks(renderable, false)
+                        } catch (error) {
+                            if (error.name !== 'DirectH3CapacityError' || !previousWebgpuSet || previousWebgpuSet === renderable) throw error
+                            releaseWebgpuChunkSet(previousWebgpuSet)
+                            previousReleased = true
+                            await selectWebgpuChunks(renderable, false)
+                        }
+                        if (!previousReleased && previousWebgpuSet && previousWebgpuSet !== renderable) releaseWebgpuChunkSet(previousWebgpuSet)
                     } catch (error) {
                         await fallBackToDeck(error, renderer, rendererLayer, rendererGeneration)
                         if (webgpuFallback) await webgpuFallback
@@ -3609,8 +3677,19 @@ function bootstrap(meta = {}){
         } catch (e) {
             if (!mapReady) doneMapReady({failed: true})
             webgpuCommitRunning = true
+            await chunkSelectionPromise
             if (activeWebgpuChunkSet && activeWebgpuChunkSet !== previousState.activeWebgpuChunkSet) {
                 releaseWebgpuChunkSet(activeWebgpuChunkSet)
+            }
+            const failedCartogramApi = cartogramApi
+            try {
+                if (failedCartogramApi === previousState.cartogramApi) {
+                    failedCartogramApi?.restoreState(previousState.cartogramRenderState)
+                } else {
+                    failedCartogramApi?.destroy()
+                }
+            } catch (cartogramRestoreError) {
+                console.error('Failed to restore previous cartogram', cartogramRestoreError)
             }
             activeH3Layer = previousState.activeH3Layer
             activeWebgpuChunkSet = previousState.activeWebgpuChunkSet
@@ -3627,6 +3706,9 @@ function bootstrap(meta = {}){
             h3toXY = previousState.h3toXY
             h3toXYPromise = previousState.h3toXYPromise
             cartogramApi = previousState.cartogramApi
+            const cartogramVisibilityChanged = document.body.classList.contains('cartogram-ready') !== previousState.cartogramReady
+            document.body.classList.toggle('cartogram-ready', previousState.cartogramReady)
+            if (cartogramVisibilityChanged) requestAnimationFrame(() => map.resize())
             window._columnData = previousState.columnData
             window.raw_data = previousState.rawData
             deferLegend = false
