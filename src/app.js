@@ -602,6 +602,21 @@ function dominant(counts) {
     return best
 }
 
+function dominantLabel(statsByLabel) {
+    let best = null
+    let bestCount = -1
+    let bestProminence = null
+    for (const [label, stats] of statsByLabel) {
+        if ((stats.prominence != null && (bestProminence == null || stats.prominence > bestProminence)) ||
+            (stats.prominence === bestProminence && stats.count > bestCount)) {
+            best = label
+            bestCount = stats.count
+            bestProminence = stats.prominence
+        }
+    }
+    return best
+}
+
 function toNumber(value) {
     return typeof value === 'bigint' ? Number(value) : value
 }
@@ -757,6 +772,8 @@ function buildCartogramAggregation(rawCols) {
     const rowCount = h3RowCount(rawCols)
     const done = perfTimer('cartogram.cells.precompute', {rows: rowCount, h3Index: hasSplitH3Index(rawCols) ? 'split' : 'string'})
     const weights = rawCols.weight_mean || rawCols.weight || null
+    const prominenceCol = rawCols.prominence
+    const populationCol = rawCols.population
     let weightValues = null
     const cellByKey = new Map()
     const rowCell = new Uint32Array(rowCount)
@@ -764,11 +781,12 @@ function buildCartogramAggregation(rawCols) {
     const y = []
     const code = []
     const label = []
+    const prominence = []
     const index = []
     const anchorIndex = []
     const h3RowsByCell = []
     const codeCounts = []
-    const labelCounts = []
+    const labelStats = []
 
     const doneGroupXY = detailPerfTimer('cartogram.cells.group_xy', {rows: rowCount})
     for (let i = 0; i < rowCount; i++) {
@@ -783,7 +801,7 @@ function buildCartogramAggregation(rawCols) {
             y.push(cy)
             h3RowsByCell.push([])
             codeCounts.push(new Map())
-            labelCounts.push(new Map())
+            labelStats.push(new Map())
         }
         rowCell[i] = cellIndex
         h3RowsByCell[cellIndex].push(i)
@@ -791,7 +809,14 @@ function buildCartogramAggregation(rawCols) {
         if (rawCols.code && rawCols.code[i] != null) addCount(codeCounts[cellIndex], toNumber(rawCols.code[i]) / 1000)
         if (rawCols.label && (!rawCols.label.isValid || rawCols.label.isValid(i))) {
             const labelValue = columnValue(rawCols.label, i)
-            if (labelValue != null && labelValue !== '') addCount(labelCounts[cellIndex], labelValue)
+            if (labelValue != null && labelValue !== '') {
+                let stats = labelStats[cellIndex].get(labelValue)
+                if (!stats) labelStats[cellIndex].set(labelValue, stats = {count: 0, prominence: null})
+                stats.count++
+                let prominenceValue = prominenceCol ? toFiniteNumber(columnValue(prominenceCol, i)) : null
+                if (prominenceValue == null && populationCol) prominenceValue = toFiniteNumber(columnValue(populationCol, i))
+                if (prominenceValue != null && (stats.prominence == null || prominenceValue > stats.prominence)) stats.prominence = prominenceValue
+            }
         }
     }
     doneGroupXY({cells: x.length})
@@ -814,8 +839,10 @@ function buildCartogramAggregation(rawCols) {
 
     const doneOutput = detailPerfTimer('cartogram.cells.output', {cells: x.length})
     for (let i = 0; i < x.length; i++) {
+        const cellLabel = dominantLabel(labelStats[i])
         code.push(dominant(codeCounts[i]))
-        label.push(dominant(labelCounts[i]))
+        label.push(cellLabel)
+        prominence.push(labelStats[i].get(cellLabel)?.prominence ?? null)
         index.push('')
         anchorIndex.push('')
     }
@@ -833,6 +860,7 @@ function buildCartogramAggregation(rawCols) {
         y,
         code,
         label,
+        prominence,
         index,
         anchorIndex,
     }
@@ -1051,6 +1079,8 @@ function loadCartogramWeights(cartogramWeightsFile) {
             y: await materializeArrowColumn(rawTable, 'y', 'cartogram.weights.column'),
             code: await materializeArrowColumn(rawTable, 'code', 'cartogram.weights.column'),
             label: rawTable.getChild('label'),
+            prominence: rawTable.getChild('prominence'),
+            population: rawTable.getChild('population'),
             index: rawTable.getChild('index'),
             index_lower: await materializeArrowColumn(rawTable, H3_INDEX_LOWER, 'cartogram.weights.column'),
             index_upper: await materializeArrowColumn(rawTable, H3_INDEX_UPPER, 'cartogram.weights.column'),
@@ -1987,6 +2017,7 @@ function bootstrap(meta = {}){
             _code: cartogramAgg.code,
             code: cartogramAgg.code,
             label: cartogramAgg.label,
+            prominence: cartogramAgg.prominence,
             index: cartogramAgg.index,
             [meanCol]: aggregated.values,
         }

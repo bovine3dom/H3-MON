@@ -21,10 +21,11 @@ export function render_cartogram(container, data, options = {}) {
         country_border_color = "black",
         country_border_width = 1.5,
         include_outer_borders = false,
-        font_size = 8,
+        font_size = 10,
+        label_max_font_size = 15,
         font_face = "Iosevka, monospace",
         text_color = "black",
-        label_min_screen_px = 8,
+        label_padding = 16,
         max_canvas_labels = 5000,
         data_col = 'code',
         perf = false,
@@ -36,6 +37,8 @@ export function render_cartogram(container, data, options = {}) {
         onmove_callback = () => {},
         onviewchange_callback = () => {},
     } = options
+    const maxScreenFontPx = Math.max(font_size, label_max_font_size)
+    const collisionCellSize = Math.max(64, maxScreenFontPx * 4)
 
     const HTML_ESCAPES = {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}
     function escapeHtml(value) {
@@ -69,6 +72,8 @@ export function render_cartogram(container, data, options = {}) {
     const yCol = currentData.y
     const codeCol = currentData.code
     const labelCol = currentData.label
+    const prominenceCol = currentData.prominence
+    const populationCol = currentData.population
 
     if (!xCol || !yCol || !codeCol) {
         console.error("Missing required columns: x, y, or code.")
@@ -121,7 +126,9 @@ export function render_cartogram(container, data, options = {}) {
     let borderLines = []
     let labelCount = 0
     let labeledIndices = []
-    let labelAngles = []
+    let labelTexts = []
+    let labelFontSizes = []
+    let labelWidths = []
     let highlightedIndices = []
     let latestTransform = d3.zoomIdentity
     let fitToBoundsActive = false
@@ -305,15 +312,42 @@ export function render_cartogram(container, data, options = {}) {
     if (labelCol) {
         const doneLabels = perfTimer('labels.precompute', {rows: numRows})
         labeledIndices = []
-        labelAngles = new Float32Array(numRows)
+        labelTexts = new Array(numRows)
+        const prominenceValues = new Float64Array(numRows)
+        prominenceValues.fill(NaN)
+        labelFontSizes = new Float32Array(numRows)
+        labelWidths = new Float32Array(numRows)
+        let prominentLabels = 0
         for (let i = 0; i < numRows; i++) {
             const label = labelCol[i]
             if (label === null || label === undefined || label === "") continue
             labeledIndices.push(i)
-            labelAngles[i] = ((Math.random() * 90) - 45) * Math.PI / 180
+            labelTexts[i] = String(label).split(',', 1)[0].trim()
+            let prominence = prominenceCol && prominenceCol[i] != null ? Number(prominenceCol[i]) : NaN
+            if (!Number.isFinite(prominence) && populationCol && populationCol[i] != null) prominence = Number(populationCol[i])
+            if (Number.isFinite(prominence)) {
+                prominenceValues[i] = prominence
+                prominentLabels++
+            }
         }
+        labeledIndices.sort((a, b) => {
+            const aProminence = prominenceValues[a]
+            const bProminence = prominenceValues[b]
+            if (Number.isFinite(aProminence)) return Number.isFinite(bProminence) ? bProminence - aProminence || a - b : -1
+            return Number.isFinite(bProminence) ? 1 : a - b
+        })
         labelCount = labeledIndices.length
-        doneLabels({labels: labelCount, renderer: 'canvas'})
+        const fontRange = Math.max(0, label_max_font_size - font_size)
+        labelFontSizes.fill(font_size)
+        let rank = 0
+        while (rank < prominentLabels) {
+            let rankEnd = rank + 1
+            while (rankEnd < prominentLabels && prominenceValues[labeledIndices[rankEnd]] === prominenceValues[labeledIndices[rank]]) rankEnd++
+            const prominenceRank = prominentLabels > 1 ? 1 - rank / (prominentLabels - 1) : 1
+            const labelFontSize = Math.round(font_size + fontRange * prominenceRank)
+            for (; rank < rankEnd; rank++) labelFontSizes[labeledIndices[rank]] = labelFontSize
+        }
+        doneLabels({labels: labelCount, prominentLabels, renderer: 'canvas'})
     }
 
     function transformDetails(transform) {
@@ -705,34 +739,80 @@ export function render_cartogram(container, data, options = {}) {
         const bordersMs = svgPerf ? perfNow() - bordersStart : 0
 
         let drawnLabels = 0
-        const screenFontPx = font_size * vt.scale * transform.k
-        let labelSkipReason = null
+        let testedLabels = 0
+        let collidedLabels = 0
+        const screenFontPx = font_size
+        const labelSkipReason = labelCount ? null : 'no-labels'
         const labelsStart = svgPerf ? perfNow() : 0
-        if (labelCount && screenFontPx >= label_min_screen_px) {
-            ctx.font = `${font_size}px ${font_face}`
+        if (labelCount) {
+            ctx.save()
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
             ctx.textAlign = 'center'
             ctx.textBaseline = 'middle'
             ctx.lineJoin = 'round'
-            ctx.lineWidth = 2
+            ctx.lineWidth = 3
             ctx.strokeStyle = 'white'
             ctx.fillStyle = text_color
+            const collisionCols = Math.max(1, Math.ceil(canvasCssWidth / collisionCellSize))
+            const collisionRows = Math.max(1, Math.ceil(canvasCssHeight / collisionCellSize))
+            const collisionGrid = new Array(collisionCols * collisionRows)
+            let currentFontSize = null
             for (const i of labeledIndices) {
-                const cx = cellX[i]
-                const cy = cellY[i]
-                if (cx < xMinVisible || cx > xMaxVisible || cy < yMinVisible || cy > yMaxVisible) continue
-                ctx.save()
-                ctx.translate(cx, cy)
-                ctx.rotate(labelAngles[i])
-                ctx.strokeText(labelCol[i], 0, 0)
-                ctx.fillText(labelCol[i], 0, 0)
-                ctx.restore()
+                const x = vt.offsetX + (cellX[i] * transform.k + transform.x) * vt.scale
+                const y = vt.offsetY + (cellY[i] * transform.k + transform.y) * vt.scale
+                const labelFontSize = labelFontSizes[i]
+                if (labelFontSize !== currentFontSize) {
+                    ctx.font = `${labelFontSize}px ${font_face}`
+                    currentFontSize = labelFontSize
+                }
+                let labelWidth = labelWidths[i]
+                if (!labelWidth) labelWidths[i] = labelWidth = ctx.measureText(labelTexts[i]).width
+                const halfWidth = labelWidth / 2 + label_padding
+                const halfHeight = labelFontSize / 2 + label_padding
+                const left = x - halfWidth
+                const right = x + halfWidth
+                const top = y - halfHeight
+                const bottom = y + halfHeight
+                if (right < 0 || left > canvasCssWidth || bottom < 0 || top > canvasCssHeight) continue
+                testedLabels++
+
+                const gridXMin = Math.max(0, Math.floor(left / collisionCellSize))
+                const gridXMax = Math.min(collisionCols - 1, Math.floor(right / collisionCellSize))
+                const gridYMin = Math.max(0, Math.floor(top / collisionCellSize))
+                const gridYMax = Math.min(collisionRows - 1, Math.floor(bottom / collisionCellSize))
+                let collides = false
+                for (let gridY = gridYMin; gridY <= gridYMax && !collides; gridY++) {
+                    for (let gridX = gridXMin; gridX <= gridXMax && !collides; gridX++) {
+                        const bucket = collisionGrid[gridY * collisionCols + gridX]
+                        if (!bucket) continue
+                        for (const other of bucket) {
+                            if (left < other.right && right > other.left && top < other.bottom && bottom > other.top) {
+                                collides = true
+                                break
+                            }
+                        }
+                    }
+                }
+                if (collides) {
+                    collidedLabels++
+                    continue
+                }
+
+                const box = {left, right, top, bottom}
+                for (let gridY = gridYMin; gridY <= gridYMax; gridY++) {
+                    for (let gridX = gridXMin; gridX <= gridXMax; gridX++) {
+                        const gridIndex = gridY * collisionCols + gridX
+                        const bucket = collisionGrid[gridIndex]
+                        if (bucket) bucket.push(box)
+                        else collisionGrid[gridIndex] = [box]
+                    }
+                }
+                ctx.strokeText(labelTexts[i], x, y)
+                ctx.fillText(labelTexts[i], x, y)
                 drawnLabels++
                 if (drawnLabels >= max_canvas_labels) break
             }
-        } else if (!labelCount) {
-            labelSkipReason = 'no-labels'
-        } else {
-            labelSkipReason = 'too-small'
+            ctx.restore()
         }
         const labelsMs = svgPerf ? perfNow() - labelsStart : 0
 
@@ -772,9 +852,12 @@ export function render_cartogram(container, data, options = {}) {
                 fillStyleChanges,
                 drawnBorders,
                 drawnLabels,
+                testedLabels,
+                collidedLabels,
                 labelCount,
                 labelSkipReason,
                 screenFontPx,
+                maxScreenFontPx,
                 visibleBounds: {xMin: xMinVisible, xMax: xMaxVisible, yMin: yMinVisible, yMax: yMaxVisible},
                 resized,
                 cssWidth: canvasCssWidth,
