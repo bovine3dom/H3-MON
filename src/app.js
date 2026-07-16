@@ -1,7 +1,7 @@
 import {MapboxOverlay} from '@deck.gl/mapbox'
 import {H3HexagonLayer, TileLayer} from '@deck.gl/geo-layers'
 import {BitmapLayer, GeoJsonLayer } from '@deck.gl/layers'
-import {PackedH3HexagonLayer} from 'faster-h3-for-deckgl'
+import {PackedH3FillTransition, PackedH3HexagonLayer} from 'faster-h3-for-deckgl'
 import {CSVLoader} from '@loaders.gl/csv'
 import {ArrowLoader} from '@loaders.gl/arrow'
 import {ParquetWasmLoader} from '@loaders.gl/parquet'
@@ -13,7 +13,6 @@ import 'maplibre-gl/dist/maplibre-gl.css'
 import * as observablehq from './vendor/observablehq' // from https://observablehq.com/@d3/color-legend
 import {getCitiesStartsWith} from 'tiny-geocoder'
 import {render_cartogram} from './cartogram'
-import {PackedH3FillTransitionExtension} from './packed-h3-fill-transition'
 
 const params = new URLSearchParams(window.location.search)
 function settingEnabled(value, fallback = false) {
@@ -1416,7 +1415,7 @@ function bootstrap(meta = {}){
     const colourPaletteRgba = new Uint8Array(COLOUR_PALETTE_SIZE * 4)
     const colourTransition = {duration: COLOUR_TRANSITION_DURATION, easing: d3.easeCubicInOut}
     const packedH3FillTransition = COLOUR_TRANSITION_DURATION
-        ? new PackedH3FillTransitionExtension(colourTransition)
+        ? new PackedH3FillTransition(colourTransition)
         : null
     let colourVersion = 0
     let activeH3Layer = null

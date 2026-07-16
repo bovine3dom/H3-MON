@@ -1482,7 +1482,7 @@ fast-xml-parser@^4.2.5:
 
 "faster-h3-for-deckgl@https://github.com/bovine3dom/faster-h3-for-deckgl":
   version "0.1.0"
-  resolved "https://github.com/bovine3dom/faster-h3-for-deckgl#90bf37b11793e287aed84af82ffde5aa60c15956"
+  resolved "https://github.com/bovine3dom/faster-h3-for-deckgl#17d4e283bd197b6fdbfa0cd6779bf7eef31da562"
   dependencies:
     earcut "^2.2.4"
     h3-js "^4.4.0"
