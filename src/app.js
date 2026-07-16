@@ -585,6 +585,7 @@ let dataH3Res = null
 let cartogramAgg = null
 let cartogramRawCols = null
 let h3toXYPromise = null
+const MAX_CARTOGRAM_RESOLUTION_GAP = 3
 
 function addCount(counts, value) {
     counts.set(value, (counts.get(value) || 0) + 1)
@@ -2085,7 +2086,7 @@ function bootstrap(meta = {}){
     }
 
     let reloadNum = 0
-    const getHexData = async (publishLayer, publishEarly) => {
+    const getHexData = async publishLayer => {
         const doneGetHexData = perfTimer('data.reload.total', {file: file_name, ext, layer: format.layer})
         activeH3Layer = null
         viewportQuantileState = null
@@ -2138,6 +2139,7 @@ function bootstrap(meta = {}){
                     return cartogramInit
                 })
                 : null
+            cartogramReady?.catch(() => {})
             const h3res = schemaHasH3Index && h3RowCount(dataCols) ? getResolution(h3IndexInputAt(dataCols, 0)) : null
             dataH3Res = h3res
             const valuekey = doQuantiles ? 'quantile' : 'value'
@@ -2147,16 +2149,8 @@ function bootstrap(meta = {}){
 
             window._columnData = dataCols
             window.raw_data = dataCols
-            let deckLayer
 
-            if (publishEarly && cartogramEnabled && schemaHasH3Index) {
-                const doneDeckLayer = perfTimer('deck.hex_layer.create', {rows: dataCols.value.length, renderer: 'packed', pickable: false, h3Index: hasSplitH3Index(dataCols) ? 'split' : 'string'})
-                deckLayer = createH3Layer(dataCols, 'column', valuekey)
-                doneDeckLayer()
-                await publishLayer(deckLayer)
-            }
-
-            if (doQuantiles && !useCartogramQuantiles) {
+            if (doQuantiles) {
                 setLoadStage('Calculating quantiles')
                 const doneEcdf = perfTimer('data.quantile.ecdf', {rows: values.length, weighted: !!weights})
                 const [getquantile, getvalue] = ecdf(values, trimFactor, weights)
@@ -2168,13 +2162,47 @@ function bootstrap(meta = {}){
                 doneQuantileAssign()
                 makeLegend(getvalueFn)
                 setLoadStage('Quantiles ready')
-                if (deckLayer) await refreshH3LayerColours()
-            } else if (!doQuantiles) {
+            } else {
                 makeLegend()
             }
 
-            if (cartogramEnabled && schemaHasH3Index) {
-                await waitWithLoadProgress(cartogramReady, 'Waiting for cartogram weights')
+            setLoadStage('Preparing map layer')
+            const doneDeckLayer = perfTimer('deck.hex_layer.create', {rows: dataCols.value.length, renderer: 'packed', pickable: false, h3Index: hasSplitH3Index(dataCols) ? 'split' : 'string'})
+            const deckLayer = createH3Layer(dataCols, 'column', valuekey)
+            doneDeckLayer()
+            // Cartogram I/O must not delay the geographic map.
+            await publishLayer(deckLayer)
+
+            const failCartogram = error => {
+                cartoValueCol = null
+                cartogramInit = null
+                cartogramRawCols = null
+                cartogramAgg = null
+                cartoAggCols = null
+                h3toXY = null
+                h3toXYPromise = null
+                document.body.classList.remove('cartogram-ready')
+                console.warn('Cartogram unavailable; map loaded without it', error)
+            }
+
+            let cartogramAvailable = !!cartogramReady
+            if (cartogramReady) {
+                try {
+                    await waitWithLoadProgress(cartogramReady, 'Waiting for cartogram weights')
+                } catch (error) {
+                    cartogramAvailable = false
+                    failCartogram(error)
+                }
+            }
+            const resolutionGap = h3res == null ? 0 : h3res - cartoRes
+            const loadCartogram = cartogramAvailable && resolutionGap <= MAX_CARTOGRAM_RESOLUTION_GAP
+            if (cartogramAvailable && !loadCartogram) {
+                console.warn(`Skipping cartogram: source H3 resolution ${h3res} is ${resolutionGap} levels finer than cartogram resolution ${cartoRes} (maximum ${MAX_CARTOGRAM_RESOLUTION_GAP}; up to ~${7 ** resolutionGap} source cells per cartogram cell)`)
+                cartoAggCols = null
+                document.body.classList.remove('cartogram-ready')
+            }
+
+            if (loadCartogram) try {
                 await yieldToPaint('Aggregating cartogram')
 
                 cartoAggCols = null
@@ -2204,10 +2232,6 @@ function bootstrap(meta = {}){
                         doneCartoEcdf()
                         getquantileFn = getquantile
                         getvalueFn = getvalue
-                        const doneDataQuantiles = perfTimer('cartogram.quantile.assign_data', {rows: values.length})
-                        dataCols.quantile = assignQuantiles(values, getquantile)
-                        doneDataQuantiles()
-                        if (deckLayer) await refreshH3LayerColours()
                     }
                     if (doQuantiles && getquantileFn) {
                         const cartoValues = cartoAggCols[cartoValueCol]
@@ -2215,7 +2239,6 @@ function bootstrap(meta = {}){
                         cartoAggCols.carto_quantile = assignQuantiles(cartoValues, getquantileFn)
                         doneCartoQuantiles()
                         cartoDataCol = 'carto_quantile'
-                        makeLegend(getvalueFn)
                     }
 
                     if (!cartogramApi) {
@@ -2294,23 +2317,18 @@ function bootstrap(meta = {}){
                         cartogramApi.updateData(cartoAggCols, cartoDataCol)
                         doneUpdateCartogram()
                     }
+                    if (useCartogramQuantiles && doQuantiles) {
+                        const doneDataQuantiles = perfTimer('cartogram.quantile.assign_data', {rows: values.length})
+                        dataCols.quantile = assignQuantiles(values, getquantileFn)
+                        doneDataQuantiles()
+                        await refreshH3LayerColours()
+                        makeLegend(getvalueFn)
+                    }
                     document.body.classList.add('cartogram-ready')
                     setLoadStage('Rendering map')
                 }
-            }
-
-            if (!cartoAggCols && useCartogramQuantiles && doQuantiles) {
-                setLoadStage('Calculating map quantiles')
-                const doneEcdf = perfTimer('data.quantile.ecdf', {rows: values.length, weighted: !!weights, fallback: 'no-cartogram'})
-                const [getquantile, getvalue] = ecdf(values, trimFactor, weights)
-                doneEcdf()
-                getquantileFn = getquantile
-                getvalueFn = getvalue
-                const doneQuantileAssign = perfTimer('data.quantile.assign', {rows: values.length, fallback: 'no-cartogram'})
-                dataCols.quantile = assignQuantiles(values, getquantile)
-                doneQuantileAssign()
-                makeLegend(getvalueFn)
-                if (deckLayer) await refreshH3LayerColours()
+            } catch (error) {
+                failCartogram(error)
             }
 
             if (doQuantiles && getquantileFn) {
@@ -2323,13 +2341,6 @@ function bootstrap(meta = {}){
                     weights,
                     cartogramValues: cartoValueCol ? cartoAggCols[cartoValueCol] : null,
                 }
-            }
-
-            if (!deckLayer) {
-                setLoadStage('Preparing map layer')
-                const doneDeckLayer = perfTimer('deck.hex_layer.create', {rows: dataCols.value.length, renderer: 'packed', pickable: false, h3Index: hasSplitH3Index(dataCols) ? 'split' : 'string'})
-                deckLayer = createH3Layer(dataCols, 'column', valuekey)
-                doneDeckLayer()
             }
 
             doneGetHexData({rows: dataCols.value.length, cartogramRows: cartoAggCols ? cartoAggCols.x.length : 0, h3Index: hasSplitH3Index(dataCols) ? 'split' : 'string'})
@@ -2867,7 +2878,7 @@ function bootstrap(meta = {}){
         }
 
         try {
-            const layer = await getHexData(publishLayer, publishEarly)
+            const layer = await getHexData(publishLayer)
             if (!mapReady) {
                 await publishLayer(layer)
             }
