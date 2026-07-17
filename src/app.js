@@ -34,6 +34,7 @@ function webgpuGeometrySetting(value) {
 }
 const perfEnabled = flagEnabled('perf')
 const svgPerfEnabled = flagEnabled('svgperf')
+let perfSocket = null
 function parseH3Precision(value) {
     if (value == null || value === '') return undefined
     if (String(value).toLowerCase() === 'auto') return 'auto'
@@ -363,6 +364,18 @@ function logPerf(label, elapsed, details, extra) {
         console.info(`[perf] ${label}: ${elapsed.toFixed(1)}ms`, merged)
     } else {
         console.info(`[perf] ${label}: ${elapsed.toFixed(1)}ms`)
+    }
+    if (label === 'data.reload.total') {
+        sendPerfTelemetry(label, {...merged, durationMs: Number(elapsed.toFixed(1))})
+    }
+}
+
+function sendPerfTelemetry(event, details) {
+    if (!perfEnabled || perfSocket?.readyState !== WebSocket.OPEN) return
+    try {
+        perfSocket.send(`perf:${JSON.stringify({event, timestamp: new Date().toISOString(), ...details})}`)
+    } catch (error) {
+        console.warn('[perf] Failed to submit telemetry', error)
     }
 }
 
@@ -1064,6 +1077,42 @@ const file_name = dotIdx >= 0 ? dataParam : `${dataParam}.csv`
 const base_name = dotIdx >= 0 ? dataParam.slice(0, dotIdx) : dataParam
 const meta_name = `${base_name}.json`
 
+async function reportDevicePerf(requestedRenderer, renderer, adapter) {
+    const gpu = navigator.gpu
+    const webgpu = {apiAvailable: Boolean(gpu), adapterAvailable: false}
+    if (gpu) {
+        try {
+            adapter ||= await gpu.requestAdapter()
+            webgpu.adapterAvailable = Boolean(adapter)
+            if (adapter) {
+                let info = adapter.info
+                if (!info && adapter.requestAdapterInfo) {
+                    try { info = await adapter.requestAdapterInfo() } catch (_) {}
+                }
+                if (info) {
+                    webgpu.adapterInfo = {vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description}
+                }
+                const isFallbackAdapter = info?.isFallbackAdapter ?? adapter.isFallbackAdapter
+                if (typeof isFallbackAdapter === 'boolean') webgpu.isFallbackAdapter = isFallbackAdapter
+            }
+        } catch (error) {
+            webgpu.error = error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+        }
+    }
+
+    sendPerfTelemetry('device', {
+        file: file_name,
+        requestedRenderer,
+        renderer,
+        userAgent: navigator.userAgent,
+        platform: navigator.userAgentData?.platform || navigator.platform,
+        hardwareConcurrency: navigator.hardwareConcurrency,
+        deviceMemoryGb: navigator.deviceMemory,
+        screen: {width: screen.width, height: screen.height, colorDepth: screen.colorDepth, pixelRatio: window.devicePixelRatio},
+        webgpu,
+    })
+}
+
 function cartogramFile(value) {
     if (value == null || value === '') return 'cartogram_weights.arrow'
     const file = String(value).trim()
@@ -1470,6 +1519,7 @@ function bootstrap(meta = {}){
     let activeWebgpuChunkSet = null
     let viewportQuantileState = null
     let activeH3Renderer = 'deck'
+    let stopFrameRateTelemetry = null
     let webgpuRenderer = null
     let webgpuMatrixLayer = null
     let webgpuRendererInit = null
@@ -1481,6 +1531,32 @@ function bootstrap(meta = {}){
     const ownedWebgpuLayers = new WeakSet()
     const removingWebgpuLayers = new WeakSet()
     const webgpuMatrixLayerId = 'webgpu-packed-h3-matrix'
+    function startFrameRateTelemetry() {
+        let frames = 0
+        let startedAt = now()
+        const countFrame = () => frames++
+        map.on('render', countFrame)
+        const interval = setInterval(() => {
+            const endedAt = now()
+            const durationMs = endedAt - startedAt
+            sendPerfTelemetry('framerate', {
+                file: file_name,
+                requestedRenderer,
+                renderer: activeH3Renderer,
+                source: 'maplibre.render',
+                durationMs: Number(durationMs.toFixed(1)),
+                frames,
+                fps: Number((frames * 1000 / durationMs).toFixed(1)),
+                visibilityState: document.visibilityState,
+            })
+            frames = 0
+            startedAt = endedAt
+        }, 5000)
+        return () => {
+            map.off('render', countFrame)
+            clearInterval(interval)
+        }
+    }
     for (let i = 0; i < COLOUR_PALETTE_SIZE; i++) {
         const css = colourRamp(i / (COLOUR_PALETTE_SIZE - 1)) ?? transparentCss
         const rgba = parseColour(css)
@@ -3132,6 +3208,7 @@ function bootstrap(meta = {}){
             if (format.kind === 'column') window._columnData = data
             const rows = format.kind === 'column' ? data.value.length : data.length
             const layer = await measurePerf('deck.hex_layer.create', {rows, renderer: requestedRenderer, pickable: false, h3Index: format.kind === 'column' && hasSplitH3Index(data) ? 'split' : 'string'}, () => createMainH3Renderable(data, format.kind, valuekey))
+            await publishLayer(layer)
             doneGetHexData({rows, h3Index: format.kind === 'column' && hasSplitH3Index(data) ? 'split' : 'string'})
             return layer
         }
@@ -3161,6 +3238,7 @@ function bootstrap(meta = {}){
                 pickable: false
             })
             doneGeoJsonLayer()
+            await publishLayer(layer)
             doneGetHexData({rows: data.features.length})
             return layer
         }
@@ -3673,6 +3751,10 @@ function bootstrap(meta = {}){
             }
             const rendererError = explicitWebgpuFailure()
             if (rendererError) throw rendererError
+            if (perfEnabled && !stopFrameRateTelemetry && perfSocket?.readyState === WebSocket.OPEN) {
+                void reportDevicePerf(requestedRenderer, activeH3Renderer, webgpuRenderer?.adapter)
+                stopFrameRateTelemetry = startFrameRateTelemetry()
+            }
             finishLoadProgress()
         } catch (e) {
             if (!mapReady) doneMapReady({failed: true})
@@ -3860,20 +3942,30 @@ function bootstrap(meta = {}){
                 update()
             }, delay)
         }
+        const stopPerfTelemetry = () => {
+            if (perfSocket === socket) perfSocket = null
+            stopFrameRateTelemetry?.()
+            stopFrameRateTelemetry = null
+        }
         socket.addEventListener("error", () => {
             console.warn("WebSocket error, automatic updates disabled")
+            stopPerfTelemetry()
             if (!updateStarted) startUpdate()
         })
         socket.addEventListener("open", () => {
             socket.send("ping")
             socket.send(`watch:${file_name}`)
+            if (perfEnabled) perfSocket = socket
         })
         socket.addEventListener("message", (event) => {
             const message = String(event.data)
             if (message.startsWith("change") || message.startsWith("watching")) {
                 startUpdate(100) // give file some time to be written
+            } else if (message.startsWith("remove:") || message.startsWith("error:")) {
+                stopPerfTelemetry()
             }
         })
+        socket.addEventListener("close", stopPerfTelemetry)
     } catch (e) {
         console.warn("WebSocket unavailable, automatic updates disabled", e)
         update()

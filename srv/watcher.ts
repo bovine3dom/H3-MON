@@ -8,6 +8,8 @@ const HTTP_PORT = 1983;
 const WATCH_DIR_NAME = "data";
 const DEBOUNCE_MS = 200;
 const OVERWRITE_CHECK_DELAY_MS = 300; // Delay in ms to wait after remove event
+const MAX_PERF_MESSAGE_LENGTH = 16_384;
+const PERF_EVENTS = new Set(["device", "data.reload.total", "framerate"]);
 const BASE_WWW_PATH = resolve(Deno.cwd(), "www");
 const WATCH_DIR_PATH = resolve(BASE_WWW_PATH, WATCH_DIR_NAME);
 
@@ -20,6 +22,7 @@ const fileSubscriptions = new Map<string, Set<WebSocket>>();
 const fileWatchers = new Map<string, Deno.FsWatcher>();
 const debouncedNotifiers = new Map<string, () => void>();
 const clientWatchTargets = new Map<WebSocket, string>();
+let nextClientId = 1;
 
 
 // check for .. etc
@@ -229,13 +232,31 @@ Deno.serve({ port: WS_PORT }, (req) => {
         return new Response("Expected websocket upgrade", { status: 400 });
     }
     const { socket, response } = Deno.upgradeWebSocket(req);
+    const clientId = nextClientId++;
 
-    socket.addEventListener("open", () => console.log("Client connected. Waiting for 'watch:' message."));
+    socket.addEventListener("open", () => console.log(`Client ${clientId} connected. Waiting for 'watch:' message.`));
 
     socket.addEventListener("message", async (event) => {
         const message = event.data;
         if (message === "ping") {
             if (socket.readyState === WebSocket.OPEN) socket.send("pong");
+            return;
+        }
+
+        if (typeof message === "string" && message.startsWith("perf:")) {
+            try {
+                const watchedFile = clientWatchTargets.get(socket);
+                if (!watchedFile) throw new Error("no active watch");
+                const encoded = message.substring("perf:".length);
+                if (encoded.length > MAX_PERF_MESSAGE_LENGTH) throw new Error("message too large");
+                const payload = JSON.parse(encoded);
+                if (!PERF_EVENTS.has(payload?.event)) throw new Error("invalid event");
+                payload.file = watchedFile.slice(WATCH_DIR_PATH.length + 1);
+                console.log(`[perf] ${new Date().toISOString()} client=${clientId} ${JSON.stringify(payload)}`);
+            } catch (error) {
+                console.warn(`[perf] Rejected message from client ${clientId}:`, error instanceof Error ? error.message : error);
+                if (socket.readyState === WebSocket.OPEN) socket.send("error:Invalid perf message");
+            }
             return;
         }
 
@@ -273,7 +294,7 @@ Deno.serve({ port: WS_PORT }, (req) => {
     });
 
     socket.addEventListener("close", () => {
-        console.log("Client disconnected.");
+        console.log(`Client ${clientId} disconnected.`);
         removeSubscription(socket);
     });
 
