@@ -1388,7 +1388,10 @@ function bootstrap(meta = {}){
     const doCyclical = settingEnabled(settings.cyclical, false)
     const flip = settingEnabled(settings.flip, false)
     const showTrains = settingEnabled(settings.trains, false)
-    const colourRamp = d3.scaleSequential(doCyclical ? d3.interpolateRainbow : d3.interpolateSpectral).domain(flip ? [1,0] : [0,1])
+    const namedColourScheme = d3[settings.colourScheme]
+    const colourScheme = typeof namedColourScheme === 'function' ? namedColourScheme : (doCyclical ? d3.interpolateRainbow : d3.interpolateSpectral)
+    if (settings.colourScheme && typeof namedColourScheme !== 'function') console.warn(`Unknown D3 colour scheme "${settings.colourScheme}", using the default`)
+    const colourRamp = d3.scaleSequential(colourScheme).domain(flip ? [1,0] : [0,1])
     const file_path = `data/${file_name}`
     let h3DataRowLookup = null
     const mapHoverTooltip = document.createElement('div')
