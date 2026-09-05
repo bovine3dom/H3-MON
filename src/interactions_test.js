@@ -6,6 +6,45 @@ function assert(condition, message = 'Assertion failed') {
 
 const delay = (wait = 25) => new Promise(resolve => setTimeout(resolve, wait))
 
+Deno.test('explicit replay uses metadata, carries context, and can deduplicate parameter edits', async () => {
+    const calls = []
+    const metadata = {onmove: {url: '/reachable?index={index}&budget_s={controls.time}'}}
+    let minutes = 180
+    const interactions = createInteractions({
+        getSettings: () => ({onmove: false}), getReplaySettings: () => metadata,
+        getValues: (_config, point) => ({index: point.index, 'controls.time': String(minutes * 60)}),
+        request: async (url, context) => { calls.push({url, context}); return true },
+        baseURL: 'https://example.test',
+    })
+    const point = {index: '851fb467fffffff', lat: 48.8, lng: 2.4}
+    interactions.move(point)
+    assert(calls.length === 0)
+    assert(await interactions.replay('onmove', point))
+    assert(calls[0].context.event === 'onmove' && calls[0].context.point.index === point.index)
+    point.lat = 10
+    assert(calls[0].context.point.lat === 48.8)
+    await interactions.replay('onmove', point, {force: false})
+    assert(calls.length === 1)
+    minutes = 360
+    await interactions.replay('onmove', point, {force: false})
+    assert(calls.length === 2 && new URL(calls[1].url).searchParams.get('budget_s') === '21600')
+    await interactions.retry()
+    assert(calls.length === 3)
+    interactions.cancel()
+})
+
+Deno.test('disabled movement cannot replace the click selected for Retry', async () => {
+    const calls = []
+    const interactions = createInteractions({
+        getSettings: () => ({onclick: {url: '/{index}'}}), getValues: (_config, point) => point,
+        request: async url => { calls.push(url); return false }, baseURL: 'https://example.test',
+    })
+    await interactions.click({index: 'clicked'})
+    interactions.move({index: 'unconfigured-move'})
+    await interactions.retry()
+    assert(calls.join(',') === 'https://example.test/clicked,https://example.test/clicked')
+})
+
 function setup(settings = {}, options = {}) {
     const calls = []
     const errors = []

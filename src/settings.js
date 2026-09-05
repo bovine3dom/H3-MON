@@ -170,7 +170,7 @@ export const SETTINGS_BY_KEY = new Map(SETTINGS_SCHEMA.map(setting => [setting.k
 
 function parseNumber(value) {
     if (typeof value === 'number') return value
-    if (value === '') return value
+    if (String(value).trim() === '') return value
     const number = Number(value)
     return Number.isFinite(number) ? number : value
 }
@@ -203,10 +203,10 @@ export function serializeSettingValue(setting, value) {
     return String(value ?? '')
 }
 
-export function readSettingLayers(metadata = {}, searchParams = new URLSearchParams()) {
+export function readSettingLayers(metadata = {}, searchParams = new URLSearchParams(), schema = SETTINGS_SCHEMA) {
     const query = Object.fromEntries(searchParams.entries())
     const overrides = {}
-    for (const setting of SETTINGS_SCHEMA) {
+    for (const setting of schema) {
         if (searchParams.has(setting.key)) overrides[setting.key] = parseSettingValue(setting, searchParams.get(setting.key))
     }
     return {
@@ -230,7 +230,10 @@ export function validateSettingValue(setting, value) {
     if (setting.type === 'number') {
         if (!Number.isFinite(value)) return `${setting.name} must be a number.`
         if (setting.min != null && value < setting.min) return `${setting.name} must be at least ${setting.min}.`
-        if (setting.max != null && value > setting.max) return `${setting.name} must be less than 0.5.`
+        if (setting.max != null && value > setting.max) return `${setting.name} must be at most ${setting.max}.`
+    }
+    if (setting.type === 'time' && (typeof value !== 'string' || ![5, 8].includes(value.length) || !/^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/.test(value))) {
+        return `${setting.name} must be a 24-hour time.`
     }
     if (setting.type === 'nullableNumber' && value != null && !Number.isFinite(value)) {
         return `${setting.name} must be a number or left unused.`
@@ -254,8 +257,8 @@ export function settingValuesEqual(left, right) {
     return JSON.stringify(left) === JSON.stringify(right)
 }
 
-export function updateUrlSettingOverrides(url, overrides) {
-    for (const setting of SETTINGS_SCHEMA) {
+export function updateUrlSettingOverrides(url, overrides, schema = SETTINGS_SCHEMA) {
+    for (const setting of schema) {
         url.searchParams.delete(setting.key)
         if (Object.prototype.hasOwnProperty.call(overrides, setting.key)) {
             url.searchParams.set(setting.key, serializeSettingValue(setting, overrides[setting.key]))

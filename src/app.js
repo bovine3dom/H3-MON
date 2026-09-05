@@ -8,15 +8,17 @@ import {ParquetWasmLoader} from '@loaders.gl/parquet'
 import {load, parse} from '@loaders.gl/core'
 import maplibregl from 'maplibre-gl'
 import * as d3 from 'd3'
-import {cellToBoundary, cellToLatLng, latLngToCell, getResolution, cellToParent, cellToChildren, h3IndexToSplitLong, splitLongToH3Index} from 'h3-js'
+import {cellToBoundary, cellToLatLng, latLngToCell, getResolution, isValidCell, cellToParent, cellToChildren, h3IndexToSplitLong, splitLongToH3Index} from 'h3-js'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import * as observablehq from './vendor/observablehq' // from https://observablehq.com/@d3/color-legend
 import {getCitiesStartsWith} from 'tiny-geocoder'
 import {render_cartogram} from './cartogram'
 import {createSettingsPanel} from './settings-panel'
-import {readSettingLayers, settingEnabled, updateUrlSettingOverrides} from './settings'
+import {SETTINGS_SCHEMA, readSettingLayers, serializeSettingValue, settingEnabled, updateUrlSettingOverrides} from './settings'
 import {createInteractions} from './interactions'
 import {createRequestStatus} from './request-status'
+import {createRequestControls} from './request-controls'
+import {readQueryState, writeQueryState} from './query-state'
 
 const params = new URLSearchParams(window.location.search)
 const DEFAULT_DOCUMENT_TITLE = document.title
@@ -296,7 +298,7 @@ function resetLoadProgress(label = 'Loading…') {
     loadProgress.root.setAttribute('aria-label', label)
 }
 
-function finishLoadProgress() {
+function finishLoadProgress({clearStatus = true} = {}) {
     if (!loadProgress.root) return
     if (loadProgress.timer) {
         clearInterval(loadProgress.timer)
@@ -306,7 +308,7 @@ function finishLoadProgress() {
     loadProgress.completedWork = loadProgress.totalWork
     loadProgress.complete = true
     const finishToken = ++loadProgress.finishToken
-    requestStatus.clear()
+    if (clearStatus) requestStatus.clear()
     if (loadProgress.interactive) {
         loadProgress.value = 100
         loadProgress.root.setAttribute('aria-valuenow', '100')
@@ -1145,8 +1147,8 @@ const map = new maplibregl.Map({
     style: STYLE,
     center: [start_pos.x, start_pos.y],
     zoom: start_pos.z,
-    bearing: 0,
-    pitch: 0
+    bearing: Number(start_pos.b || 0),
+    pitch: Number(start_pos.p || 0)
 })
 
 window.m = map
@@ -1411,22 +1413,32 @@ document.addEventListener('visibilitychange', () => document.hidden && releaseKe
     map.flyTo({
         center: [longitude, latitude],
         zoom: zoom,
-        bearing: 0,
-        pitch: 0
+        bearing: Number(pos.b || 0),
+        pitch: Number(pos.p || 0)
     })
 })
 
-fetch(`data/${meta_name}`).then(r => r.json()).then(meta => {
+fetch(`data/${meta_name}`).then(r => {
+    if (r.status === 404) return {}
+    if (!r.ok) throw new Error(`Could not load metadata: HTTP ${r.status}`)
+    return r.json()
+}).then(meta => {
     bootstrap(meta)
-}).catch(_ => {
-    bootstrap()
+}).catch(error => {
+    document.body.classList.add('load-error')
+    requestStatus.fail(error, {onRetry: () => window.location.reload()})
 })
 
 function bootstrap(meta = {}){
-    const settingLayers = readSettingLayers(meta, params)
+    const requestControls = createRequestControls(meta.controls)
+    const settingSchema = [...requestControls.schema, ...SETTINGS_SCHEMA]
+    const settingLayers = readSettingLayers(meta, params, settingSchema)
     const metadataSettings = settingLayers.metadata
     let settingOverrides = settingLayers.overrides
     let settings = settingLayers.settings
+    const restoredQuery = readQueryState(params)
+    let lastQuery = restoredQuery
+    let requestError = null
     cartogramInit = null
     cartogramWeightsFile = null
     cartogramEnabled = cartogramFile(settings.cartogram) !== null
@@ -2739,7 +2751,7 @@ function bootstrap(meta = {}){
         if (mapHoverRaf === null) mapHoverRaf = requestAnimationFrame(updateMapHoverTooltip)
     }
 
-    async function focusCartogramForH3(h3Index) {
+    async function focusCartogramForH3(h3Index, {focus = true} = {}) {
         hex([h3Index], {fit: false, highlight: true})
         if (!cartogramEnabled || !cartogramApi || !cartoAggCols) return
         const cartoH3s = cartoH3sForDataH3(h3Index)
@@ -2774,7 +2786,7 @@ function bootstrap(meta = {}){
 
         cartogramApi.highlightCells(Array.from(rowSet))
         const padding = 20
-        cartogramApi.fitToBounds([[xMin - padding, yMin - padding, xMax + padding, yMax + padding]])
+        if (focus) cartogramApi.fitToBounds([[xMin - padding, yMin - padding, xMax + padding, yMax + padding]])
     }
 
     const mapOverlay = new MapboxOverlay({
@@ -2817,21 +2829,64 @@ function bootstrap(meta = {}){
 
     const interactions = createInteractions({
         getSettings: () => settings,
+        getReplaySettings: () => metadataSettings,
         baseURL: document.baseURI,
         getValues: (config, point) => {
-            const resolution = config.resolution ?? dataH3Res
+            if (point.index && !isValidCell(point.index)) throw new Error('Invalid query H3 cell')
+            const resolution = config.resolution ?? (point.index ? getResolution(point.index) : dataH3Res)
             if (resolution == null) return null
-            const index = latLngToCell(point.lat, point.lng, resolution)
+            const lng = ((point.lng + 180) % 360 + 360) % 360 - 180
+            let index = point.index || latLngToCell(point.lat, lng, resolution)
+            const sourceResolution = getResolution(index)
+            if (sourceResolution > resolution) index = cellToParent(index, resolution)
+            else if (sourceResolution < resolution) index = latLngToCell(point.lat, lng, resolution)
             const [lower, upper] = h3IndexToSplitLong(index)
+            const inputs = {...metadataSettings, ...(settingsPanelApi?.getOverrides() ?? settingOverrides)}
             return {index, index_lower: lower >>> 0, index_upper: upper >>> 0,
-                lat: point.lat, lng: point.lng, zoom: map.getZoom()}
+                lat: point.lat, lng, zoom: point.zoom ?? map.getZoom(),
+                ...requestControls.encode(inputs), _inputs: requestControls.values(inputs)}
         },
-        request: url => update({url, ext: 'arrow', format: FORMATS.arrow, cacheBust: false}),
+        request: (url, {event, point, values}) => {
+            requestError = null
+            const query = {event, index: values.index, lat: values.lat, lng: values.lng, zoom: values.zoom}
+            if (point.cartogram) query.cartogram = point.cartogram
+            const pageURL = writeQueryState(new URL(window.location.href), query)
+            for (const setting of requestControls.schema) {
+                pageURL.searchParams.set(setting.key, serializeSettingValue(setting, values._inputs[setting.key.slice(2)]))
+            }
+            history.replaceState(history.state, '', pageURL)
+            lastQuery = query
+            return update({url, ext: 'arrow', format: FORMATS.arrow, cacheBust: false, query})
+        },
         onError: error => {
             console.warn('Interaction failed', error)
+            requestError = error
+            interactions.cancel()
+            updateController?.abort()
+            pendingSource = null
+            updatePending = false
+            document.body.classList.add('load-error')
             requestStatus.fail(error, {hasResult: mainLayers.length > 0, onRetry: () => interactions.retry()})
         },
     })
+    function repeatQuery({force = true} = {}) {
+        const event = ['onclick', 'onmove'].find(key => typeof metadataSettings[key]?.url === 'string') || 'onclick'
+        const query = lastQuery || {event, ...map.getCenter()}
+        return interactions.replay(query.event, query, {force})
+    }
+
+    async function restoreSelection(query) {
+        if (query?.event !== 'onclick') return
+        if (query.cartogram && cartoAggCols && cartogramApi) {
+            const row = cartoAggCols.x.findIndex((x, i) => x === query.cartogram[0] && cartoAggCols.y[i] === query.cartogram[1])
+            if (row >= 0) {
+                cartogramApi.highlightCells([row])
+                hex(cartogramCellH3Strings(row), {fit: false})
+                return
+            }
+        }
+        await focusCartogramForH3(query.index, {focus: false})
+    }
     // MapLibre's click event excludes drags; metadata actions remain usable while loading.
     map.on('click', event => {
         const original = event.originalEvent
@@ -3029,7 +3084,10 @@ function bootstrap(meta = {}){
                 signal.throwIfAborted()
                 h3DataRowLookup = buildH3DataRowLookup(window._columnData)
             }
-            finishLoadProgress()
+            await restoreSelection(source.query)
+            signal.throwIfAborted()
+            finishLoadProgress({clearStatus: !requestError})
+            if (requestError) requestStatus.fail(requestError, {hasResult: true, onRetry: () => interactions.retry()})
             return true
         } catch (e) {
             if (!mapReady) doneMapReady({failed: true})
@@ -3068,7 +3126,7 @@ function bootstrap(meta = {}){
             if (!signal.aborted) {
                 console.error(e)
                 document.body.classList.add('load-error')
-                requestStatus.fail(e, {hasResult: mainLayers.length > 0, onRetry: () => update(source)})
+                requestStatus.fail(requestError || e, {hasResult: mainLayers.length > 0, onRetry: requestError ? () => interactions.retry() : () => update(source)})
             }
             return false
         }
@@ -3094,7 +3152,7 @@ function bootstrap(meta = {}){
                     succeeded = await updateOnce(source, updateController.signal)
                     if (succeeded) acceptedSource = source
                 } while (updatePending)
-                if (succeeded && !cartogramLoadError) settingsPanelApi?.refreshCompleted()
+                if (succeeded && !cartogramLoadError) settingsPanelApi?.refreshCompleted({requests: !requestError})
                 return succeeded
             } finally {
                 updateRunning = false
@@ -3256,10 +3314,25 @@ function bootstrap(meta = {}){
 
     let settingsApplication = Promise.resolve()
     function applySettingOverrides(nextOverrides, changedSettings) {
+        if (changedSettings.every(setting => setting.refresh === 'request')) {
+            const url = updateUrlSettingOverrides(new URL(window.location.href), nextOverrides, changedSettings)
+            const nextLayers = readSettingLayers(metadataSettings, url.searchParams, settingSchema)
+            const inputs = requestControls.values(nextLayers.settings)
+            // Preserve default inputs even when Reset produces a deduplicated request.
+            for (const setting of requestControls.schema) {
+                url.searchParams.set(setting.key, serializeSettingValue(setting, inputs[setting.key.slice(2)]))
+            }
+            settingOverrides = nextLayers.overrides
+            history.replaceState(history.state, '', url)
+            activateSettings(nextLayers.settings, new Set(changedSettings.map(setting => setting.key)))
+            return repeatQuery({force: false}).then(success => {
+                if (!success) throw requestError || new Error('Request failed')
+            })
+        }
         const apply = async () => {
             if (updatePromise) await updatePromise
-            const url = updateUrlSettingOverrides(new URL(window.location.href), nextOverrides)
-            const nextLayers = readSettingLayers(metadataSettings, url.searchParams)
+            const url = updateUrlSettingOverrides(new URL(window.location.href), nextOverrides, changedSettings)
+            const nextLayers = readSettingLayers(metadataSettings, url.searchParams, settingSchema)
             const changedKeys = new Set(changedSettings.map(setting => setting.key))
             settingOverrides = nextLayers.overrides
             history.replaceState(history.state, '', url)
@@ -3278,11 +3351,14 @@ function bootstrap(meta = {}){
     }
 
     settingsPanelApi = createSettingsPanel({
+        schema: settingSchema,
         metadata: metadataSettings,
         overrides: settingOverrides,
         colourSchemes: availableColourSchemes(),
         onApply: applySettingOverrides,
     })
+
+    if (restoredQuery) repeatQuery()
 
     try {
         const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
@@ -3292,7 +3368,7 @@ function bootstrap(meta = {}){
         const startUpdate = (delay = 0) => {
             updateStarted = true
             setTimeout(() => {
-                if (acceptedSource === fileSource && !pendingSource && (!loadingSource || loadingSource === fileSource)) update()
+                if (!lastQuery && acceptedSource === fileSource && !pendingSource && (!loadingSource || loadingSource === fileSource)) update()
             }, delay)
         }
         socket.addEventListener("error", () => {
@@ -3393,7 +3469,7 @@ function bootstrap(meta = {}){
         if (event.keyboardMoving) return
         const pos = map.getCenter()
         const z = map.getZoom()
-        history.replaceState(null, '', `#x=${pos.lng.toFixed(4)}&y=${pos.lat.toFixed(4)}&z=${z.toFixed(4)}`)
+        history.replaceState(null, '', `#x=${pos.lng.toFixed(4)}&y=${pos.lat.toFixed(4)}&z=${z.toFixed(4)}&b=${map.getBearing().toFixed(4)}&p=${map.getPitch().toFixed(4)}`)
         syncLog('map.moveend', {
             originalEventType: original ? original.type : null,
             originalInMap,

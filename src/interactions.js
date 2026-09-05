@@ -1,13 +1,14 @@
 import {leadingThrottleDebounce, settingEnabled} from './settings.js'
 
-export function createInteractions({getSettings, getValues, request, onError = () => {}, baseURL}) {
+export function createInteractions({getSettings, getReplaySettings = getSettings, getValues, request, onError = () => {}, baseURL}) {
     let moveConfig = null
     let moveTask = null
     let lastURL = null
     let lastAction = null
+    let lastDelivery = Promise.resolve(false)
 
-    function readConfig(key) {
-        const config = getSettings()?.[key]
+    function readConfig(key, settings = getSettings()) {
+        const config = settings?.[key]
         if (config == null || ['boolean', 'string'].includes(typeof config) && !settingEnabled(config)) return null
         if (typeof config !== 'object' || Array.isArray(config) || typeof config.url !== 'string' || !config.url.trim()
             || config.resolution !== undefined && (!Number.isInteger(config.resolution) || config.resolution < 0 || config.resolution > 15)
@@ -17,15 +18,22 @@ export function createInteractions({getSettings, getValues, request, onError = (
         return {url: config.url, resolution: config.resolution, wait: config.wait ?? 350}
     }
 
-    async function deliver(url, config) {
-        try {
-            if (config && (JSON.stringify(readConfig('onmove')) !== JSON.stringify(config) || url === lastURL)) return
-            lastURL = url
-            if (await request(url) === false && lastURL === url) lastURL = null
-        } catch (error) {
-            if (lastURL === url) lastURL = null
-            onError(error)
-        }
+    function deliver({url, context}, config, force = false) {
+        if (config && JSON.stringify(readConfig('onmove')) !== JSON.stringify(config)) return Promise.resolve(false)
+        if (!force && url === lastURL) return lastDelivery
+        lastURL = url
+        lastDelivery = (async () => {
+            try {
+                const success = await request(url, context) !== false
+                if (!success && lastURL === url) lastURL = null
+                return success
+            } catch (error) {
+                if (lastURL === url) lastURL = null
+                onError(error)
+                return false
+            }
+        })()
+        return lastDelivery
     }
 
     function cancel() {
@@ -35,22 +43,29 @@ export function createInteractions({getSettings, getValues, request, onError = (
         lastURL = null
     }
 
-    function run(key, point) {
-        lastAction = {key, point: point && typeof point === 'object' ? {...point} : point}
+    function run(key, point, {manual = false, force = true} = {}) {
+        const action = {key, point: point && typeof point === 'object' ? {...point} : point}
         try {
-            const config = readConfig(key)
-            const moving = key === 'onmove'
+            const config = readConfig(key, manual ? getReplaySettings() : getSettings())
+            const moving = key === 'onmove' && !manual
             if (moving && JSON.stringify(config) !== JSON.stringify(moveConfig)) {
                 moveTask?.cancel()
                 moveConfig = config
-                moveTask = config && leadingThrottleDebounce(url => deliver(url, config), config.wait)
+                moveTask = config && leadingThrottleDebounce(packet => {
+                    try { deliver(packet, config) } catch (error) { cancel(); onError(error) }
+                }, config.wait)
             }
-            if (!config) return
-            if (!moving) cancel()
+            if (!config) return Promise.resolve(false)
+            lastAction = action
+            if (!moving) {
+                moveTask?.cancel()
+                moveTask = null
+                moveConfig = null
+            }
             const values = getValues(config, point)
-            if (values == null) return
+            if (values == null) return Promise.resolve(false)
             const template = config.url.replace(/\{([^{}]*)\}/g, (_, token) => {
-                if (!['index', 'index_lower', 'index_upper', 'lat', 'lng', 'zoom'].includes(token) || !Object.hasOwn(values, token)) {
+                if ((!['index', 'index_lower', 'index_upper', 'lat', 'lng', 'zoom'].includes(token) && !/^controls\.[A-Za-z][A-Za-z0-9_]*$/.test(token)) || !Object.hasOwn(values, token)) {
                     throw new Error(`Unknown or missing interaction token: ${token}`)
                 }
                 const value = values[token]
@@ -64,16 +79,20 @@ export function createInteractions({getSettings, getValues, request, onError = (
             if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
                 throw new Error('Interaction URLs must use HTTP(S) without credentials')
             }
-            if (moving) moveTask(url.href)
-            else deliver(url.href)
+            const packet = {url: url.href, context: {event: key, point: lastAction.point, values}}
+            if (moving) moveTask(packet)
+            else return deliver(packet, null, force)
         } catch (error) {
+            lastAction = action
             if (key === 'onmove') cancel()
             onError(error)
+            return Promise.resolve(false)
         }
     }
 
     return {
         click: point => run('onclick', point), move: point => run('onmove', point), cancel,
-        retry: () => { if (lastAction) { cancel(); run(lastAction.key, lastAction.point) } },
+        retry: () => lastAction && run(lastAction.key, lastAction.point, {manual: true}),
+        replay: (key, point, options) => run(key, point, {...options, manual: true}),
     }
 }

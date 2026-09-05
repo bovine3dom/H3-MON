@@ -33,7 +33,7 @@ user; every word must be directly useful and meaningful to them.
 
 ## Metadata-Defined Controls
 
-- [ ] Let datasets declare editable request parameters in JSON metadata.
+- [x] Let datasets declare editable request parameters in JSON metadata.
 
 Render these controls in the settings pane without hardcoding routing-specific
 settings into H3-MON. Start with maximum travel time and departure time.
@@ -54,7 +54,7 @@ settings into H3-MON. Start with maximum travel time and departure time.
 
 ## Shareable Query State
 
-- [ ] Restore the full query, including the click/origin, from the URL alone.
+- [x] Restore the full query, including the click/origin, from the URL alone.
 
 - Encode the dataset, control input values, queried origin and any click context
   needed for replay. Preserve the resolved H3 chosen for a cartogram click.

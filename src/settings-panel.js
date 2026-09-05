@@ -395,8 +395,9 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
     })
     refreshActions()
 
-    function refreshCompleted() {
-        const recovered = schema.filter(setting => failedSettings.has(setting.key) && ['data', 'cartogram', 'request'].includes(setting.refresh))
+    function refreshCompleted({requests = true} = {}) {
+        const recovered = schema.filter(setting => failedSettings.has(setting.key) &&
+            (['data', 'cartogram'].includes(setting.refresh) || requests && setting.refresh === 'request'))
         for (const setting of recovered) failedSettings.delete(setting.key)
         refreshActions()
         if (recovered.length && !failedSettings.size) status.textContent = ''

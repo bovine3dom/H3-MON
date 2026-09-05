@@ -44,6 +44,19 @@ Deno.test('scale overrides round-trip while unrelated URL state is preserved', (
     assert(url.hash === '#x=1&y=2&z=3')
 })
 
+Deno.test('metadata control schema parses and shares raw input values without losing query state', () => {
+    const schema = [{key: 'p.time', name: 'Travel time', type: 'number', min: 0, max: 10080},
+        {key: 'p.departure', name: 'Departure', type: 'time'}]
+    const url = new URL('https://example.test/?data=reachable.csv&query=saved#x=1&y=2&z=3&b=20&p=30')
+    updateUrlSettingOverrides(url, {'p.time': 360, 'p.departure': '09:15'}, schema)
+    const layers = readSettingLayers({}, url.searchParams, schema)
+    assert(layers.overrides['p.time'] === 360 && layers.overrides['p.departure'] === '09:15')
+    assert(url.searchParams.get('query') === 'saved' && url.hash.endsWith('b=20&p=30'))
+    assert(validateSettingValue(schema[0], 10081).includes('10080'))
+    assert(validateSettingValue(schema[1], '08:00\n') !== null)
+    assert(validateSettingValue(schema[0], readSettingLayers({}, new URLSearchParams('p.time=+'), schema).overrides['p.time']) !== null)
+})
+
 Deno.test('removing an override reveals metadata again', () => {
     const metadata = {flip: true}
     const overrides = {flip: false}

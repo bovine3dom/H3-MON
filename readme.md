@@ -72,8 +72,8 @@ Example metadata:
 
 JSON metadata can optionally define `onclick` and `onmove` objects. These issue **GET
 requests returning Arrow IPC files or streams**, then replace the current dataset using
-the existing map, legend, tooltip and cartogram rendering pipeline. No JavaScript is
-executed from metadata.
+the existing map, legend, tooltip and cartogram rendering pipeline. Hook URLs are
+templates; optional input converters described below are trusted JavaScript.
 
 - `onclick` uses the geographic cell under a map click or tap, including cells absent
   from the current result. Existing click highlighting/focusing is unchanged.
@@ -109,8 +109,9 @@ controls or JavaScript/JSON strings in query parameters.
 
 ## Rail-routing example
 
-[`www/data/reachable.json`](www/data/reachable.json) configures both hooks for the
-res5 router in the sibling `gtfs_ffs` project. [`reachable.csv`](www/data/reachable.csv)
+[`www/data/reachable.json`](www/data/reachable.json) configures request controls for the
+res5 router in the sibling `gtfs_ffs` project. It currently uses click-only queries and
+a seven-day default budget. [`reachable.csv`](www/data/reachable.csv)
 is only a one-cell seed near Paris, not a precomputed reachability result. With that
 backend listening on port 1988, run `yarn build` and `yarn serve`, then open:
 
@@ -118,28 +119,47 @@ backend listening on port 1988, run `yarn build` and `yarn serve`, then open:
 http://localhost:1983/?data=reachable.csv#x=2.3962&y=48.8241&z=6
 ```
 
-Click/tap a cell or pan the map to fetch the first result. Initial page load does not
-call the backend. For click-only operation, add `&onmove=false` before the hash.
-The essential metadata shape is:
+Click/tap a cell or edit a request control to fetch the first result. If `onmove` is
+configured, panning also requests data; `&onmove=false` disables that automatic delivery.
+An initial link without a saved query loads the seed. A shared query link replays the
+query instead. The essential metadata shape is:
 
 ```json
 {
   "t": "Rail travel time (minutes)",
   "raw": false,
   "cartogram": "none",
+  "controls": {
+    "travelTime": {
+      "label": "Travel time",
+      "type": "number",
+      "unit": "min",
+      "default": 180,
+      "min": 0,
+      "max": 10080,
+      "encode": "value => Math.round(value * 60)"
+    },
+    "departure": {
+      "label": "Departure",
+      "type": "time",
+      "default": "08:00",
+      "encode": "value => value.length === 5 ? value + ':00' : value"
+    }
+  },
   "onclick": {
-    "url": "http://127.0.0.1:1988/reachable?index={index}&departure=08:00:00&budget_s=10800&encoding=split",
+    "url": "http://127.0.0.1:1988/reachable?index={index}&departure={controls.departure}&budget_s={controls.travelTime}&encoding=split",
     "resolution": 5
   },
   "onmove": {
-    "url": "http://127.0.0.1:1988/reachable?index={index}&departure=08:00:00&budget_s=10800&encoding=split",
+    "url": "http://127.0.0.1:1988/reachable?index={index}&departure={controls.departure}&budget_s={controls.travelTime}&encoding=split",
     "resolution": 5,
     "wait": 350
   }
 }
 ```
 
-Edit departure time and budget in the URLs, then reload the page. `127.0.0.1` means
+Edit departure time and budget in Settings; valid edits automatically rerun the last
+origin after a short pause. Before any query, the map centre is used. `127.0.0.1` means
 the **browser's machine**: replace it with your reachable backend hostname or use a
 port forward when browsing remotely. HTTPS pages require an HTTPS endpoint or proxy.
 The endpoint must allow CORS when served from another origin.
@@ -150,6 +170,36 @@ Keep Arrow IPC uncompressed and string columns non-dictionary-encoded for the in
 reader. `raw: false` gives quantile colours with minute-valued legend labels; raw mode
 expects values already scaled to 0..1. Res5 routing merges stops within each cell and
 does not imply that every point inside a returned cell is reachable.
+
+## Request controls and shared links
+
+`controls` is an object keyed by field IDs (letters, digits and underscores, starting
+with a letter). Each field requires `label`, `type` and `default`. Supported types are
+`number`, `time`, `text`, `select` and `boolean`. Optional `unit` appears in the label;
+`help` supplies contextual help. Numbers and times accept `min`, `max` and a native
+input `step`. Selects require `options: [{"value": "rail", "label": "Rail"}]`.
+
+An optional `encode` function expression receives `(value, values)`: the field's
+typed input and a frozen map of all raw control values. It must return a string,
+finite number or boolean synchronously. `{controls.<id>}` in either hook URL uses
+that converted value, URL-encoded. Invalid inputs and failed conversions do not send
+a request. Request controls share a 350 ms trailing debounce and have no Apply button.
+
+**Trust boundary:** converter expressions are compiled from the fetched metadata and
+run with the page's JavaScript privileges. They are not sandboxed. Only publish metadata
+you trust as application code; hosting CSP must permit this compilation. URL parameters
+and user-entered values are always data, never code, and cannot supply converter definitions.
+
+The URL stores raw input values as `p.<id>`, independently of built-in view settings.
+It also records a validated `query` JSON object containing the hook event, resolved H3,
+coordinates and query zoom (plus cartogram click coordinates when applicable). Copy the
+URL to restore the same query in a fresh browser without local storage or earlier clicks.
+The dataset metadata and endpoint must still be accessible to that browser.
+
+Replay and parameter edits use the declared endpoint even if its automatic hook is
+disabled by `onclick=false` or `onmove=false`. They preserve the saved geographic camera
+(`x`, `y`, `z`, `b` bearing and `p` pitch in the hash), rather than replaying click-focusing
+animations. Explicit clicks always refresh; unchanged automatic requests are deduplicated.
 
 # Cartogram mapping spec
 

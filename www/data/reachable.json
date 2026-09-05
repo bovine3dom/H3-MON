@@ -1,0 +1,30 @@
+{
+  "t": "Rail travel time (minutes)",
+  "raw": false,
+  "trimFactor": 0,
+  "quantileSource": "map",
+  "defaultValue": null,
+  "infill": false,
+  "controls": {
+    "travelTime": {
+      "label": "Travel time",
+      "type": "number",
+      "unit": "min",
+      "default": 10080,
+      "min": 0,
+      "max": 10080,
+      "step": 15,
+      "encode": "value => Math.round(value * 60)"
+    },
+    "departure": {
+      "label": "Departure",
+      "type": "time",
+      "default": "08:00",
+      "encode": "value => value.length === 5 ? value + ':00' : value"
+    }
+  },
+  "onclick": {
+    "url": "http://127.0.0.1:1988/reachable?index={index}&departure={controls.departure}&budget_s={controls.travelTime}&encoding=split",
+    "resolution": 5
+  }
+}
