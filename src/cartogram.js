@@ -145,6 +145,10 @@ export function render_cartogram(container, data, options = {}) {
     let svgPerfFrameRaf = null
     let svgPerfDrawFrameId = 0
     let svgPerfLastDrawFrameLog = 0
+    let resizeObserver = null
+    let fallbackResizeHandler = null
+    let longTaskObserver = null
+    let destroyed = false
 
     const donePrecompute = perfTimer('cells.precompute', {rows: numRows})
     for (let i = 0; i < numRows; i++) {
@@ -261,7 +265,7 @@ export function render_cartogram(container, data, options = {}) {
 
     function drawColorTransitionFrame() {
         colorTransitionRaf = null
-        if (!colorTransition) return
+        if (destroyed || !colorTransition) return
         if (colorTransitionProgress(colorTransition) >= 1) colorTransition = null
         scheduleTransform(latestTransform)
         scheduleColorTransitionFrame()
@@ -449,7 +453,7 @@ export function render_cartogram(container, data, options = {}) {
     }
 
     function svgPerfFrame() {
-        if (!svgPerfGesture) {
+        if (destroyed || !svgPerfGesture) {
             svgPerfFrameRaf = null
             return
         }
@@ -609,7 +613,7 @@ export function render_cartogram(container, data, options = {}) {
 
     if (svgPerf && typeof PerformanceObserver !== 'undefined') {
         try {
-            const observer = new PerformanceObserver((list) => {
+            longTaskObserver = new PerformanceObserver((list) => {
                 if (!svgPerfGesture) return
                 for (const entry of list.getEntries()) {
                     svgPerfGesture.longTasks++
@@ -617,14 +621,14 @@ export function render_cartogram(container, data, options = {}) {
                     if (entry.duration > svgPerfGesture.maxLongTaskMs) svgPerfGesture.maxLongTaskMs = entry.duration
                 }
             })
-            observer.observe({entryTypes: ['longtask']})
+            longTaskObserver.observe({entryTypes: ['longtask']})
         } catch (e) {
             svgPerfLog('longtask_observer_unavailable', {message: e && e.message})
         }
     }
 
     function drawCanvas(transform = latestTransform) {
-        if (!ctx) return
+        if (destroyed || !ctx) return
         const drawStart = svgPerf ? perfNow() : 0
         const resizeStart = drawStart
         const resized = resizeCanvas()
@@ -875,13 +879,14 @@ export function render_cartogram(container, data, options = {}) {
 
     function applyPendingTransform() {
         transformRaf = null
-        if (!pendingTransform) return
+        if (destroyed || !pendingTransform) return
         const transform = pendingTransform
         pendingTransform = null
         writeTransform(transform)
     }
 
     function scheduleTransform(transform) {
+        if (destroyed) return
         latestTransform = transform
         pendingTransform = transform
         if (typeof requestAnimationFrame !== 'function') {
@@ -1020,6 +1025,7 @@ export function render_cartogram(container, data, options = {}) {
 
     const zoom = d3.zoom().scaleExtent([0.5, 100])
         .on("start", (e) => {
+            if (destroyed) return
             const source = e.sourceEvent
             cartogramGestureActive = !!source && canvas.contains(source.target)
             cartogramGestureMoved = false
@@ -1028,6 +1034,7 @@ export function render_cartogram(container, data, options = {}) {
             startSvgPerfGesture(e, cssToViewTransform(e.transform))
         })
         .on("zoom", (e) => {
+            if (destroyed) return
             const handlerStart = svgPerf ? perfNow() : 0
             scheduleTransform(cssToViewTransform(e.transform))
             if (svgPerf) recordSvgPerfZoom(perfNow() - handlerStart)
@@ -1035,6 +1042,7 @@ export function render_cartogram(container, data, options = {}) {
             if (cartogramGestureActive && e.sourceEvent) cartogramGestureMoved = true
         })
         .on("end", (e) => {
+            if (destroyed) return
             flushTransform()
             const gestureMoved = cartogramGestureMoved
             endSvgPerfGesture({
@@ -1058,10 +1066,11 @@ export function render_cartogram(container, data, options = {}) {
     canvasSelection.call(zoom)
 
     if (typeof ResizeObserver !== 'undefined') {
-        const resizeObserver = new ResizeObserver(() => scheduleTransform(latestTransform))
+        resizeObserver = new ResizeObserver(() => scheduleTransform(latestTransform))
         resizeObserver.observe(root.node())
     } else {
-        window.addEventListener('resize', () => scheduleTransform(latestTransform))
+        fallbackResizeHandler = () => scheduleTransform(latestTransform)
+        window.addEventListener('resize', fallbackResizeHandler)
     }
 
     drawCanvas(latestTransform)
@@ -1086,7 +1095,29 @@ export function render_cartogram(container, data, options = {}) {
         hideTooltip()
     }
 
+    function destroy() {
+        if (destroyed) return
+        destroyed = true
+        stopMovement()
+        fitToBoundsToken++
+        colorTransition = null
+        pendingTransform = null
+        if (colorTransitionRaf !== null) cancelAnimationFrame(colorTransitionRaf)
+        if (transformRaf !== null) cancelAnimationFrame(transformRaf)
+        if (svgPerfFrameRaf !== null) cancelAnimationFrame(svgPerfFrameRaf)
+        colorTransitionRaf = null
+        transformRaf = null
+        svgPerfFrameRaf = null
+        resizeObserver?.disconnect()
+        longTaskObserver?.disconnect()
+        if (fallbackResizeHandler) window.removeEventListener('resize', fallbackResizeHandler)
+        canvasSelection.interrupt().on('.cell', null).on('.zoom', null)
+        canvasSelection.remove()
+        tooltip.remove()
+    }
+
     function moveBy([x, y], factor) {
+        if (destroyed) return
         let transform = d3.zoomTransform(canvas)
         transform = transform.translate(-x / transform.k, -y / transform.k)
         const k = Math.min(100, Math.max(0.5, transform.k * factor))
@@ -1101,6 +1132,7 @@ export function render_cartogram(container, data, options = {}) {
     }
 
     function finishMovement() {
+        if (destroyed) return
         flushTransform()
         const sourceEvent = {type: 'keyboard', target: canvas}
         const visible = visibleIndices(latestTransform)
@@ -1110,6 +1142,7 @@ export function render_cartogram(container, data, options = {}) {
 
     return {
         updateData: (newData, newDataCol) => {
+            if (destroyed) return
             const doneUpdate = perfTimer('update_data', {rows: newData.x ? newData.x.length : 0})
             currentData = newData
             if (newDataCol !== undefined) currentDataCol = newDataCol
@@ -1123,15 +1156,18 @@ export function render_cartogram(container, data, options = {}) {
             doneUpdate()
         },
         highlightCells: (indices) => {
+            if (destroyed) return
             const doneHighlight = perfTimer('highlight_cells', {rows: numRows, highlighted: indices.length})
             highlightedIndices = indices
             drawCanvas(latestTransform)
             doneHighlight()
         },
         stop: stopMovement,
+        destroy,
         moveBy,
         finishMove: finishMovement,
         fitToBounds: ([[x1, y1, x2, y2]], duration = 500) => {
+            if (destroyed) return
             const doneFit = perfTimer('fit_to_bounds')
             const left = getX(x1)
             const right = getX(x2)

@@ -13,13 +13,11 @@ import 'maplibre-gl/dist/maplibre-gl.css'
 import * as observablehq from './vendor/observablehq' // from https://observablehq.com/@d3/color-legend
 import {getCitiesStartsWith} from 'tiny-geocoder'
 import {render_cartogram} from './cartogram'
+import {createSettingsPanel} from './settings-panel'
+import {readSettingLayers, settingEnabled, updateUrlSettingOverrides} from './settings'
 
 const params = new URLSearchParams(window.location.search)
-function settingEnabled(value, fallback = false) {
-    if (value == null) return fallback
-    if (typeof value === 'boolean') return value
-    return !['0', 'false', 'off', 'no'].includes(String(value).trim().toLowerCase())
-}
+const DEFAULT_DOCUMENT_TITLE = document.title
 
 function flagEnabled(name) {
     return params.has(name) && settingEnabled(params.get(name), true)
@@ -1167,14 +1165,54 @@ mql.addEventListener('change', () => setPane(document.body.classList.contains('p
 const helpBtn = document.getElementById('helpBtn')
 const helpPopup = document.getElementById('helpPopup')
 const helpClose = document.getElementById('helpClose')
+const settingsBtn = document.getElementById('settingsBtn')
+const settingsPanel = document.getElementById('settingsPanel')
+const settingsClose = document.getElementById('settingsClose')
+let settingsPanelApi = null
+
+function setOverlayOpen(panel, button, open) {
+    panel.classList.toggle('open', open)
+    panel.setAttribute('aria-hidden', String(!open))
+    button.setAttribute('aria-expanded', String(open))
+}
+
 helpBtn.addEventListener('click', () => {
-    helpPopup.classList.toggle('open')
+    const open = !helpPopup.classList.contains('open')
+    setOverlayOpen(settingsPanel, settingsBtn, false)
+    setOverlayOpen(helpPopup, helpBtn, open)
+    if (open) requestAnimationFrame(() => document.getElementById('helpTitle').focus())
 })
-helpClose.addEventListener('click', () => helpPopup.classList.remove('open'))
+settingsBtn.addEventListener('click', () => {
+    const open = !settingsPanel.classList.contains('open')
+    setOverlayOpen(helpPopup, helpBtn, false)
+    setOverlayOpen(settingsPanel, settingsBtn, open)
+    if (open) requestAnimationFrame(() => settingsPanelApi?.focusFirst())
+})
+helpClose.addEventListener('click', () => {
+    setOverlayOpen(helpPopup, helpBtn, false)
+    helpBtn.focus()
+})
+settingsClose.addEventListener('click', () => {
+    setOverlayOpen(settingsPanel, settingsBtn, false)
+    settingsBtn.focus()
+})
 document.addEventListener('click', (e) => {
-    if (!helpPopup.classList.contains('open')) return
-    if (helpPopup.contains(e.target) || helpBtn.contains(e.target)) return
-    helpPopup.classList.remove('open')
+    if (helpPopup.classList.contains('open') && !helpPopup.contains(e.target) && !helpBtn.contains(e.target)) {
+        setOverlayOpen(helpPopup, helpBtn, false)
+    }
+    if (settingsPanel.classList.contains('open') && !settingsPanel.contains(e.target) && !settingsBtn.contains(e.target)) {
+        setOverlayOpen(settingsPanel, settingsBtn, false)
+    }
+})
+document.addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return
+    if (settingsPanel.classList.contains('open')) {
+        setOverlayOpen(settingsPanel, settingsBtn, false)
+        settingsBtn.focus()
+    } else if (helpPopup.classList.contains('open')) {
+        setOverlayOpen(helpPopup, helpBtn, false)
+        helpBtn.focus()
+    }
 })
 window.addEventListener('resize', () => map.resize())
 window.addEventListener('orientationchange', () => map.resize())
@@ -1316,7 +1354,7 @@ function moveWithKeyboard(timestamp) {
 
 document.addEventListener('keydown', event => {
     const target = event.target
-    if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey || helpPopup.classList.contains('open') ||
+    if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey || helpPopup.classList.contains('open') || settingsPanel.classList.contains('open') ||
         target instanceof Element && target.closest('input, textarea, select, button, a, [contenteditable]:not([contenteditable="false"])')) return
 
     const key = event.key.toLowerCase()
@@ -1371,7 +1409,10 @@ fetch(`data/${meta_name}`).then(r => r.json()).then(meta => {
 })
 
 function bootstrap(meta = {}){
-    const settings = Object.assign({}, meta, Object.fromEntries(params.entries()))
+    const settingLayers = readSettingLayers(meta, params)
+    const metadataSettings = settingLayers.metadata
+    let settingOverrides = settingLayers.overrides
+    let settings = settingLayers.settings
     cartogramInit = null
     cartogramWeightsFile = null
     cartogramEnabled = cartogramFile(settings.cartogram) !== null
@@ -1384,16 +1425,13 @@ function bootstrap(meta = {}){
         h3toXYPromise = null
         document.body.classList.remove('cartogram-ready')
     }
-    const infill = settingEnabled(settings.infill, false)
-    const doCyclical = settingEnabled(settings.cyclical, false)
-    const flip = settingEnabled(settings.flip, false)
-    const showTrains = settingEnabled(settings.trains, false)
-    const namedColourScheme = d3[settings.colourScheme]
-    const colourScheme = typeof namedColourScheme === 'function' ? namedColourScheme : (doCyclical ? d3.interpolateRainbow : d3.interpolateSpectral)
-    if (settings.colourScheme && typeof namedColourScheme !== 'function') console.warn(`Unknown D3 colour scheme "${settings.colourScheme}", using the default`)
-    const colourRamp = d3.scaleSequential(colourScheme).domain(flip ? [1,0] : [0,1])
+    let infill = settingEnabled(settings.infill, false)
+    let showTrains = settingEnabled(settings.trains, false)
+    let colourRamp
     const file_path = `data/${file_name}`
     let h3DataRowLookup = null
+    let activeCartogramDataCol = null
+    let cartogramLoadError = null
     const mapHoverTooltip = document.createElement('div')
     mapHoverTooltip.className = 'h3-hover-tooltip'
     mapHoverTooltip.style.display = 'none'
@@ -1404,7 +1442,16 @@ function bootstrap(meta = {}){
     let suppressMapHoverUntil = 0
     const sidePane = document.getElementById('side-pane')
     const cartogramContainer = document.getElementById('cartogram')
-    if (settings.t) document.title = settings.t
+    document.title = settings.t || DEFAULT_DOCUMENT_TITLE
+
+    function createColourRamp() {
+        const doCyclical = settingEnabled(settings.cyclical, false)
+        const flip = settingEnabled(settings.flip, false)
+        const namedColourScheme = d3[settings.colourScheme]
+        const colourScheme = typeof namedColourScheme === 'function' ? namedColourScheme : (doCyclical ? d3.interpolateRainbow : d3.interpolateSpectral)
+        if (settings.colourScheme && typeof namedColourScheme !== 'function') console.warn(`Unknown D3 colour scheme "${settings.colourScheme}", using the default`)
+        return d3.scaleSequential(colourScheme).domain(flip ? [1,0] : [0,1])
+    }
 
     function rectDetails(element) {
         if (!element) return null
@@ -1455,16 +1502,21 @@ function bootstrap(meta = {}){
     let activeH3Layer = null
     let viewportQuantileState = null
     const h3DeckDataCache = new WeakMap()
-    for (let i = 0; i < COLOUR_PALETTE_SIZE; i++) {
-        const css = colourRamp(i / (COLOUR_PALETTE_SIZE - 1)) ?? transparentCss
-        const rgba = parseColour(css)
-        colourPaletteCss[i] = css
-        const offset = i * 4
-        colourPaletteRgba[offset] = rgba[0]
-        colourPaletteRgba[offset + 1] = rgba[1]
-        colourPaletteRgba[offset + 2] = rgba[2]
-        colourPaletteRgba[offset + 3] = rgba[3]
+    function rebuildColourRamp() {
+        colourRamp = createColourRamp()
+        parsedColourCache.clear()
+        for (let i = 0; i < COLOUR_PALETTE_SIZE; i++) {
+            const css = colourRamp(i / (COLOUR_PALETTE_SIZE - 1)) ?? transparentCss
+            const rgba = parseColour(css)
+            colourPaletteCss[i] = css
+            const offset = i * 4
+            colourPaletteRgba[offset] = rgba[0]
+            colourPaletteRgba[offset + 1] = rgba[1]
+            colourPaletteRgba[offset + 2] = rgba[2]
+            colourPaletteRgba[offset + 3] = rgba[3]
+        }
     }
+    rebuildColourRamp()
     function colourPaletteIndex(number) {
         return number >= 0 && number <= 1 ? Math.round(number * (COLOUR_PALETTE_SIZE - 1)) : -1
     }
@@ -2099,7 +2151,7 @@ function bootstrap(meta = {}){
         setLoadStage('Loading data')
 
         const doQuantiles = !settingEnabled(settings.raw, false)
-        const trimFactor = settings.trimFactor ? settings.trimFactor : 0.01
+        const trimFactor = settings.trimFactor === '' || settings.trimFactor == null ? 0.01 : settings.trimFactor
         const useCartogramQuantiles = cartogramEnabled && settings.quantileSource === 'cartogram'
 
         if (format.layer === 'hex' && (ext === 'arrow' || ext === 'csv')) {
@@ -2136,6 +2188,7 @@ function bootstrap(meta = {}){
             const cartogramReady = cartogramEnabled && schemaHasH3Index
                 ? measurePerf('cartogram.init.await', {dataH3Index: dataHasSplitH3Index ? 'split' : 'string'}, () => {
                     if (!cartogramInit) {
+                        cartogramLoadError = null
                         cartogramWeightsFile = cartogramFileForData(settings.cartogram, dataHasSplitH3Index)
                         cartogramInit = loadCartogramWeights(cartogramWeightsFile)
                     }
@@ -2178,6 +2231,8 @@ function bootstrap(meta = {}){
 
             const failCartogram = error => {
                 cartoValueCol = null
+                activeCartogramDataCol = null
+                cartogramLoadError = error
                 cartogramInit = null
                 cartogramRawCols = null
                 cartogramAgg = null
@@ -2243,6 +2298,7 @@ function bootstrap(meta = {}){
                         doneCartoQuantiles()
                         cartoDataCol = 'carto_quantile'
                     }
+                    activeCartogramDataCol = cartoDataCol
 
                     if (!cartogramApi) {
                         setLoadStage('Showing cartogram pane')
@@ -2841,6 +2897,7 @@ function bootstrap(meta = {}){
 
     let updateRunning = false
     let updatePending = false
+    let updatePromise = null
 
     const updateOnce = async () => {
         const doneMapReady = perfTimer('app.load_to_map_ready', {file: file_name, ext, layer: format.layer, renderer: 'packed', pickable: false, cartogramWeightsFile})
@@ -2862,6 +2919,7 @@ function bootstrap(meta = {}){
             h3toXY,
             h3toXYPromise,
             cartogramApi,
+            activeCartogramDataCol,
             columnData: window._columnData,
             rawData: window.raw_data,
             layers: mainLayers,
@@ -2890,6 +2948,7 @@ function bootstrap(meta = {}){
                 h3DataRowLookup = buildH3DataRowLookup(window._columnData)
             }
             finishLoadProgress()
+            return true
         } catch (e) {
             if (!mapReady) doneMapReady({failed: true})
             activeH3Layer = previousState.activeH3Layer
@@ -2905,6 +2964,7 @@ function bootstrap(meta = {}){
             h3toXY = previousState.h3toXY
             h3toXYPromise = previousState.h3toXYPromise
             cartogramApi = previousState.cartogramApi
+            activeCartogramDataCol = previousState.activeCartogramDataCol
             window._columnData = previousState.columnData
             window.raw_data = previousState.rawData
             deferLegend = false
@@ -2918,38 +2978,49 @@ function bootstrap(meta = {}){
             console.error(e)
             setLoadProgress(100, 'Load failed')
             loadProgress.complete = true
+            return false
         }
     }
 
-    const update = async () => {
-        if (updateRunning) {
-            updatePending = true
-            return
-        }
-        updateRunning = true
-        try {
-            do {
-                updatePending = false
-                await updateOnce()
-            } while (updatePending)
-        } finally {
-            updateRunning = false
-        }
+    const update = () => {
+        updatePending = true
+        if (updatePromise) return updatePromise
+        updatePromise = (async () => {
+            updateRunning = true
+            let succeeded
+            try {
+                do {
+                    updatePending = false
+                    succeeded = await updateOnce()
+                } while (updatePending)
+                if (succeeded && !cartogramLoadError) settingsPanelApi?.refreshCompleted()
+                return succeeded
+            } finally {
+                updateRunning = false
+                updatePromise = null
+            }
+        })()
+        return updatePromise
     }
 
     window.d3 = d3
     window.observablehq = observablehq
 
     const l = document.getElementById("attribution")
-    const extra_c = settings.c ? settings.c.split(",") : []
-    if (showTrains) extra_c.push("OpenRailwayMap")
-    l.innerText = "©\u00a0" + [...extra_c, "OpenFreeMap", "Natural Earth", "openwaters.io et al.", "Mapterhorn", "OpenStreetMap contributors", "Our World in Data", "GeoNames"].filter(x=>x !== null).join(" ©\u00a0")
     const legendDiv = document.createElement('div')
     legendDiv.id = "observable_legend"
-    l.insertBefore(legendDiv, l.firstChild)
+    const attributionText = document.createElement('span')
+    l.replaceChildren(legendDiv, attributionText)
+    function updateAttribution() {
+        const extra = settings.c ? String(settings.c).split(",") : []
+        if (showTrains) extra.push("OpenRailwayMap")
+        attributionText.innerText = "©\u00a0" + [...extra, "OpenFreeMap", "Natural Earth", "openwaters.io et al.", "Mapterhorn", "OpenStreetMap contributors", "Our World in Data", "GeoNames"].filter(x => x !== null).join(" ©\u00a0")
+    }
+    updateAttribution()
     let legendVersion = 0
     let deferLegend = false
     let pendingLegend = null
+    let legendFormatter
     // todo: read impressum from metadata too
     function replaceLegend(legend) {
         if (deferLegend) {
@@ -2982,7 +3053,7 @@ function bootstrap(meta = {}){
         replaceLegend(legend)
     }
 
-    async function makeLegend(fmt) {
+    async function renderLegend(fmt) {
         try {
             if (fmt !== undefined) {
                 const legend = observablehq.legend({color: colourRamp, title: settings.t, tickFormat: v => parseFloat(fmt(v).toPrecision(2)).toLocaleString()})
@@ -3003,6 +3074,112 @@ function bootstrap(meta = {}){
             replaceLegend(legend)
         }
     }
+
+    function makeLegend(fmt) {
+        legendFormatter = fmt
+        return renderLegend(fmt)
+    }
+
+    function refreshLegend() {
+        return renderLegend(legendFormatter)
+    }
+
+    function resetCartogramState() {
+        cartogramApi?.destroy()
+        cartogramApi = null
+        activeCartogramDataCol = null
+        cartogramLoadError = null
+        cartogramInit = null
+        cartogramWeightsFile = null
+        cartogramRawCols = null
+        cartogramAgg = null
+        cartoAggCols = null
+        h3toXY = null
+        h3toXYPromise = null
+        cartoRes = 5
+        cartogramEnabled = cartogramFile(settings.cartogram) !== null
+        configureLoadProgress(cartogramEnabled ? LOAD_PROGRESS_DEFAULT_PROFILE : LOAD_PROGRESS_NO_CARTOGRAM_PROFILE)
+        document.body.classList.remove('cartogram-ready')
+        requestAnimationFrame(() => map.resize())
+    }
+
+    function availableColourSchemes() {
+        return Object.keys(d3).filter(name => {
+            if (!name.startsWith('interpolate') || typeof d3[name] !== 'function') return false
+            try {
+                return [0, 0.5, 1].every(value => d3.color(d3[name](value)))
+            } catch (_) {
+                return false
+            }
+        }).sort()
+    }
+
+    function activateSettings(nextSettings, changedKeys) {
+        settings = nextSettings
+        infill = settingEnabled(settings.infill, false)
+        showTrains = settingEnabled(settings.trains, false)
+        document.title = settings.t || DEFAULT_DOCUMENT_TITLE
+        if (changedKeys.has('colourScheme') || changedKeys.has('cyclical') || changedKeys.has('flip')) rebuildColourRamp()
+        if (changedKeys.has('cartogram')) resetCartogramState()
+        updateAttribution()
+    }
+
+    async function refreshPresentation(changedKeys) {
+        const colourChanged = changedKeys.has('colourScheme') || changedKeys.has('cyclical') || changedKeys.has('flip')
+        let mapRendered = false
+        if (colourChanged) {
+            if (activeH3Layer && mainLayers.includes(activeH3Layer.layer)) {
+                await refreshH3LayerColours()
+                mapRendered = true
+            } else {
+                const geoJsonIndex = mainLayers.findIndex(layer => layer?.id === 'GeoJsonLayer')
+                if (geoJsonIndex >= 0) {
+                    colourVersion++
+                    mainLayers = mainLayers.slice()
+                    mainLayers[geoJsonIndex] = mainLayers[geoJsonIndex].clone({updateTriggers: {getFillColor: [colourVersion], getLineColor: [colourVersion]}})
+                    await renderLayers(false)
+                    mapRendered = true
+                }
+            }
+            if (cartogramApi && cartoAggCols && activeCartogramDataCol) {
+                cartogramApi.updateData(cartoAggCols, activeCartogramDataCol)
+            }
+        }
+        if (changedKeys.has('trains') && mainLayers.length && !mapRendered) {
+            await renderLayers(false)
+        }
+        if (legendDiv.lastElementChild && (colourChanged || changedKeys.has('t') || changedKeys.has('scale'))) await refreshLegend()
+    }
+
+    let settingsApplication = Promise.resolve()
+    function applySettingOverrides(nextOverrides, changedSettings) {
+        const apply = async () => {
+            if (updatePromise) await updatePromise
+            const url = updateUrlSettingOverrides(new URL(window.location.href), nextOverrides)
+            const nextLayers = readSettingLayers(metadataSettings, url.searchParams)
+            const changedKeys = new Set(changedSettings.map(setting => setting.key))
+            settingOverrides = nextLayers.overrides
+            history.replaceState(history.state, '', url)
+            activateSettings(nextLayers.settings, changedKeys)
+
+            const refreshes = new Set(changedSettings.map(setting => setting.refresh))
+            if (refreshes.has('cartogram') || refreshes.has('data')) {
+                if (!await update()) throw new Error('Settings saved; data refresh failed')
+                if (cartogramLoadError) throw new Error(`Settings saved; cartogram unavailable: ${cartogramLoadError.message || cartogramLoadError}`)
+            } else {
+                await refreshPresentation(changedKeys)
+            }
+        }
+        settingsApplication = settingsApplication.then(apply, apply)
+        return settingsApplication
+    }
+
+    settingsPanelApi = createSettingsPanel({
+        metadata: metadataSettings,
+        overrides: settingOverrides,
+        colourSchemes: availableColourSchemes(),
+        onApply: applySettingOverrides,
+    })
 
     try {
         const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'

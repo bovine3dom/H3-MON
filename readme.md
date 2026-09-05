@@ -17,6 +17,51 @@ Prerequisites: yarn. A web browser. A CSV file of index, value for [H3 Hexagon i
 3. `yarn serve&; yarn watch`, open localhost:1983/?data=h3_data{,.csv, .arrow, .parquet}
 4. data will be refreshed with a file watcher
 
+# Metadata and view settings
+
+For a data file named `example.arrow`, H3-MON loads metadata from `www/data/example.json`. Query-string values override metadata values, so existing links such as `?data=example.arrow&flip&raw=false` continue to work and views configured in the settings panel can be shared directly.
+
+The always-visible cog opens the view settings panel. Selects and toggles apply immediately. Text fields that only affect presentation use leading throttle-debounce: the first change is immediate and the final value is applied after typing stops. Settings that combine typing with a data or cartogram rebuild are staged until **Apply pending** is pressed.
+
+| Key | Name | Type | Description |
+|-----|------|------|-------------|
+| `t` | Title | string | Browser and legend title. |
+| `c` | Additional attribution | comma-separated string | Attribution names prepended to the standard credits. |
+| `colourScheme` | Colour scheme | D3 interpolator name | Continuous D3 colour interpolator, such as `interpolateViridis`. |
+| `cyclical` | Cyclical colours | boolean | Uses Rainbow instead of Spectral when no explicit colour scheme is set. |
+| `flip` | Reverse colours | boolean | Reverses the colour scale. |
+| `raw` | Use raw values | boolean | Colours by source values instead of quantiles. |
+| `trimFactor` | Legend trim factor | number from 0 to less than 0.5 | Trims the ends of quantile legends. |
+| `quantileSource` | Quantile source | `map` or `cartogram` | Chooses which visible values determine quantiles. |
+| `scale` | Scale labels | object or null | Maps numeric breakpoints to raw legend labels. |
+| `trains` | Railway speeds | boolean | Shows OpenRailwayMap maximum-speed tiles. |
+| `cartogram` | Cartogram weights | filename, default-like value, or `none` | Selects a weights file or disables the cartogram. |
+| `defaultValue` | Missing value | number or null | Fallback used for missing contributors during cartogram aggregation. |
+| `infill` | Infill empty cells | boolean | Allows the missing value to fill wholly unobserved cartogram cells. |
+
+Boolean URL values retain the existing accepted forms: bare parameters and most values enable a setting, while `0`, `false`, `off`, and `no` disable it. The settings panel writes explicit `1` or `0` values and preserves unrelated query parameters and the map-position hash.
+
+Example metadata:
+
+```json
+{
+  "t": "Population change",
+  "c": "Example data provider",
+  "colourScheme": "interpolateViridis",
+  "flip": false,
+  "trimFactor": 0.01,
+  "quantileSource": "cartogram",
+  "defaultValue": 0,
+  "infill": true,
+  "scale": {
+    "0": "No change",
+    "1": "Largest increase"
+  }
+}
+```
+
+Future interaction endpoints will use the same schema rather than executable metadata. The intended shape is a structured `onclick` or `onmove` object containing a URL and delivery options; movement delivery should be leading throttle-debounce and limited to user-originated movement to avoid map/cartogram synchronization loops.
+
 # Cartogram mapping spec
 
 Cartograms are maps with complex projections, most commonly used for visualising data with uniform populations rather than geographic projections which attempt to preserve land area.

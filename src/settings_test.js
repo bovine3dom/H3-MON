@@ -1,0 +1,82 @@
+import {
+    SETTINGS_BY_KEY,
+    effectiveSettingValue,
+    leadingThrottleDebounce,
+    readSettingLayers,
+    updateUrlSettingOverrides,
+    validateSettingValue,
+} from './settings.js'
+
+function assert(condition, message = 'Assertion failed') {
+    if (!condition) throw new Error(message)
+}
+
+Deno.test('query settings override metadata with legacy boolean spellings', () => {
+    const params = new URLSearchParams('flip=false&raw&trimFactor=0&data=example.arrow')
+    const layers = readSettingLayers({flip: true, raw: false, trimFactor: 0.1}, params)
+
+    assert(layers.settings.flip === false)
+    assert(layers.settings.raw === true)
+    assert(layers.settings.trimFactor === 0)
+    assert(layers.settings.data === 'example.arrow')
+})
+
+Deno.test('legacy non-JSON setting values retain their old string semantics', () => {
+    const layers = readSettingLayers({}, new URLSearchParams('scale={"0":"Low"}&cartogram=false&t='))
+
+    assert(layers.settings.scale === '{"0":"Low"}')
+    assert(layers.settings.cartogram === 'false')
+    assert(layers.settings.t === '')
+})
+
+Deno.test('scale overrides round-trip while unrelated URL state is preserved', () => {
+    const url = new URL('https://example.test/?data=old.csv&perf&unknown=x#x=1&y=2&z=3')
+    updateUrlSettingOverrides(url, {scale: {'0': 'Low', '1': 'High'}, flip: false, defaultValue: null})
+    const layers = readSettingLayers({}, url.searchParams)
+
+    assert(layers.settings.scale['0'] === 'Low')
+    assert(layers.settings.scale['1'] === 'High')
+    assert(layers.settings.flip === false)
+    assert(layers.settings.defaultValue === null)
+    assert(url.searchParams.get('data') === 'old.csv')
+    assert(url.searchParams.has('perf'))
+    assert(url.searchParams.get('unknown') === 'x')
+    assert(url.hash === '#x=1&y=2&z=3')
+})
+
+Deno.test('removing an override reveals metadata again', () => {
+    const metadata = {flip: true}
+    const overrides = {flip: false}
+    assert(effectiveSettingValue(metadata, overrides, SETTINGS_BY_KEY.get('flip')) === false)
+    delete overrides.flip
+    assert(effectiveSettingValue(metadata, overrides, SETTINGS_BY_KEY.get('flip')) === true)
+})
+
+Deno.test('trim factor and scale validation reject malformed values', () => {
+    const trim = SETTINGS_BY_KEY.get('trimFactor')
+    const scale = SETTINGS_BY_KEY.get('scale')
+    assert(validateSettingValue(trim, 0) === null)
+    assert(validateSettingValue(trim, 0.5) !== null)
+    assert(validateSettingValue(scale, {'0': 'Low', '1': 'High'}) === null)
+    assert(validateSettingValue(scale, {nope: 'Low'}) !== null)
+})
+
+Deno.test('every setting defines user-facing and application metadata', () => {
+    for (const setting of SETTINGS_BY_KEY.values()) {
+        assert(setting.name)
+        assert(setting.description)
+        assert(['immediate', 'throttle', 'staged'].includes(setting.apply))
+        assert(['render', 'data', 'cartogram'].includes(setting.refresh))
+    }
+})
+
+Deno.test('throttle-debounce runs first and final alterations', async () => {
+    const values = []
+    const update = leadingThrottleDebounce(value => values.push(value), 10)
+    update('first')
+    update('middle')
+    update('final')
+    assert(values.join(',') === 'first')
+    await new Promise(resolve => setTimeout(resolve, 20))
+    assert(values.join(',') === 'first,final')
+})

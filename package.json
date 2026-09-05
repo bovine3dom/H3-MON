@@ -4,6 +4,7 @@
     "scripts": {
         "serve_memleak": "node esbuild.config.mjs --servedir=www",
         "build": "node esbuild.config.mjs",
+        "test": "deno test src/settings_test.js",
         "watch": "node esbuild.config.mjs --watch",
         "serve": "yarn deno run --lock=deno.lock --allow-net --allow-read srv/watcher.ts",
         "postinstall": "cp node_modules/@loaders.gl/parquet/dist/parquet_wasm_bg.wasm www/"
