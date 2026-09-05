@@ -60,7 +60,88 @@ Example metadata:
 }
 ```
 
-Future interaction endpoints will use the same schema rather than executable metadata. The intended shape is a structured `onclick` or `onmove` object containing a URL and delivery options; movement delivery should be leading throttle-debounce and limited to user-originated movement to avoid map/cartogram synchronization loops.
+# Interaction endpoints
+
+JSON metadata can optionally define `onclick` and `onmove` objects. These issue **GET
+requests returning Arrow IPC files or streams**, then replace the current dataset using
+the existing map, legend, tooltip and cartogram rendering pipeline. No JavaScript is
+executed from metadata.
+
+- `onclick` uses the geographic cell under a map click or tap, including cells absent
+  from the current result. Existing click highlighting/focusing is unchanged.
+- `onmove` uses the geographic map centre during user pan/zoom, including keyboard
+  navigation. It is not pointer hover. Programmatic camera changes, including search,
+  hash navigation and cartogram synchronization, do not request data.
+- Movement sends immediately, then sends the latest position after a quiet period
+  (`wait`, milliseconds, default `350`). Identical URLs are deduplicated. A configured
+  click cancels pending movement delivery and always requests a fresh result.
+- Both hooks apply to the **geographic map only**. Cartogram events keep their existing
+  navigation behavior; no single origin is guessed from a many-to-one cartogram cell.
+- New requests cancel obsolete fetches. Failed requests retain the last good dataset
+  and show an error in the loading status. Settings refreshes use the last successful
+  endpoint, rather than reverting to the seed file. Seed-file watcher events are ignored
+  once an endpoint result is active. Browser cancellation does not cancel server work.
+
+Each object requires `url`. Optional `resolution` is an integer from 0 to 15; otherwise
+the current dataset's H3 resolution is used. `wait` must be between 0 and 60000.
+URL templates support these placeholders, with substituted values URL-encoded:
+
+| Placeholder | Value |
+|-------------|-------|
+| `{index}` | Canonical hexadecimal H3 cell at the selected resolution. |
+| `{index_lower}`, `{index_upper}` | Unsigned low/high 32-bit words of that cell. |
+| `{lat}`, `{lng}` | Click location or current map-centre coordinates. |
+| `{zoom}` | Current geographic map zoom. |
+
+URLs must use HTTP(S), without embedded credentials. Relative URLs resolve against
+the page URL. Existing query parameters are preserved; no cache-busting `v` parameter
+is added to endpoint URLs. Missing, null or false hooks are disabled; `?onmove=false`
+also disables a metadata hook. Structured hooks are metadata-only, not settings-panel
+controls or JavaScript/JSON strings in query parameters.
+
+## Rail-routing example
+
+[`www/data/reachable.json`](www/data/reachable.json) configures both hooks for the
+res5 router in the sibling `gtfs_ffs` project. [`reachable.csv`](www/data/reachable.csv)
+is only a one-cell seed near Paris, not a precomputed reachability result. With that
+backend listening on port 1988, run `yarn build` and `yarn serve`, then open:
+
+```text
+http://localhost:1983/?data=reachable.csv#x=2.3962&y=48.8241&z=6
+```
+
+Click/tap a cell or pan the map to fetch the first result. Initial page load does not
+call the backend. For click-only operation, add `&onmove=false` before the hash.
+The essential metadata shape is:
+
+```json
+{
+  "t": "Rail travel time (minutes)",
+  "raw": false,
+  "cartogram": "none",
+  "onclick": {
+    "url": "http://127.0.0.1:1988/reachable?index={index}&departure=08:00:00&budget_s=10800&encoding=split",
+    "resolution": 5
+  },
+  "onmove": {
+    "url": "http://127.0.0.1:1988/reachable?index={index}&departure=08:00:00&budget_s=10800&encoding=split",
+    "resolution": 5,
+    "wait": 350
+  }
+}
+```
+
+Edit departure time and budget in the URLs, then reload the page. `127.0.0.1` means
+the **browser's machine**: replace it with your reachable backend hostname or use a
+port forward when browsing remotely. HTTPS pages require an HTTPS endpoint or proxy.
+The endpoint must allow CORS when served from another origin.
+
+The routing response must include `value` (elapsed minutes), plus string `index` or
+unsigned split indices; `elapsed_ms` is displayed in the tooltip as an extra column.
+Keep Arrow IPC uncompressed and string columns non-dictionary-encoded for the installed
+reader. `raw: false` gives quantile colours with minute-valued legend labels; raw mode
+expects values already scaled to 0..1. Res5 routing merges stops within each cell and
+does not imply that every point inside a returned cell is reachable.
 
 # Cartogram mapping spec
 

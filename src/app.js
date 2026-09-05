@@ -15,6 +15,7 @@ import {getCitiesStartsWith} from 'tiny-geocoder'
 import {render_cartogram} from './cartogram'
 import {createSettingsPanel} from './settings-panel'
 import {readSettingLayers, settingEnabled, updateUrlSettingOverrides} from './settings'
+import {createInteractions} from './interactions'
 
 const params = new URLSearchParams(window.location.search)
 const DEFAULT_DOCUMENT_TITLE = document.title
@@ -1064,31 +1065,32 @@ function cartogramFileForData(value, preferHilo = false) {
     return file.replace(/(\.[^/.]+)$/, '_hilo$1')
 }
 
-function loadCartogramWeights(cartogramWeightsFile) {
+function loadCartogramWeights(cartogramWeightsFile, signal) {
     return (async () => {
         const doneInit = perfTimer('cartogram.init.total')
         setLoadStage('Loading cartogram weights')
-        const arrow_resp = await measurePerf('cartogram.weights.fetch', {file: cartogramWeightsFile}, () => fetch(`data/${cartogramWeightsFile}`))
+        const arrow_resp = await measurePerf('cartogram.weights.fetch', {file: cartogramWeightsFile}, () => fetch(`data/${cartogramWeightsFile}`, {signal}))
         if (!arrow_resp.ok) throw new Error(`Failed to load ${cartogramWeightsFile}: HTTP ${arrow_resp.status}`)
         const arrow_buf = await measurePerf('cartogram.weights.arrayBuffer', () => arrow_resp.arrayBuffer())
+        signal.throwIfAborted()
         setLoadStage('Parsing cartogram weights')
         const rawTable = await parseArrowTable(arrow_buf, 'cartogram.weights.arrow_parse', {bytes: arrow_buf.byteLength})
+        signal.throwIfAborted()
         const rawCols = {
-            x: await materializeArrowColumn(rawTable, 'x', 'cartogram.weights.column'),
-            y: await materializeArrowColumn(rawTable, 'y', 'cartogram.weights.column'),
-            code: await materializeArrowColumn(rawTable, 'code', 'cartogram.weights.column'),
             label: rawTable.getChild('label'),
             prominence: rawTable.getChild('prominence'),
             population: rawTable.getChild('population'),
             index: rawTable.getChild('index'),
-            index_lower: await materializeArrowColumn(rawTable, H3_INDEX_LOWER, 'cartogram.weights.column'),
-            index_upper: await materializeArrowColumn(rawTable, H3_INDEX_UPPER, 'cartogram.weights.column'),
-            weight: await materializeArrowColumn(rawTable, 'weight', 'cartogram.weights.column'),
-            weight_mean: await materializeArrowColumn(rawTable, 'weight_mean', 'cartogram.weights.column'),
         }
+        for (const name of ['x', 'y', 'code', H3_INDEX_LOWER, H3_INDEX_UPPER, 'weight', 'weight_mean']) {
+            rawCols[name] = await materializeArrowColumn(rawTable, name, 'cartogram.weights.column')
+            signal.throwIfAborted()
+        }
+        await yieldToPaint('Preparing cartogram cells')
+        signal.throwIfAborted()
+        // Only this request may publish its completed weights; cancelled loads stay local.
         cartoRes = getResolution(h3IndexInputAt(rawCols, 0))
         cartogramRawCols = rawCols
-        await yieldToPaint('Preparing cartogram cells')
         cartogramAgg = buildCartogramAggregation(rawCols)
         setLoadStage('Cartogram weights ready')
         doneInit({rows: h3RowCount(rawCols), cells: cartogramAgg.x.length, cartoRes, file: cartogramWeightsFile, h3Index: hasSplitH3Index(rawCols) ? 'split' : 'string'})
@@ -1428,7 +1430,7 @@ function bootstrap(meta = {}){
     let infill = settingEnabled(settings.infill, false)
     let showTrains = settingEnabled(settings.trains, false)
     let colourRamp
-    const file_path = `data/${file_name}`
+    const fileSource = {url: `data/${file_name}`, ext, format, cacheBust: true}
     let h3DataRowLookup = null
     let activeCartogramDataCol = null
     let cartogramLoadError = null
@@ -2141,7 +2143,16 @@ function bootstrap(meta = {}){
     }
 
     let reloadNum = 0
-    const getHexData = async publishLayer => {
+    const getHexData = async (publishLayer, source, signal) => {
+        const {url: file_path, ext, format} = source
+        const reload = ++reloadNum
+        const requestURL = new URL(file_path, document.baseURI)
+        if (source.cacheBust) requestURL.searchParams.set('v', reload)
+        const current = async promise => {
+            const result = await promise
+            signal.throwIfAborted()
+            return result
+        }
         const doneGetHexData = perfTimer('data.reload.total', {file: file_name, ext, layer: format.layer})
         activeH3Layer = null
         viewportQuantileState = null
@@ -2155,22 +2166,23 @@ function bootstrap(meta = {}){
         const useCartogramQuantiles = cartogramEnabled && settings.quantileSource === 'cartogram'
 
         if (format.layer === 'hex' && (ext === 'arrow' || ext === 'csv')) {
-            const reload = ++reloadNum
-            const resp = await measurePerf('data.fetch', {file: file_path, reload}, () => fetch(`${file_path}?v=${reload}`))
-            const buf = await measurePerf(ext === 'csv' ? 'data.read_text' : 'data.read_arrayBuffer', () => ext === 'csv' ? resp.text() : resp.arrayBuffer())
+            const resp = await current(measurePerf('data.fetch', {file: file_path, reload}, () => fetch(requestURL, {signal, cache: 'no-store'})))
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${(await current(resp.text())).slice(0, 300)}`)
+            const buf = await current(measurePerf(ext === 'csv' ? 'data.read_text' : 'data.read_arrayBuffer', () => ext === 'csv' ? resp.text() : resp.arrayBuffer()))
             setLoadStage('Parsing data')
             let dataCols
             let schema
             if (ext === 'arrow') {
-                const dataTable = await parseArrowTable(buf, 'data.arrow_parse', {bytes: buf.byteLength})
+                const dataTable = await current(parseArrowTable(buf, 'data.arrow_parse', {bytes: buf.byteLength}))
                 const fields = dataTable.schema.fields.map(f => f.name)
-                dataCols = await materializeArrowColumns(dataTable, fields, 'data.arrow_column')
+                dataCols = await current(materializeArrowColumns(dataTable, fields, 'data.arrow_column'))
                 schema = dataCols
             } else {
-                const rows = await parseCsvRows(buf)
-                dataCols = await measurePerf('data.csv_to_columns', {rows: rows.length}, () => rowsToColumns(rows))
+                const rows = await current(parseCsvRows(buf))
+                dataCols = await current(measurePerf('data.csv_to_columns', {rows: rows.length}, () => rowsToColumns(rows)))
                 schema = dataCols
             }
+            if (!dataCols.value || !hasH3Index(dataCols)) throw new Error('H3 data requires value and index or index_lower/index_upper columns')
             setLoadStage('Data parsed')
 
             const hasWeight = schema.hasOwnProperty('weight')
@@ -2190,13 +2202,13 @@ function bootstrap(meta = {}){
                     if (!cartogramInit) {
                         cartogramLoadError = null
                         cartogramWeightsFile = cartogramFileForData(settings.cartogram, dataHasSplitH3Index)
-                        cartogramInit = loadCartogramWeights(cartogramWeightsFile)
+                        cartogramInit = loadCartogramWeights(cartogramWeightsFile, signal)
                     }
                     return cartogramInit
                 })
                 : null
             cartogramReady?.catch(() => {})
-            const h3res = schemaHasH3Index && h3RowCount(dataCols) ? getResolution(h3IndexInputAt(dataCols, 0)) : null
+            const h3res = schemaHasH3Index && h3RowCount(dataCols) ? getResolution(h3IndexInputAt(dataCols, 0)) : dataH3Res
             dataH3Res = h3res
             const valuekey = doQuantiles ? 'quantile' : 'value'
             let getquantileFn
@@ -2246,8 +2258,9 @@ function bootstrap(meta = {}){
             let cartogramAvailable = !!cartogramReady
             if (cartogramReady) {
                 try {
-                    await waitWithLoadProgress(cartogramReady, 'Waiting for cartogram weights')
+                    await current(waitWithLoadProgress(cartogramReady, 'Waiting for cartogram weights'))
                 } catch (error) {
+                    if (signal.aborted) throw error
                     cartogramAvailable = false
                     failCartogram(error)
                 }
@@ -2261,7 +2274,7 @@ function bootstrap(meta = {}){
             }
 
             if (loadCartogram) try {
-                await yieldToPaint('Aggregating cartogram')
+                await current(yieldToPaint('Aggregating cartogram'))
 
                 cartoAggCols = null
                 let cartoDataCol = null
@@ -2271,15 +2284,15 @@ function bootstrap(meta = {}){
                     cartoAggCols = result.aggCols
                     cartoDataCol = result.meanCol
                 } else {
-                    const {grouped, source} = await projectH3ToCartoResolution(dataCols, 'value', h3res)
+                    const {grouped, source} = await current(projectH3ToCartoResolution(dataCols, 'value', h3res))
                     const result = groupCartogramWithMap(grouped, 'value', {source, rows: h3RowCount(grouped), h3Index: hasSplitH3Index(grouped) ? 'split' : 'string'})
                     cartoAggCols = result.aggCols
                     cartoDataCol = result.meanCol
                 }
 
                 if (cartoAggCols) {
-                    await yieldToPaint('Preparing map/cartogram links')
-                    const h3map = await measurePerf('cartogram.h3_to_xy.await_render', () => ensureH3ToXY())
+                    await current(yieldToPaint('Preparing map/cartogram links'))
+                    const h3map = await current(measurePerf('cartogram.h3_to_xy.await_render', () => ensureH3ToXY()))
                     setLoadStage('Preparing cartogram colours')
                     cartoValueCol = cartoDataCol
 
@@ -2302,8 +2315,8 @@ function bootstrap(meta = {}){
 
                     if (!cartogramApi) {
                         setLoadStage('Showing cartogram pane')
-                        await ensureCartogramPaneLaidOut('initial-render')
-                        await yieldToPaint('Drawing cartogram')
+                        await current(ensureCartogramPaneLaidOut('initial-render'))
+                        await current(yieldToPaint('Drawing cartogram'))
                         const doneRenderCartogram = perfTimer('cartogram.render.call', {rows: cartoAggCols.x.length})
                         cartogramApi = render_cartogram('#cartogram', cartoAggCols, {
                             perf: perfEnabled,
@@ -2366,7 +2379,7 @@ function bootstrap(meta = {}){
                         })
                         doneRenderCartogram()
                         setLoadStage('Fitting cartogram to map')
-                        await nextPaint()
+                        await current(nextPaint())
                         svgPerfLog('cartogram.initial_fit.layout', cartogramLayoutDetails())
                         fitCartogramToMapBounds(cartogramApi, h3map)
                     } else {
@@ -2380,13 +2393,14 @@ function bootstrap(meta = {}){
                         const doneDataQuantiles = perfTimer('cartogram.quantile.assign_data', {rows: values.length})
                         dataCols.quantile = assignQuantiles(values, getquantileFn)
                         doneDataQuantiles()
-                        await refreshH3LayerColours()
+                        await current(refreshH3LayerColours())
                         makeLegend(getvalueFn)
                     }
                     document.body.classList.add('cartogram-ready')
                     setLoadStage('Rendering map')
                 }
             } catch (error) {
+                if (signal.aborted) throw error
                 failCartogram(error)
             }
 
@@ -2407,12 +2421,12 @@ function bootstrap(meta = {}){
         }
 
         let loaded
-        const reload = ++reloadNum
         if (format.layer === 'geojson') {
-            const resp = await measurePerf('data.fetch', {file: file_path, reload}, () => fetch(`${file_path}?v=${reload}`))
-            loaded = {data: await measurePerf('data.read_json', () => resp.json())}
+            const resp = await current(measurePerf('data.fetch', {file: file_path, reload}, () => fetch(requestURL, {signal})))
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+            loaded = {data: await current(measurePerf('data.read_json', () => resp.json()))}
         } else {
-            loaded = await measurePerf('data.load', {file: file_path, reload}, () => load(`${file_path}?v=${reload}`, format.loader, format.loadOptions))
+            loaded = await current(measurePerf('data.load', {file: file_path, reload}, () => load(requestURL.href, format.loader, format.loadOptions)))
         }
         let raw = loaded.data
         window.raw_data = raw
@@ -2789,6 +2803,47 @@ function bootstrap(meta = {}){
         }
     }, {capture: true})
 
+    const interactions = createInteractions({
+        getSettings: () => settings,
+        baseURL: document.baseURI,
+        getValues: (config, point) => {
+            const resolution = config.resolution ?? dataH3Res
+            if (resolution == null) return null
+            const index = latLngToCell(point.lat, point.lng, resolution)
+            const [lower, upper] = h3IndexToSplitLong(index)
+            return {index, index_lower: lower >>> 0, index_upper: upper >>> 0,
+                lat: point.lat, lng: point.lng, zoom: map.getZoom()}
+        },
+        request: url => update({url, ext: 'arrow', format: FORMATS.arrow, cacheBust: false}),
+        onError: error => {
+            console.warn('Interaction failed', error)
+            setLoadProgress(100, `Interaction failed: ${error.message}`)
+        },
+    })
+    // MapLibre's click event excludes drags; metadata actions remain usable while loading.
+    map.on('click', event => {
+        const original = event.originalEvent
+        if (!original || original.button !== 0 || original.target?.closest?.('#search-container, .maplibregl-ctrl, .maplibregl-popup, .pane-btn')) return
+        interactions.click(event.lngLat)
+    })
+    let userInteractionMove = false
+    map.on('movestart', event => {
+        userInteractionMove = !!(event.keyboardMoving || eventStartedInMap(event.originalEvent))
+    })
+    map.on('move', event => {
+        userInteractionMove ||= !!(event.keyboardMoving || eventStartedInMap(event.originalEvent))
+        if (userInteractionMove) interactions.move(map.getCenter())
+    })
+    map.on('moveend', () => {
+        if (userInteractionMove) interactions.move(map.getCenter())
+        userInteractionMove = false
+    })
+    window.addEventListener('pagehide', () => {
+        interactions.cancel()
+        updatePending = false
+        updateController?.abort()
+    })
+
     const searchInput = document.getElementById('city-search')
     const resultsDiv = document.getElementById('city-results')
     let highlightedIdx = -1
@@ -2898,8 +2953,12 @@ function bootstrap(meta = {}){
     let updateRunning = false
     let updatePending = false
     let updatePromise = null
+    let updateController = null
+    let acceptedSource = fileSource
+    let pendingSource = null
+    let loadingSource = null
 
-    const updateOnce = async () => {
+    const updateOnce = async (source, signal) => {
         const doneMapReady = perfTimer('app.load_to_map_ready', {file: file_name, ext, layer: format.layer, renderer: 'packed', pickable: false, cartogramWeightsFile})
         if (loadProgress.complete) resetLoadProgress('Reloading data')
         const publishEarly = mainLayers.length === 0
@@ -2924,12 +2983,16 @@ function bootstrap(meta = {}){
             rawData: window.raw_data,
             layers: mainLayers,
             legend: legendDiv.lastElementChild,
+            legendFormatter,
+            cartogramReady: document.body.classList.contains('cartogram-ready'),
         }
         let mapReady = false
         const publishLayer = async layer => {
+            signal.throwIfAborted()
             commitPendingLegend()
             mainLayers = [layer]
             await renderLayers()
+            signal.throwIfAborted()
             if (!mapReady) {
                 const layerData = layer?.props?.data
                 const layerSource = layerData?.src || layerData
@@ -2939,18 +3002,21 @@ function bootstrap(meta = {}){
         }
 
         try {
-            const layer = await getHexData(publishLayer)
+            const layer = await getHexData(publishLayer, source, signal)
+            signal.throwIfAborted()
             if (!mapReady) {
                 await publishLayer(layer)
             }
             if (!h3DataRowLookup && dataH3Res != null && window._columnData) {
                 await yieldToPaint('Indexing map cells')
+                signal.throwIfAborted()
                 h3DataRowLookup = buildH3DataRowLookup(window._columnData)
             }
             finishLoadProgress()
             return true
         } catch (e) {
             if (!mapReady) doneMapReady({failed: true})
+            if (cartogramApi !== previousState.cartogramApi) cartogramApi?.destroy()
             activeH3Layer = previousState.activeH3Layer
             viewportQuantileState = previousState.viewportQuantileState
             h3DataRowLookup = previousState.h3DataRowLookup
@@ -2965,24 +3031,36 @@ function bootstrap(meta = {}){
             h3toXYPromise = previousState.h3toXYPromise
             cartogramApi = previousState.cartogramApi
             activeCartogramDataCol = previousState.activeCartogramDataCol
+            if (cartogramApi && cartoAggCols && activeCartogramDataCol) cartogramApi.updateData(cartoAggCols, activeCartogramDataCol)
+            document.body.classList.toggle('cartogram-ready', previousState.cartogramReady)
             window._columnData = previousState.columnData
             window.raw_data = previousState.rawData
             deferLegend = false
             pendingLegend = null
+            legendFormatter = previousState.legendFormatter
             legendVersion++
             legendDiv.replaceChildren(...(previousState.legend ? [previousState.legend] : []))
             if (mainLayers !== previousState.layers) {
                 mainLayers = previousState.layers
                 await renderLayers(false)
             }
-            console.error(e)
-            setLoadProgress(100, 'Load failed')
             loadProgress.complete = true
+            clearInterval(loadProgress.timer)
+            loadProgress.timer = null
+            loadProgress.active.clear()
+            if (!signal.aborted) {
+                console.error(e)
+                setLoadProgress(100, `Load failed: ${e.message || e}`)
+            }
             return false
         }
     }
 
-    const update = () => {
+    const update = source => {
+        if (source) {
+            pendingSource = source
+            updateController?.abort()
+        }
         updatePending = true
         if (updatePromise) return updatePromise
         updatePromise = (async () => {
@@ -2991,13 +3069,20 @@ function bootstrap(meta = {}){
             try {
                 do {
                     updatePending = false
-                    succeeded = await updateOnce()
+                    const source = pendingSource || acceptedSource
+                    pendingSource = null
+                    loadingSource = source
+                    updateController = new AbortController()
+                    succeeded = await updateOnce(source, updateController.signal)
+                    if (succeeded) acceptedSource = source
                 } while (updatePending)
                 if (succeeded && !cartogramLoadError) settingsPanelApi?.refreshCompleted()
                 return succeeded
             } finally {
                 updateRunning = false
                 updatePromise = null
+                updateController = null
+                loadingSource = null
             }
         })()
         return updatePromise
@@ -3188,7 +3273,9 @@ function bootstrap(meta = {}){
         let updateStarted = false
         const startUpdate = (delay = 0) => {
             updateStarted = true
-            setTimeout(update, delay)
+            setTimeout(() => {
+                if (acceptedSource === fileSource && !pendingSource && (!loadingSource || loadingSource === fileSource)) update()
+            }, delay)
         }
         socket.addEventListener("error", () => {
             console.warn("WebSocket error, automatic updates disabled")
@@ -3201,7 +3288,7 @@ function bootstrap(meta = {}){
         socket.addEventListener("message", (event) => {
             const message = String(event.data)
             if (message.startsWith("change") || message.startsWith("watching")) {
-                startUpdate(100) // give file some time to be written
+                startUpdate(100) // Recheck the source after waiting for the file write.
             }
         })
     } catch (e) {
