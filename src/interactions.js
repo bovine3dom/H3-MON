@@ -1,5 +1,22 @@
 import {leadingThrottleDebounce, settingEnabled} from './settings.js'
 
+export function centralLinkedH3(indices, latLngForIndex) {
+    const points = [...new Set(indices)].sort().map(index => {
+        const [lat, lng] = latLngForIndex(index).map(degrees => degrees * Math.PI / 180)
+        return {index, vector: [Math.cos(lat) * Math.cos(lng), Math.cos(lat) * Math.sin(lng), Math.sin(lat)]}
+    })
+    if (!points.length) return null
+    // Unit vectors keep clusters spanning the antimeridian centred on those cells.
+    const centre = [0, 0, 0]
+    for (const {vector} of points) for (let axis = 0; axis < 3; axis++) centre[axis] += vector[axis]
+    let best = points[0].index, bestScore = -Infinity
+    for (const {index, vector} of points) {
+        const score = vector.reduce((sum, value, axis) => sum + value * centre[axis], 0)
+        if (score > bestScore) { best = index; bestScore = score }
+    }
+    return best
+}
+
 export function createInteractions({getSettings, getReplaySettings = getSettings, getValues, request, onError = () => {}, baseURL}) {
     let moveConfig = null
     let moveTask = null
@@ -12,10 +29,11 @@ export function createInteractions({getSettings, getReplaySettings = getSettings
         if (config == null || ['boolean', 'string'].includes(typeof config) && !settingEnabled(config)) return null
         if (typeof config !== 'object' || Array.isArray(config) || typeof config.url !== 'string' || !config.url.trim()
             || config.resolution !== undefined && (!Number.isInteger(config.resolution) || config.resolution < 0 || config.resolution > 15)
-            || config.wait !== undefined && (!Number.isFinite(config.wait) || config.wait < 0 || config.wait > 60000)) {
+            || config.wait !== undefined && (!Number.isFinite(config.wait) || config.wait < 0 || config.wait > 60000)
+            || config.defaultAction !== undefined && typeof config.defaultAction !== 'boolean') {
             throw new Error(`Invalid ${key} configuration`)
         }
-        return {url: config.url, resolution: config.resolution, wait: config.wait ?? 350}
+        return {url: config.url, resolution: config.resolution, wait: config.wait ?? 350, defaultAction: config.defaultAction ?? true}
     }
 
     function deliver({url, context}, config, force = false) {

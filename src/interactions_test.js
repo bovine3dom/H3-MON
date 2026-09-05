@@ -1,10 +1,40 @@
-import {createInteractions} from './interactions.js'
+import {centralLinkedH3, createInteractions} from './interactions.js'
 
 function assert(condition, message = 'Assertion failed') {
     if (!condition) throw new Error(message)
 }
 
 const delay = (wait = 25) => new Promise(resolve => setTimeout(resolve, wait))
+
+Deno.test('cartogram origin is central, deterministic, and one of the linked cells', () => {
+    const points = {left: [0, -1], middle: [0, 0], right: [0, 1]}
+    assert(centralLinkedH3(Object.keys(points), key => points[key]) === 'middle')
+    assert(centralLinkedH3(['right', 'left', 'middle', 'left'], key => points[key]) === 'middle')
+    assert(centralLinkedH3([], key => points[key]) === null)
+    assert(centralLinkedH3(['left'], key => points[key]) === 'left')
+    assert(centralLinkedH3(['b', 'a'], () => [0, 0]) === 'a')
+    const dateline = {east: [0, 179], west: [0, -179], distant: [0, 0]}
+    assert(centralLinkedH3(Object.keys(dateline), key => dateline[key]) !== 'distant')
+})
+
+Deno.test('disabling default actions leaves the click request intact', async () => {
+    let calls = 0
+    for (const defaultAction of [undefined, true, false]) {
+        const interactions = createInteractions({
+            getSettings: () => ({onclick: {url: '/{index}', defaultAction}}),
+            getValues: (config, point) => { assert(config.defaultAction === (defaultAction ?? true)); return point },
+            request: async () => { calls++; return true }, baseURL: 'https://example.test',
+        })
+        assert(await interactions.click({index: '851fb467fffffff'}))
+    }
+    assert(calls === 3)
+    const errors = []
+    const interactions = createInteractions({
+        getSettings: () => ({onclick: {url: '/x', defaultAction: 'false'}}), getValues: () => ({}),
+        request: async () => { calls++ }, onError: error => errors.push(error), baseURL: 'https://example.test',
+    })
+    assert(await interactions.click({}) === false && errors.length === 1 && calls === 3)
+})
 
 Deno.test('explicit replay uses metadata, carries context, and can deduplicate parameter edits', async () => {
     const calls = []

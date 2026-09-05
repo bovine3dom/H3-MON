@@ -65,7 +65,7 @@ settings into H3-MON. Start with maximum travel time and departure time.
 
 ## Cartogram Click Requests
 
-- [ ] Trigger metadata-defined `onclick` requests from cartogram clicks too.
+- [x] Trigger metadata-defined `onclick` requests from cartogram clicks too.
 
 - Use a central H3 from the clicked cartogram cell's linked/highlighted H3 set as
   the origin, not coordinates derived from the cartogram's screen position.
@@ -76,7 +76,7 @@ settings into H3-MON. Start with maximum travel time and departure time.
 
 ## Optional Default Click Behavior
 
-- [ ] Let `onclick` metadata disable H3-MON's built-in click-to-highlight/focus actions.
+- [x] Let `onclick` metadata disable H3-MON's built-in click-to-highlight/focus actions.
 
 - Use one switch for all default click effects, covering highlighting and camera
   focusing together. Do not add separate switches or a replacement origin marker.

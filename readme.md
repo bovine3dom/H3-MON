@@ -75,16 +75,17 @@ requests returning Arrow IPC files or streams**, then replace the current datase
 the existing map, legend, tooltip and cartogram rendering pipeline. Hook URLs are
 templates; optional input converters described below are trusted JavaScript.
 
-- `onclick` uses the geographic cell under a map click or tap, including cells absent
-  from the current result. Existing click highlighting/focusing is unchanged.
+- `onclick` uses the geographic cell under a map click/tap, including cells absent
+  from the current result. Cartogram clicks use a central cell from the linked H3
+  set, with deterministic ties; the configured request resolution is then applied.
 - `onmove` uses the geographic map centre during user pan/zoom, including keyboard
   navigation. It is not pointer hover. Programmatic camera changes, including search,
   hash navigation and cartogram synchronization, do not request data.
 - Movement sends immediately, then sends the latest position after a quiet period
   (`wait`, milliseconds, default `350`). Identical URLs are deduplicated. A configured
   click cancels pending movement delivery and always requests a fresh result.
-- Both hooks apply to the **geographic map only**. Cartogram events keep their existing
-  navigation behavior; no single origin is guessed from a many-to-one cartogram cell.
+- `onmove` applies to the geographic map only. Cartogram panning keeps its existing
+  navigation behavior without issuing requests through programmatic map synchronization.
 - New requests cancel obsolete fetches. Failed requests retain the last good dataset
   and show an error in the loading status. Settings refreshes use the last successful
   endpoint, rather than reverting to the seed file. Seed-file watcher events are ignored
@@ -92,6 +93,11 @@ templates; optional input converters described below are trusted JavaScript.
 
 Each object requires `url`. Optional `resolution` is an integer from 0 to 15; otherwise
 the current dataset's H3 resolution is used. `wait` must be between 0 and 60000.
+Set `onclick.defaultAction` to `false` to disable built-in highlighting and camera
+focusing on both panes while still sending the configured request. It defaults to
+`true` when omitted and also controls highlight restoration from shared URLs.
+No replacement origin marker is added.
+
 URL templates support these placeholders, with substituted values URL-encoded:
 
 | Placeholder | Value |

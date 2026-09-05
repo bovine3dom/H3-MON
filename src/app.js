@@ -15,7 +15,7 @@ import {getCitiesStartsWith} from 'tiny-geocoder'
 import {render_cartogram} from './cartogram'
 import {createSettingsPanel} from './settings-panel'
 import {SETTINGS_SCHEMA, readSettingLayers, serializeSettingValue, settingEnabled, updateUrlSettingOverrides} from './settings'
-import {createInteractions} from './interactions'
+import {centralLinkedH3, createInteractions} from './interactions'
 import {createRequestStatus} from './request-status'
 import {createRequestControls} from './request-controls'
 import {readQueryState, writeQueryState} from './query-state'
@@ -976,11 +976,13 @@ function hex(hexes, options = {}) {
         const computedBounds = computeH3Bounds(hexes, {referenceLng: centerBefore.lng, trim: fitTrim})
         if (computedBounds) {
             const {bounds, meta} = computedBounds
-            const camera = typeof map.cameraForBounds === 'function' ? map.cameraForBounds(bounds, {padding}) : null
+            const viewport = map.getContainer()
+            const fitPadding = Math.min(padding, Math.min(viewport.clientWidth, viewport.clientHeight) / 4)
+            const camera = typeof map.cameraForBounds === 'function' ? map.cameraForBounds(bounds, {padding: fitPadding}) : null
             syncLog('cartogram->map.fit.request', {
                 ...meta,
                 bounds,
-                padding,
+                padding: fitPadding,
                 centerBefore: {lng: centerBefore.lng, lat: centerBefore.lat},
                 zoomBefore,
                 camera: camera ? {center: camera.center, zoom: camera.zoom} : null,
@@ -988,7 +990,7 @@ function hex(hexes, options = {}) {
             const flyToken = ++hexFlyToken
             hex_flying = true
             map.stop()
-            map.fitBounds(bounds, {padding})
+            map.fitBounds(bounds, {padding: fitPadding})
             map.once('moveend', () => {
                 const centerAfter = map.getCenter()
                 syncLog('cartogram->map.fit.moveend', {
@@ -1439,6 +1441,7 @@ function bootstrap(meta = {}){
     const restoredQuery = readQueryState(params)
     let lastQuery = restoredQuery
     let requestError = null
+    let failedSource = null
     cartogramInit = null
     cartogramWeightsFile = null
     cartogramEnabled = cartogramFile(settings.cartogram) !== null
@@ -2353,28 +2356,18 @@ function bootstrap(meta = {}){
                             data_col: cartoDataCol,
                             onviewchange_callback: (data, visibleIndices) => updateViewportQuantiles('cartogram', visibleIndices),
                             onclick_callback: (data, event, i) => {
-                                if (updateRunning) return
                                 try {
-                                    syncLog('cartogram.click.callback', {
-                                        row: i,
-                                        eventType: event?.type,
-                                        cartogramEnabled,
-                                        hasApi: !!cartogramApi,
-                                        hasAggCols: !!cartoAggCols,
-                                        dataH3Res,
-                                        cartoRes,
-                                    })
-                                    if (cartogramApi) cartogramApi.highlightCells([i])
                                     const cartoRefs = cartogramCellH3Strings(i)
-                                    syncLog('cartogram.click.resolve', {
-                                        row: i,
-                                        cartoH3Refs: cartoRefs.length,
-                                        firstCartoRefs: cartoRefs.slice(0, 5),
-                                        cartoRes,
-                                        dataH3Res,
-                                    })
-                                    if (cartoRefs.length) hex(cartoRefs, {fit: true})
-                                    else syncLog('cartogram.click.skip_no_carto_refs', {row: i})
+                                    const index = centralLinkedH3(cartoRefs, cellToLatLng)
+                                    if (!index) return
+                                    const [lat, lng] = cellToLatLng(index)
+                                    const point = {index, lat, lng, zoom: map.getZoom(), cartogram: [data.x[i], data.y[i]]}
+                                    userInteractionMove = false
+                                    if (defaultClickEnabled()) {
+                                        cartogramApi?.highlightCells([i])
+                                        hex(cartoRefs, {fit: true})
+                                    }
+                                    interactions.click(point)
                                 } catch (e) {
                                     console.warn('Cartogram click failed', {row: i, cartoRes, dataH3Res}, e)
                                 }
@@ -2810,30 +2803,14 @@ function bootstrap(meta = {}){
         if (event.target?.closest?.('#search-container, .maplibregl-ctrl, .pane-btn')) hideMapHoverTooltip()
     }, {capture: true})
 
-    mapContainer.addEventListener('click', async event => {
-        hideMapHoverTooltip()
-        if (updateRunning || dataH3Res == null || event.button !== 0) return
-        const target = event.target
-        if (target?.closest && target.closest('#search-container, .maplibregl-ctrl, .maplibregl-popup, .pane-btn')) return
-        try {
-            const rect = mapContainer.getBoundingClientRect()
-            const point = {x: event.clientX - rect.left, y: event.clientY - rect.top}
-            const lngLat = map.unproject([point.x, point.y])
-            const h3Index = latLngToCell(lngLat.lat, lngLat.lng, dataH3Res)
-            syncLog('map.click.h3_fallback', {h3Index, dataH3Res})
-            await focusCartogramForH3(h3Index)
-        } catch (e) {
-            console.warn('Failed to focus cartogram from map click', e)
-        }
-    }, {capture: true})
-
     const interactions = createInteractions({
         getSettings: () => settings,
         getReplaySettings: () => metadataSettings,
         baseURL: document.baseURI,
         getValues: (config, point) => {
             if (point.index && !isValidCell(point.index)) throw new Error('Invalid query H3 cell')
-            const resolution = config.resolution ?? (point.index ? getResolution(point.index) : dataH3Res)
+            // Saved queries retain their resolved resolution; fresh clicks follow the data.
+            const resolution = config.resolution ?? (point.event && point.index ? getResolution(point.index) : dataH3Res)
             if (resolution == null) return null
             const lng = ((point.lng + 180) % 360 + 360) % 360 - 180
             let index = point.index || latLngToCell(point.lat, lng, resolution)
@@ -2848,6 +2825,7 @@ function bootstrap(meta = {}){
         },
         request: (url, {event, point, values}) => {
             requestError = null
+            failedSource = null
             const query = {event, index: values.index, lat: values.lat, lng: values.lng, zoom: values.zoom}
             if (point.cartogram) query.cartogram = point.cartogram
             const pageURL = writeQueryState(new URL(window.location.href), query)
@@ -2861,12 +2839,13 @@ function bootstrap(meta = {}){
         onError: error => {
             console.warn('Interaction failed', error)
             requestError = error
+            failedSource = null
             interactions.cancel()
             updateController?.abort()
             pendingSource = null
             updatePending = false
             document.body.classList.add('load-error')
-            requestStatus.fail(error, {hasResult: mainLayers.length > 0, onRetry: () => interactions.retry()})
+            requestStatus.fail(error, {hasResult: mainLayers.length > 0, onRetry: retryRequest})
         },
     })
     function repeatQuery({force = true} = {}) {
@@ -2875,8 +2854,16 @@ function bootstrap(meta = {}){
         return interactions.replay(query.event, query, {force})
     }
 
+    function retryRequest() {
+        return failedSource ? update(failedSource) : interactions.retry()
+    }
+
+    function defaultClickEnabled() {
+        return metadataSettings.onclick?.defaultAction !== false
+    }
+
     async function restoreSelection(query) {
-        if (query?.event !== 'onclick') return
+        if (query?.event !== 'onclick' || !defaultClickEnabled()) return
         if (query.cartogram && cartoAggCols && cartogramApi) {
             const row = cartoAggCols.x.findIndex((x, i) => x === query.cartogram[0] && cartoAggCols.y[i] === query.cartogram[1])
             if (row >= 0) {
@@ -2891,6 +2878,11 @@ function bootstrap(meta = {}){
     map.on('click', event => {
         const original = event.originalEvent
         if (!original || original.button !== 0 || original.target?.closest?.('#search-container, .maplibregl-ctrl, .maplibregl-popup, .pane-btn')) return
+        hideMapHoverTooltip()
+        if (defaultClickEnabled() && !updateRunning && dataH3Res != null) {
+            const index = latLngToCell(event.lngLat.lat, event.lngLat.lng, dataH3Res)
+            focusCartogramForH3(index).catch(error => console.warn('Could not focus linked cells', error))
+        }
         interactions.click(event.lngLat)
     })
     let userInteractionMove = false
@@ -3086,8 +3078,9 @@ function bootstrap(meta = {}){
             }
             await restoreSelection(source.query)
             signal.throwIfAborted()
+            if (failedSource === source) { requestError = null; failedSource = null }
             finishLoadProgress({clearStatus: !requestError})
-            if (requestError) requestStatus.fail(requestError, {hasResult: true, onRetry: () => interactions.retry()})
+            if (requestError) requestStatus.fail(requestError, {hasResult: true, onRetry: retryRequest})
             return true
         } catch (e) {
             if (!mapReady) doneMapReady({failed: true})
@@ -3125,8 +3118,9 @@ function bootstrap(meta = {}){
             loadProgress.active.clear()
             if (!signal.aborted) {
                 console.error(e)
+                if (!requestError || failedSource === source) { requestError = e; failedSource = source }
                 document.body.classList.add('load-error')
-                requestStatus.fail(requestError || e, {hasResult: mainLayers.length > 0, onRetry: requestError ? () => interactions.retry() : () => update(source)})
+                requestStatus.fail(requestError, {hasResult: mainLayers.length > 0, onRetry: retryRequest})
             }
             return false
         }
