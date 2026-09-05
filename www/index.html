@@ -435,10 +435,50 @@ body.pane-full #map {
     background: linear-gradient(90deg, #222, #777);
     transition: width 0.2s ease;
 }
-body.load-complete #load-progress {
+body.load-complete #load-progress,
+body.interactive-load #load-progress,
+body.load-error #load-progress {
     visibility: hidden;
     opacity: 0;
 }
+#request-status {
+    position: fixed;
+    top: 3.5rem;
+    right: 0.5rem;
+    z-index: 20;
+    max-width: min(20rem, calc(100vw - 1rem));
+    font: 13px/1.4 sans-serif;
+    color: #222;
+}
+#request-status[hidden], #request-status [hidden] { display: none; }
+.request-spinner {
+    display: block;
+    margin-left: auto;
+    width: 0.85rem;
+    height: 0.85rem;
+    border: 2px solid #ccc;
+    border-top-color: #333;
+    border-radius: 50%;
+    animation: request-spin 0.8s linear infinite;
+}
+@keyframes request-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .request-spinner { animation: none; } }
+.request-error {
+    margin-top: 0.3rem;
+    padding: 0.4rem 0.5rem;
+    background: white;
+    border: var(--btn-border);
+}
+.request-retry {
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-decoration: underline;
+    cursor: pointer;
+}
+.request-error summary { cursor: pointer; }
+.request-error pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0.3em 0 0; }
 #side-pane, #leftExpand {
     display: none;
 }
@@ -490,6 +530,14 @@ body.cartogram-ready #leftExpand {
                     <span id="load-progress-percent">0%</span>
                 </div>
                 <div class="load-progress-track"><div id="load-progress-bar"></div></div>
+            </div>
+            <div id="request-status" hidden>
+                <span class="request-spinner" role="status" aria-label="Updating" hidden></span>
+                <div class="request-error" hidden>
+                    <span class="request-error-message" role="alert"></span>
+                    <button class="request-retry" type="button">Retry</button>
+                    <details><summary>Details</summary><pre></pre></details>
+                </div>
             </div>
             <div class="utility-controls" role="group" aria-label="Page controls">
                 <button id="helpBtn" class="pane-btn" type="button" aria-label="What is a cartogram?" aria-controls="helpPopup" aria-expanded="false">?</button>

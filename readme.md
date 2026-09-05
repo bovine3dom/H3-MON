@@ -19,6 +19,10 @@ Prerequisites: yarn. A web browser. A CSV file of index, value for [H3 Hexagon i
 
 # Metadata and view settings
 
+Initial loads show detailed progress. Reloads keep the current map usable and show
+only a delayed corner spinner. Failed requests retain the previous result, with
+Retry and expandable error details beside the spinner.
+
 For a data file named `example.arrow`, H3-MON loads metadata from `www/data/example.json`. Query-string values override metadata values, so existing links such as `?data=example.arrow&flip&raw=false` continue to work and views configured in the settings panel can be shared directly.
 
 The always-visible cog opens the view settings panel. Selects and toggles apply immediately. Text fields that only affect presentation use leading throttle-debounce: the first change is immediate and the final value is applied after typing stops. Settings that combine typing with a data or cartogram rebuild are staged until **Apply pending** is pressed.

@@ -4,6 +4,7 @@ export function createInteractions({getSettings, getValues, request, onError = (
     let moveConfig = null
     let moveTask = null
     let lastURL = null
+    let lastAction = null
 
     function readConfig(key) {
         const config = getSettings()?.[key]
@@ -35,6 +36,7 @@ export function createInteractions({getSettings, getValues, request, onError = (
     }
 
     function run(key, point) {
+        lastAction = {key, point: point && typeof point === 'object' ? {...point} : point}
         try {
             const config = readConfig(key)
             const moving = key === 'onmove'
@@ -70,5 +72,8 @@ export function createInteractions({getSettings, getValues, request, onError = (
         }
     }
 
-    return {click: point => run('onclick', point), move: point => run('onmove', point), cancel}
+    return {
+        click: point => run('onclick', point), move: point => run('onmove', point), cancel,
+        retry: () => { if (lastAction) { cancel(); run(lastAction.key, lastAction.point) } },
+    }
 }

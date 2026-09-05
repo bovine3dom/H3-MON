@@ -2,7 +2,7 @@
 
 ## Loading Feedback
 
-- [ ] Make loading feedback unobtrusive during interactive use.
+- [x] Make loading feedback unobtrusive during interactive use.
 
 Keep the map usable and the last result visible while a request runs. Use a small,
 delayed corner spinner for interactive reloads, without percentages or stage narration.

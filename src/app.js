@@ -16,6 +16,7 @@ import {render_cartogram} from './cartogram'
 import {createSettingsPanel} from './settings-panel'
 import {readSettingLayers, settingEnabled, updateUrlSettingOverrides} from './settings'
 import {createInteractions} from './interactions'
+import {createRequestStatus} from './request-status'
 
 const params = new URLSearchParams(window.location.search)
 const DEFAULT_DOCUMENT_TITLE = document.title
@@ -56,7 +57,9 @@ const loadProgress = {
     estimates: {},
     complete: false,
     finishToken: 0,
+    interactive: false,
 }
+const requestStatus = createRequestStatus(document.getElementById('request-status'))
 
 const LOAD_PROGRESS_ESTIMATE_KEY = 'h3mon-load-progress-estimates-v1'
 const LOAD_PROGRESS_DEFAULTS = {
@@ -223,7 +226,7 @@ async function yieldToPaint(label) {
 }
 
 function setLoadProgress(value, label) {
-    if (!loadProgress.root) return
+    if (!loadProgress.root || loadProgress.interactive) return
     loadProgress.value = Math.max(loadProgress.value, Math.min(100, Math.max(0, value)))
     const rounded = loadProgress.value >= 100 ? 100 : Math.floor(loadProgress.value)
     if (label) loadProgress.label.textContent = label
@@ -235,7 +238,7 @@ function setLoadProgress(value, label) {
 }
 
 function setLoadStage(label) {
-    if (!loadProgress.root || !label) return
+    if (!loadProgress.root || !label || loadProgress.interactive) return
     loadProgress.label.textContent = label
     loadProgress.root.setAttribute('aria-label', label)
     document.body.classList.remove('load-complete')
@@ -252,7 +255,7 @@ function renderLoadProgress(label) {
 }
 
 function startLoadTask(label) {
-    if (!loadProgress.root || loadProgress.complete || !LOAD_PROGRESS_LABELS[label]) return null
+    if (!loadProgress.root || loadProgress.complete || loadProgress.interactive || !LOAD_PROGRESS_LABELS[label]) return null
     const id = loadProgress.nextTaskId++
     const estimate = loadProgress.estimates[label] || LOAD_PROGRESS_DEFAULTS[label] || 1
     loadProgress.active.set(id, {label, estimate, startedAt: now()})
@@ -281,15 +284,16 @@ function finishLoadTask(id, elapsed) {
 function resetLoadProgress(label = 'Loading…') {
     if (!loadProgress.root) return
     loadProgress.finishToken++
+    document.body.classList.remove('load-error', 'load-complete')
+    loadProgress.complete = false
+    if (loadProgress.interactive) return
     loadProgress.value = 0
     configureLoadProgress()
-    loadProgress.complete = false
     loadProgress.bar.style.width = '0%'
     loadProgress.percent.textContent = '0%'
     loadProgress.label.textContent = label
     loadProgress.root.setAttribute('aria-valuenow', '0')
     loadProgress.root.setAttribute('aria-label', label)
-    document.body.classList.remove('load-complete')
 }
 
 function finishLoadProgress() {
@@ -302,6 +306,13 @@ function finishLoadProgress() {
     loadProgress.completedWork = loadProgress.totalWork
     loadProgress.complete = true
     const finishToken = ++loadProgress.finishToken
+    requestStatus.clear()
+    if (loadProgress.interactive) {
+        loadProgress.value = 100
+        loadProgress.root.setAttribute('aria-valuenow', '100')
+        document.body.classList.add('load-complete')
+        return
+    }
     setLoadStage('Finishing render')
     loadProgress.bar.style.width = '100%'
 
@@ -2817,7 +2828,7 @@ function bootstrap(meta = {}){
         request: url => update({url, ext: 'arrow', format: FORMATS.arrow, cacheBust: false}),
         onError: error => {
             console.warn('Interaction failed', error)
-            setLoadProgress(100, `Interaction failed: ${error.message}`)
+            requestStatus.fail(error, {hasResult: mainLayers.length > 0, onRetry: () => interactions.retry()})
         },
     })
     // MapLibre's click event excludes drags; metadata actions remain usable while loading.
@@ -2840,6 +2851,7 @@ function bootstrap(meta = {}){
     })
     window.addEventListener('pagehide', () => {
         interactions.cancel()
+        requestStatus.clear()
         updatePending = false
         updateController?.abort()
     })
@@ -2959,8 +2971,12 @@ function bootstrap(meta = {}){
     let loadingSource = null
 
     const updateOnce = async (source, signal) => {
+        loadProgress.interactive = mainLayers.length > 0
+        document.body.classList.toggle('interactive-load', loadProgress.interactive)
+        if (loadProgress.complete || loadProgress.interactive) resetLoadProgress('Loading data')
+        if (loadProgress.interactive) requestStatus.begin()
+        else requestStatus.clear()
         const doneMapReady = perfTimer('app.load_to_map_ready', {file: file_name, ext, layer: format.layer, renderer: 'packed', pickable: false, cartogramWeightsFile})
-        if (loadProgress.complete) resetLoadProgress('Reloading data')
         const publishEarly = mainLayers.length === 0
         deferLegend = !publishEarly
         pendingLegend = null
@@ -3050,7 +3066,8 @@ function bootstrap(meta = {}){
             loadProgress.active.clear()
             if (!signal.aborted) {
                 console.error(e)
-                setLoadProgress(100, `Load failed: ${e.message || e}`)
+                document.body.classList.add('load-error')
+                requestStatus.fail(e, {hasResult: mainLayers.length > 0, onRetry: () => update(source)})
             }
             return false
         }
