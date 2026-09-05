@@ -64,7 +64,7 @@ Deno.test('trim factor and scale validation reject malformed values', () => {
 Deno.test('every setting defines user-facing and application metadata', () => {
     for (const setting of SETTINGS_BY_KEY.values()) {
         assert(setting.name)
-        assert(setting.description)
+        assert(setting.description === undefined || typeof setting.description === 'string')
         assert(['immediate', 'throttle', 'staged'].includes(setting.apply))
         assert(['render', 'data', 'cartogram'].includes(setting.refresh))
     }

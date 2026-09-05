@@ -16,7 +16,7 @@ Reserve detailed progress for initial loads when it genuinely helps.
 
 ## Settings Pane
 
-- [ ] Restyle and rewrite the settings pane to match the other minimalist panes.
+- [x] Restyle and rewrite the settings pane to match the other minimalist panes.
 
 Follow the existing panes' typography, spacing, borders and controls rather than
 introducing a separate dashboard-like design. Every element shown must help the

@@ -1140,6 +1140,7 @@ const STYLE = "./toner_ofm_moderatlist.json"
 
 const start_pos = {...{x: 0.45, y: 51.47, z: 4}, ...Object.fromEntries(new URLSearchParams(window.location.hash.slice(1)))}
 const map = new maplibregl.Map({
+    attributionControl: false,
     container: 'map',
     style: STYLE,
     center: [start_pos.x, start_pos.y],
@@ -1213,7 +1214,7 @@ document.addEventListener('click', (e) => {
     if (helpPopup.classList.contains('open') && !helpPopup.contains(e.target) && !helpBtn.contains(e.target)) {
         setOverlayOpen(helpPopup, helpBtn, false)
     }
-    if (settingsPanel.classList.contains('open') && !settingsPanel.contains(e.target) && !settingsBtn.contains(e.target)) {
+    if (settingsPanel.classList.contains('open') && !e.composedPath().includes(settingsPanel) && !e.composedPath().includes(settingsBtn)) {
         setOverlayOpen(settingsPanel, settingsBtn, false)
     }
 })
@@ -2784,7 +2785,7 @@ function bootstrap(meta = {}){
     })
 
     map.addControl(mapOverlay)
-    map.addControl(new maplibregl.NavigationControl())
+    map.addControl(new maplibregl.NavigationControl(), 'top-left')
 
     map.on('mousemove', scheduleMapHoverTooltip)
     map.on('movestart', hideMapHoverTooltip)

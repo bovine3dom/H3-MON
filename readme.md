@@ -25,7 +25,11 @@ Retry and expandable error details beside the spinner.
 
 For a data file named `example.arrow`, H3-MON loads metadata from `www/data/example.json`. Query-string values override metadata values, so existing links such as `?data=example.arrow&flip&raw=false` continue to work and views configured in the settings panel can be shared directly.
 
-The always-visible cog opens the view settings panel. Selects and toggles apply immediately. Text fields that only affect presentation use leading throttle-debounce: the first change is immediate and the final value is applied after typing stops. Settings that combine typing with a data or cartogram rebuild are staged until **Apply pending** is pressed.
+The cog opens compact groups of labelled controls. Optional explanations are behind
+`?`; Reset restores a field's default. Selects and toggles apply immediately. Text
+fields that only affect presentation use leading throttle-debounce. Settings that
+require a data or cartogram rebuild are staged until **Apply** is pressed; that button
+appears only when needed.
 
 | Key | Name | Type | Description |
 |-----|------|------|-------------|
