@@ -5,6 +5,7 @@
         "serve_memleak": "node esbuild.config.mjs --servedir=www",
         "build": "node esbuild.config.mjs",
         "test": "deno test src/settings_test.js src/interactions_test.js src/request-status_test.js src/request-controls_test.js src/query-state_test.js",
+        "test:rendering": "yarn build && node test/rendering.mjs",
         "watch": "node esbuild.config.mjs --watch",
         "serve": "yarn deno run --lock=deno.lock --allow-net --allow-read srv/watcher.ts",
         "postinstall": "cp node_modules/@loaders.gl/parquet/dist/parquet_wasm_bg.wasm www/"
@@ -28,6 +29,8 @@
         "tiny-geocoder": "^0.0.1"
     },
     "devDependencies": {
+        "playwright": "1.58.2",
+        "pngjs": "7.0.0",
         "typescript": "^5.5.4"
     }
 }

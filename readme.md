@@ -207,6 +207,24 @@ disabled by `onclick=false` or `onmove=false`. They preserve the saved geographi
 (`x`, `y`, `z`, `b` bearing and `p` pitch in the hash), rather than replaying click-focusing
 animations. Explicit clicks always refresh; unchanged automatic requests are deduplicated.
 
+# Tests
+
+H3-MON intentionally uses its own controls and styles, not MapLibre's stylesheet.
+The rendering test guards that setup as well as overlay alignment and blending.
+
+`yarn test` runs the unit tests. For the headless rendering regression tests:
+
+```sh
+yarn playwright install chromium
+yarn test:rendering
+```
+
+The rendering tests check multiply-blended pixels, polygon edges, and Deck/MapLibre
+alignment against an in-memory basemap on desktop and mobile, including rotated,
+pitched and resized views. They need no backend or external tiles. `CHROMIUM_PATH`
+can select an existing Chromium executable; `ARTIFACT_DIR` optionally retains
+diagnostic screenshots.
+
 # Cartogram mapping spec
 
 Cartograms are maps with complex projections, most commonly used for visualising data with uniform populations rather than geographic projections which attempt to preserve land area.

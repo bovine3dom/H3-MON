@@ -9,7 +9,6 @@ import {load, parse} from '@loaders.gl/core'
 import maplibregl from 'maplibre-gl'
 import * as d3 from 'd3'
 import {cellToBoundary, cellToLatLng, latLngToCell, getResolution, isValidCell, cellToParent, cellToChildren, h3IndexToSplitLong, splitLongToH3Index} from 'h3-js'
-import 'maplibre-gl/dist/maplibre-gl.css'
 import * as observablehq from './vendor/observablehq' // from https://observablehq.com/@d3/color-legend
 import {getCitiesStartsWith} from 'tiny-geocoder'
 import {render_cartogram} from './cartogram'
@@ -2790,7 +2789,6 @@ function bootstrap(meta = {}){
     })
 
     map.addControl(mapOverlay)
-    map.addControl(new maplibregl.NavigationControl(), 'top-left')
 
     map.on('mousemove', scheduleMapHoverTooltip)
     map.on('movestart', hideMapHoverTooltip)

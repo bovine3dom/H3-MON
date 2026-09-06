@@ -5,6 +5,8 @@
   "quantileSource": "map",
   "defaultValue": null,
   "infill": false,
+  "flip": false,
+  "cartogram": "cartogram_weights_europe_hilo",
   "controls": {
     "travelTime": {
       "label": "Travel time",
@@ -19,12 +21,13 @@
     "departure": {
       "label": "Departure",
       "type": "time",
-      "default": "08:00",
+      "default": "00:00",
       "encode": "value => value.length === 5 ? value + ':00' : value"
     }
   },
   "onclick": {
-    "url": "http://127.0.0.1:1988/reachable?index={index}&departure={controls.departure}&budget_s={controls.travelTime}&encoding=split",
-    "resolution": 5
+    "url": "http://127.0.0.1:1988/reachable?index={index}&departure={controls.departure}&budget_s={controls.travelTime}&window_s=86400&step_s=900&encoding=split&metric=distance_time_quantile",
+    "resolution": 5,
+    "defaultAction": false
   }
 }

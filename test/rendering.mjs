@@ -1,0 +1,253 @@
+import assert from 'node:assert/strict';
+import {readFile, mkdir} from 'node:fs/promises';
+import {createServer} from 'node:http';
+import {join} from 'node:path';
+import {chromium} from 'playwright';
+import {PNG} from 'pngjs';
+import {cellToBoundary, cellToLatLng} from 'h3-js';
+
+// Test the built application, never local user data or a replacement Deck layer.
+const www = new URL('../www/', import.meta.url);
+const cell = '851fb467fffffff';
+const center = cellToLatLng(cell).reverse();
+const boundary = cellToBoundary(cell, true);
+const background = '#5890aa';
+const reference = {
+    type: 'FeatureCollection',
+    features: [boundary, [[center[0] - 0.4, center[1]], [center[0] + 0.4, center[1]]],
+        [[center[0], center[1] - 0.3], [center[0], center[1] + 0.3]]].map(coordinates => ({
+        type: 'Feature', properties: {}, geometry: {type: 'LineString', coordinates},
+    })),
+};
+const style = {
+    version: 8, transition: {duration: 0, delay: 0},
+    sources: {reference: {type: 'geojson', data: reference}},
+    layers: [
+        {id: 'background', type: 'background', paint: {'background-color': background}},
+        {id: 'reference', type: 'line', source: 'reference', paint: {'line-color': '#18303c', 'line-width': 2}},
+    ],
+};
+const routes = new Map([
+    ['/toner_ofm_moderatlist.json', ['application/json', JSON.stringify(style)]],
+    ['/data/rendering.json', ['application/json', JSON.stringify({cartogram: 'none', raw: true, colourScheme: 'interpolateReds'})]],
+    ['/data/rendering.csv', ['text/csv', `index,value\n${cell},0.65\n`]],
+    ['/favicon.ico', ['image/x-icon', '']],
+]);
+for (const [name, type] of [['index.html', 'text/html'], ['app.js', 'text/javascript'], ['app.css', 'text/css']]) {
+    routes.set(`/${name}`, [type, await readFile(new URL(name, www))]);
+}
+routes.set('/', routes.get('/index.html'));
+assert(!routes.get('/app.css')[1].toString().includes('.maplibregl-map'), 'Do not bundle the unused MapLibre stylesheet');
+const failures = [];
+const check = (condition, message) => { if (!condition) failures.push(message); };
+const server = createServer((request, response) => {
+    const path = new URL(request.url, 'http://localhost').pathname;
+    const route = routes.get(path);
+    if (!route) failures.push(`Unexpected HTTP request: ${path}`);
+    response.writeHead(route ? 200 : 404, {'Content-Type': route?.[0] || 'text/plain', 'Cache-Control': 'no-store'});
+    response.end(route?.[1] || '');
+});
+const artifacts = process.env.ARTIFACT_DIR;
+let browser;
+
+async function settle(page) {
+    await page.evaluate(() => Promise.all(document.getAnimations().map(animation => animation.finished)));
+    // Let the application's normal resize handling settle; do not repair it in the test.
+    await page.waitForFunction(() => {
+        const container = m.getContainer().getBoundingClientRect();
+        return [m.getCanvas(), document.getElementById('deckgl-overlay')].every(canvas => {
+            const rect = canvas.getBoundingClientRect();
+            return Math.abs(rect.width - container.width) <= 1 && Math.abs(rect.height - container.height) <= 1;
+        });
+    });
+    await page.evaluate(async () => {
+        const idle = new Promise((resolve, reject) => {
+            const done = () => { clearTimeout(timer); resolve(); };
+            const timer = setTimeout(() => {
+                m.off('idle', done);
+                reject(new Error('Map did not finish rendering within 10 seconds'));
+            }, 10000);
+            m.once('idle', done);
+        });
+        m.triggerRepaint();
+        await idle;
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    });
+}
+
+function rgb(image, [x, y]) {
+    assert(x >= 0 && y >= 0 && x < image.width && y < image.height, `Pixel outside screenshot: ${x},${y}`);
+    const offset = (Math.floor(y) * image.width + Math.floor(x)) * 4;
+    // Array.from matters: Buffer.map would truncate fractional expected RGB values.
+    return Array.from(image.data.subarray(offset, offset + 3));
+}
+const difference = (a, b) => Math.max(...a.map((value, i) => Math.abs(value - b[i])));
+const red = colour => colour[0] > colour[1] + 25 && colour[1] < 240;
+
+async function frame(page, name, paneOpen = false) {
+    await settle(page);
+    const geometry = await page.evaluate(points => {
+        const canvas = document.getElementById('deckgl-overlay');
+        // Private access is confined to this test: production needs no test hook.
+        const overlay = m._controls.find(control => control.getCanvas?.()?.id === 'deckgl-overlay');
+        const viewport = overlay._deck.getViewports()[0];
+        const rect = element => {
+            const {x, y, width, height} = element.getBoundingClientRect();
+            return {x, y, width, height};
+        };
+        const map = rect(m.getCanvas()), deck = rect(canvas), wrapper = rect(canvas.parentElement);
+        return {
+            map, deck, wrapper, viewport: {width: viewport.width, height: viewport.height},
+            mapPoints: points.map(point => { const p = m.project(point); return [map.x + p.x, map.y + p.y]; }),
+            deckPoints: points.map(point => { const p = viewport.project(point); return [deck.x + p[0], deck.y + p[1]]; }),
+            blend: getComputedStyle(canvas).mixBlendMode,
+            inline: {visibility: canvas.style.visibility, mixBlendMode: canvas.style.mixBlendMode},
+            occluders: [...document.querySelectorAll('#search-container, .maplibregl-ctrl, .pane-btn, #attribution, #legend, .utility-controls')]
+                .filter(element => getComputedStyle(element).visibility !== 'hidden').map(rect),
+        };
+    }, [center, ...boundary]);
+    const {map, deck, wrapper, viewport, mapPoints, deckPoints, inline} = geometry;
+    const size = page.viewportSize();
+    const expectedSize = [size.width / (paneOpen && size.width > size.height ? 2 : 1),
+        size.height / (paneOpen && size.height > size.width ? 2 : 1)];
+    check(difference([map.width, map.height], expectedSize) <= 1, `${name}: pane did not produce expected map size ${expectedSize}`);
+    const rectError = Math.max(...[deck, wrapper].flatMap(rect => ['x', 'y', 'width', 'height'].map(key => Math.abs(rect[key] - map[key]))));
+    const projectionError = Math.max(...mapPoints.map((point, i) => Math.hypot(point[0] - deckPoints[i][0], point[1] - deckPoints[i][1])));
+    check(rectError <= 1, `${name}: canvas/wrapper alignment error ${rectError.toFixed(2)} CSS px`);
+    check(difference([viewport.width, viewport.height], [map.width, map.height]) <= 1, `${name}: stale Deck viewport size`);
+    check(projectionError <= 1, `${name}: geographic projection error ${projectionError.toFixed(2)} CSS px`);
+    check(geometry.blend === 'multiply', `${name}: computed mix-blend-mode is ${geometry.blend}`);
+
+    const screenshot = async suffix => {
+        await settle(page);
+        const image = PNG.sync.read(await page.screenshot({scale: 'css',
+            ...(artifacts ? {path: join(artifacts, `${name}-${suffix}.png`)} : {}),
+        }));
+        assert.equal(image.width, size.width, 'Screenshots must use CSS pixels, including DPR 2');
+        assert.equal(image.height, size.height);
+        return image;
+    };
+    let baseline, white;
+    try {
+        await page.evaluate(() => { document.getElementById('deckgl-overlay').style.visibility = 'hidden'; });
+        baseline = await screenshot('basemap');
+        await page.evaluate(visibility => {
+            const canvas = document.getElementById('deckgl-overlay');
+            canvas.style.visibility = visibility;
+            canvas.style.mixBlendMode = 'normal';
+            m.setPaintProperty('background', 'background-color', '#ffffff');
+            m.setLayoutProperty('reference', 'visibility', 'none');
+        }, inline.visibility);
+        white = await screenshot('white-normal');
+    } finally {
+        await page.evaluate(({inline, background}) => {
+            Object.assign(document.getElementById('deckgl-overlay').style, inline);
+            m.setPaintProperty('background', 'background-color', background);
+            m.setLayoutProperty('reference', 'visibility', 'visible');
+        }, {inline, background});
+    }
+    const multiplied = await screenshot('multiply');
+    const safe = ([x, y]) => x > map.x + 1 && y > map.y + 1 && x < map.x + map.width - 1 && y < map.y + map.height - 1
+        && x < white.width - 1 && y < white.height - 1
+        && !geometry.occluders.some(r => r.width && r.height && x >= r.x && x <= r.x + r.width && y >= r.y && y <= r.y + r.height);
+    // Sample the actual Deck centre so a displaced polygon cannot hide the blend bug.
+    const sample = deckPoints[0];
+    assert(safe(sample), `${name}: centre obscured by controls or outside map`);
+    const baseRGB = rgb(baseline, sample), whiteRGB = rgb(white, sample), actualRGB = rgb(multiplied, sample);
+    const expectedRGB = baseRGB.map((value, i) => value * whiteRGB[i] / 255);
+    const blendError = difference(actualRGB, expectedRGB);
+    check(red(whiteRGB), `${name}: white frame has no red H3 at Deck centre: ${whiteRGB}`);
+    check(blendError <= 4, `${name}: multiply RGB ${actualRGB}, expected ${expectedRGB.map(Math.round)} (error ${blendError.toFixed(2)})`);
+
+    // Check rasterized polygon edges, independently of Deck's reported viewport.
+    let edges = 0, badEdges = 0;
+    for (let i = 1; i < mapPoints.length - 1; i++) {
+        const midpoint = mapPoints[i].map((value, axis) => (value + mapPoints[i + 1][axis]) / 2);
+        const toward = midpoint.map((value, axis) => mapPoints[0][axis] - value);
+        const length = Math.hypot(...toward);
+        const inner = midpoint.map((value, axis) => value + 3 * toward[axis] / length);
+        const outer = midpoint.map((value, axis) => value - 3 * toward[axis] / length);
+        if (!safe(inner) || !safe(outer)) continue;
+        edges++;
+        if (!red(rgb(white, inner)) || difference(rgb(white, outer), [255, 255, 255]) > 5) badEdges++;
+    }
+    check(edges >= 3, `${name}: only ${edges} unobscured polygon edges`);
+    check(badEdges === 0, `${name}: ${badEdges}/${edges} rasterized H3 edges disagree with MapLibre (+/-3 CSS px)`);
+    console.log(JSON.stringify({name, map, deck, rectError, projectionError, blendError, baseRGB, whiteRGB, expectedRGB, actualRGB, edges, badEdges}));
+}
+
+try {
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+    if (artifacts) await mkdir(artifacts, {recursive: true});
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    browser = await chromium.launch({headless: true, executablePath: process.env.CHROMIUM_PATH,
+        args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--disable-dev-shm-usage'],
+    });
+    for (const [device, width, height, deviceScaleFactor] of [['desktop', 1200, 850, 1], ['mobile', 375, 812, 2]]) {
+        const context = await browser.newContext({viewport: {width, height}, deviceScaleFactor, reducedMotion: 'reduce', serviceWorkers: 'block'});
+        const page = await context.newPage();
+        page.setDefaultTimeout(20000);
+        await context.routeWebSocket('**/*', socket => socket.onMessage(message => {
+            if (String(message).startsWith('watch:')) socket.send('watching:rendering.csv');
+        }));
+        page.on('pageerror', error => failures.push(`${device}: pageerror: ${error.stack || error}`));
+        page.on('console', message => {
+            const text = message.text();
+            if (text === 'Error: <g> attribute transform: Expected transform function, "0".') return;
+            if (message.type() === 'error') failures.push(`${device}: console: ${text}`);
+            else if (message.type() === 'warning') console.warn(`${device}: ${text}`);
+        });
+        await context.route('**/*', route => {
+            if (new URL(route.request().url()).origin === origin) return route.continue();
+            failures.push(`${device}: unexpected external request: ${route.request().url()}`);
+            return route.abort();
+        });
+        try {
+            await page.goto(`${origin}/?data=rendering.csv#x=${center[0]}&y=${center[1]}&z=8`);
+            await page.waitForFunction(cell => document.body.classList.contains('load-complete') && window.m?.loaded()
+                && window._columnData?.index?.length === 1 && window._columnData.index[0] === cell
+                && window._columnData.value[0] === 0.65, cell);
+            check(await page.locator('.maplibregl-ctrl-group').count() === 0, `${device}: unwanted native map controls`);
+            await page.mouse.move(0, 0);
+            await frame(page, `${device}-closed-flat`);
+            await page.evaluate(() => m.jumpTo({bearing: 30, pitch: 35}));
+            await frame(page, `${device}-closed-tilted`);
+            await page.evaluate(center => m.jumpTo({center: [center[0] + 0.025, center[1] + 0.015], zoom: 7.7}), center);
+            await frame(page, `${device}-pan-zoom`);
+            // Enable existing pane CSS and button logic; Help overlaps the closed-pane button.
+            await page.evaluate(() => {
+                document.body.classList.remove('pane-open', 'pane-full');
+                document.body.classList.add('cartogram-ready');
+            });
+            await page.locator('#leftExpand').evaluate(button => button.click());
+            await frame(page, `${device}-pane-open`, true);
+            await page.locator('#rightExpand').evaluate(button => button.click());
+            await settle(page);
+            check(await page.locator('#map').isHidden(), `${device}: full pane did not hide map`);
+            await page.locator('#rightExpand').evaluate(button => button.click());
+            await frame(page, `${device}-pane-reopen`, true);
+            await page.locator('#leftExpand').evaluate(button => button.click());
+            await frame(page, `${device}-pane-closed-again`);
+            await page.setViewportSize({width: height, height: width});
+            await frame(page, `${device}-orientation-closed`);
+            await page.locator('#leftExpand').evaluate(button => button.click());
+            await frame(page, `${device}-orientation-open`, true);
+        } catch (error) {
+            console.error(await page.evaluate(() => ({classes: document.body.className,
+                status: document.querySelector('#request-status pre')?.textContent,
+                columns: Object.keys(window._columnData || {}), loaded: window.m?.loaded()})));
+            failures.push(`${device}: ${error.stack || error}`);
+        } finally {
+            await context.close();
+        }
+    }
+} finally {
+    try { await browser?.close(); }
+    finally { await new Promise(resolve => server.close(resolve)); }
+}
+if (failures.length) {
+    console.error(failures.join('\n'));
+    process.exitCode = 1;
+} else {
+    console.log('Rendering regressions passed: desktop/mobile, cameras, pane transitions and orientation.');
+}
