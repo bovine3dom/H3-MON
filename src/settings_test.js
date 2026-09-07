@@ -78,6 +78,20 @@ Deno.test('rankit defaults off and URL overrides metadata in both directions', (
     assert(url.searchParams.get('data') === 'test.csv' && url.hash === '#x=1')
 })
 
+Deno.test('crosshair defaults on and metadata can be overridden through shared URLs', () => {
+    const setting = SETTINGS_BY_KEY.get('crosshair')
+    assert(effectiveSettingValue({}, {}, setting) === true)
+    const url = new URL('https://example.test/?onmove=false&query=saved')
+    for (const crosshair of [false, true]) {
+        updateUrlSettingOverrides(url, {crosshair})
+        const layers = readSettingLayers({crosshair: !crosshair}, url.searchParams)
+        assert(layers.settings.crosshair === crosshair)
+        assert(url.searchParams.get('crosshair') === (crosshair ? '1' : '0'))
+        assert(layers.settings.onmove === 'false' && url.searchParams.get('query') === 'saved')
+    }
+    assert(effectiveSettingValue({crosshair: false}, {}, setting) === false)
+})
+
 Deno.test('frozen numeric bounds round-trip and override metadata, including unfreeze', () => {
     const url = new URL('https://example.test/?data=test.csv&query=saved#x=1&y=2&z=3')
     updateUrlSettingOverrides(url, {legendBounds: [-12.345, 987.654]})

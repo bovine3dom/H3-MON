@@ -127,6 +127,11 @@ trusted JavaScript. No query WebSocket backend implementation is included.
   requests a fresh result.
 - `onmove` applies to the geographic map only. Cartogram panning keeps its existing
   navigation behavior without issuing requests through programmatic map synchronization.
+- Enabled `onmove` shows a thin grey crosshair at the geographic map centre, matching
+  the movement query origin. Set global metadata `"crosshair": false` to hide it
+  (`true` is the default), or use **Centre crosshair** in Settings. URL overrides
+  `crosshair=0` and `crosshair=1` are shareable. The crosshair remains hidden when
+  `onmove` is disabled or absent and never intercepts map gestures.
 - New HTTP requests cancel obsolete fetches. WebSocket movement can display a trailing
   result while newer work is pending; explicit query-context changes invalidate old
   results without sending cancellation to the server. Failed requests retain the last good dataset

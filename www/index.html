@@ -141,6 +141,16 @@ body.pane-full #map {
 #deckgl-overlay {
     mix-blend-mode: multiply;
 }
+#reticule {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 80px;
+    height: 80px;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    z-index: 1;
+}
 #attribution {
     position: absolute;
     z-index: 1;
@@ -390,6 +400,11 @@ body.cartogram-ready #leftExpand {
                 <div id="cartogram"></div>
             </aside>
             <div id="map">
+                <div id="reticule" aria-hidden="true" hidden>
+                    <svg width="80" height="80" viewBox="0 0 80 80">
+                        <path d="M40 0V80 M0 40H80" fill="none" stroke="#aaa" stroke-width="1" />
+                    </svg>
+                </div>
                 <button id="leftExpand" class="pane-btn" type="button" aria-label="Close side pane">‹</button>
                 <div id="search-container">
                     <div id="request-status" hidden>

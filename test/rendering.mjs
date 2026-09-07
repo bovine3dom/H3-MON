@@ -253,6 +253,79 @@ try {
             await page.locator('#leftExpand').evaluate(button => button.click());
             await frame(page, `${device}-orientation-open`, true);
 
+            // Crosshair visibility follows query capability, independently of data loading.
+            routes.set('/data/crosshair.csv', routes.get('/data/rendering.csv'));
+            const reticule = page.locator('#reticule');
+            const crosshair = page.getByRole('checkbox', {name: 'Centre crosshair', exact: true});
+            for (const [metadata, query, visible] of [
+                [{}, '&crosshair=true', false],
+                [{onmove: {url: '/data/crosshair.csv'}}, '&onmove=false&crosshair=true', false],
+                [{onmove: {url: '/data/crosshair.csv'}}, '', true],
+                [{onmove: {url: '/data/crosshair.csv'}, crosshair: false}, '', false],
+                [{onmove: {url: '/data/crosshair.csv'}, crosshair: false}, '&crosshair=true', true],
+                [{onmove: {url: '/data/crosshair.csv'}}, '&crosshair=false', false],
+            ]) {
+                routes.set('/data/crosshair.json', ['application/json', JSON.stringify({
+                    cartogram: 'none', raw: true, ...metadata,
+                })]);
+                await page.goto('about:blank');
+                await page.goto(`${origin}/?data=crosshair.csv${query}#x=${center[0]}&y=${center[1]}&z=8`);
+                await page.waitForFunction(() => document.body.classList.contains('load-complete'));
+                await reticule.waitFor({state: visible ? 'visible' : 'hidden'});
+                await page.locator('#settingsBtn').click();
+                assert.equal(await crosshair.isChecked(), !query.includes('crosshair=false')
+                    && (query.includes('crosshair=true') || metadata.crosshair !== false));
+                const requests = [];
+                const record = request => requests.push(request.url());
+                page.on('request', record);
+                try {
+                    await crosshair.uncheck();
+                    await reticule.waitFor({state: 'hidden'});
+                    await crosshair.check();
+                    await reticule.waitFor({state: metadata.onmove && !query.includes('onmove=false') ? 'visible' : 'hidden'});
+                    await page.getByRole('button', {name: 'Reset Centre crosshair', exact: true}).click();
+                    await page.waitForFunction(() => !new URL(location.href).searchParams.has('crosshair'));
+                    assert.equal(await crosshair.isChecked(), metadata.crosshair !== false, 'Reset restores metadata, not just schema default');
+                    await reticule.waitFor({state: metadata.onmove && !query.includes('onmove=false')
+                        && metadata.crosshair !== false ? 'visible' : 'hidden'});
+                    await settle(page);
+                    assert.deepEqual(requests, [], 'Crosshair checkbox and reset must not refetch data');
+                } finally {
+                    page.off('request', record);
+                }
+                await page.locator('#settingsClose').click();
+            }
+            const checkCrosshairCenter = async () => {
+                await settle(page);
+                await reticule.waitFor({state: 'visible'});
+                const geometry = await reticule.evaluate(element => {
+                    const r = element.getBoundingClientRect(), map = m.getCanvas().getBoundingClientRect();
+                    const style = getComputedStyle(element);
+                    return {offset: [r.x + r.width / 2 - map.x - map.width / 2,
+                        r.y + r.height / 2 - map.y - map.height / 2],
+                    size: [r.width, r.height], position: style.position, pointerEvents: style.pointerEvents};
+                });
+                assert(geometry.offset.every(value => Math.abs(value) <= 1), `${device}: crosshair must follow geographic pane centre`);
+                assert.deepEqual(geometry.size, [80, 80]);
+                assert.equal(geometry.position, 'absolute');
+                assert.equal(geometry.pointerEvents, 'none');
+                assert.equal(await reticule.locator('svg').count(), 1);
+            };
+            await page.setViewportSize({width, height});
+            await checkCrosshairCenter();
+            await page.evaluate(() => document.body.classList.add('cartogram-ready'));
+            await page.locator('#leftExpand').evaluate(button => button.click());
+            await checkCrosshairCenter();
+            await page.setViewportSize({width: height, height: width});
+            await checkCrosshairCenter();
+            await page.locator('#rightExpand').evaluate(button => button.click());
+            await reticule.waitFor({state: 'hidden'});
+            await page.locator('#rightExpand').evaluate(button => button.click());
+            await checkCrosshairCenter();
+            await page.locator('#leftExpand').evaluate(button => button.click());
+            await checkCrosshairCenter();
+            console.log(`${device}: crosshair visibility, settings and pane regressions passed`);
+
             // A click response must use the visible distribution without a subsequent move.
             routes.set('/scaling-result', ['application/octet-stream', scaleResponse([10, 20, 110, 10000])]);
             await page.goto(`${origin}/?data=scaling.csv#x=${center[0]}&y=${center[1]}&z=7`);
@@ -330,7 +403,7 @@ try {
             // Selection is independent of scaling and camera focus, in both panes.
             for (const [focus, highlight] of [[false, true], [true, false]]) {
                 routes.set('/data/selection.json', ['application/json', JSON.stringify({
-                    cartogram: 'selection_hilo.arrow', raw: true,
+                    cartogram: 'selection_hilo.arrow', raw: true, crosshair: false, // Keep origin-marker pixel samples unobscured.
                     t: 'From {TOWN_NAME}',
                     onclick: {url: '/selection-result?index={index}', focus, highlight},
                     onmove: {url: '/selection-result?index={index}', wait: 0},

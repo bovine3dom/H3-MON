@@ -1440,6 +1440,11 @@ function bootstrap(meta = {}){
     const metadataSettings = settingLayers.metadata
     let settingOverrides = settingLayers.overrides
     let settings = settingLayers.settings
+    function refreshCrosshair() {
+        document.getElementById('reticule').hidden = !(settingEnabled(settings.crosshair, true)
+            && typeof settings.onmove?.url === 'string' && settings.onmove.url.trim())
+    }
+    refreshCrosshair()
     const restoredQuery = readQueryState(params)
     let lastQuery = restoredQuery
     let requestError = null
@@ -3364,6 +3369,7 @@ function bootstrap(meta = {}){
 
     function activateSettings(nextSettings, changedKeys) {
         settings = nextSettings
+        refreshCrosshair()
         infill = settingEnabled(settings.infill, false)
         showTrains = settingEnabled(settings.trains, false)
         document.title = queryTitle(settings.t, displayedSelection, findClosestCity) || DEFAULT_DOCUMENT_TITLE

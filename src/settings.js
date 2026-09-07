@@ -145,6 +145,16 @@ export const SETTINGS_SCHEMA = [
         refresh: 'render',
     },
     {
+        key: 'crosshair',
+        name: 'Centre crosshair',
+        description: 'Mark the geographic query centre when movement requests are enabled.',
+        group: 'Map and cartogram',
+        type: 'boolean',
+        defaultValue: true,
+        apply: 'immediate',
+        refresh: 'render',
+    },
+    {
         key: 'trains',
         name: 'Railway speeds',
         group: 'Map and cartogram',
