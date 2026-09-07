@@ -26,9 +26,17 @@
     }
   },
   "onclick": {
+    "_old_url": "http://127.0.0.1:1988/reachable?index={index}&departure={controls.departure}&budget_s={controls.travelTime}&encoding=split",
     "url": "http://127.0.0.1:1988/reachable?index={index}&departure={controls.departure}&budget_s={controls.travelTime}&window_s=86400&step_s=900&encoding=split&metric=distance_time_quantile",
-    "resolution": 5,
+    "resolution": 7,
     "focus": false,
     "highlight": true
+  },
+  "_onmove": {
+    "socket": "wss://example.org/queries",
+    "url": "/reachable?index={index}&budget_s={controls.travelTime}",
+    "resolution": 5,
+    "wait": 0,
+    "_comment": "documented in docs/query-websocket.md"
   }
 }

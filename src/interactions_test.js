@@ -296,7 +296,7 @@ Deno.test('configuration changes discard trailing work and changed waits restart
     settings.onmove.wait = 0
     interactions.move({index: 'new-leading'})
     interactions.move({index: 'new-trailing'})
-    assert(interactions.calls.length === 2)
+    assert(interactions.calls.length === 3)
     await delay()
     assert(interactions.calls.join(',') === 'https://example.test/first,https://example.test/new-leading,https://example.test/new-trailing')
     interactions.cancel()
@@ -323,5 +323,140 @@ Deno.test('disabled or invalid settings stop pending moves, and cancel clears lo
     assert(interactions.calls.length === 1)
     interactions.move({index: 'first'})
     assert(interactions.calls.length === 2)
+    interactions.cancel()
+})
+
+Deno.test('zero wait and default socket moves deliver every changed query synchronously without timers', () => {
+    const setTimeout = globalThis.setTimeout
+    globalThis.setTimeout = () => { throw new Error('Zero wait must not schedule a timer') }
+    try {
+        for (const config of [{wait: 0}, {socket: 'ws://example.test/query'}, {socket: 'wss://example.test/query', wait: 0}]) {
+            const interactions = setup({onmove: {url: '/{index}', ...config}})
+            try {
+                for (const index of ['first', 'second', 'third', 'third']) interactions.move({index})
+                const prefix = config.socket ? '' : 'https://example.test'
+                assert(interactions.calls.join(',') === ['first', 'second', 'third'].map(index => `${prefix}/${index}`).join(','))
+                assert(interactions.errors.length === 0)
+            } finally {
+                interactions.cancel()
+            }
+        }
+    } finally {
+        globalThis.setTimeout = setTimeout
+    }
+})
+
+Deno.test('socket payloads resolve HTTP-style templates and preserve path and search encoding only', async () => {
+    for (const url of ['../query/{index}?time={controls.time}&fixed=a%2Fb', 'https://other.test/query/{index}?time={controls.time}&fixed=a%2Fb']) {
+        const calls = []
+        const point = {index: 'a/b ?&=#{}', 'controls.time': '08:30 + 1'}
+        const interactions = setup({onclick: {url, socket: 'WSS://EXAMPLE.test:443/stream?mode=arrow'}}, {
+            getValues: (config, received) => {
+                assert(config.socket === 'wss://example.test/stream?mode=arrow' && config.wait === 0)
+                return received
+            },
+            request: (payload, context) => { calls.push({payload, context}); return true },
+        })
+        assert(await interactions.click(point))
+        assert(calls[0].payload === '/query/a%2Fb%20%3F%26%3D%23%7B%7D?time=08%3A30%20%2B%201&fixed=a%2Fb')
+        assert(calls[0].context.socket === 'wss://example.test/stream?mode=arrow')
+        assert(calls[0].context.manual === false && calls[0].context.event === 'onclick')
+        assert(calls[0].context.values === point && calls[0].context.point !== point)
+        assert(interactions.errors.length === 0)
+    }
+    const interactions = setup({onclick: {url: '/query#retained'}}, {
+        request: (url, context) => {
+            assert(url === 'https://example.test/query#retained')
+            assert(context.socket === undefined && context.manual === false)
+            return true
+        },
+    })
+    assert(await interactions.click({}))
+})
+
+Deno.test('invalid socket endpoints are rejected before reading values including metadata replay', async () => {
+    for (const socket of [null, false, 1, {}, [], '', '/stream', '//example.test/stream', 'https://example.test/stream',
+        'ws:example.test', 'wss://', 'ws://[broken', 'ws://user@example.test', 'wss://user:pass@example.test',
+        'ws://example.test/#fragment', 'ws://example.test/#', 'ws://{index}/stream',
+        'ws://example.test/{index}', 'ws://example.test/?time={controls.time}', 'ws://example.test/{']) {
+        const metadata = {onclick: {url: '/query', socket}, onmove: {url: '/query', socket}}
+        let reads = 0
+        const interactions = setup(metadata, {getValues: () => { reads++; return {} }})
+        assert(await interactions.click({}) === false)
+        assert(await interactions.move({}) === false)
+        assert(interactions.calls.length === 0 && interactions.errors.length === 2 && reads === 0, String(socket))
+        const replay = setup({onmove: false}, {getReplaySettings: () => metadata})
+        assert(await replay.replay('onmove', {}) === false)
+        assert(replay.calls.length === 0 && replay.errors.length === 1, String(socket))
+    }
+    for (const url of ['/query#fragment', '/query#', 'ws://example.test/query', 'https://[broken', '/{missing}']) {
+        const interactions = setup({onclick: {url, socket: 'ws://example.test'}})
+        assert(await interactions.click({}) === false)
+        assert(interactions.calls.length === 0 && interactions.errors.length === 1, url)
+    }
+})
+
+Deno.test('deduplication distinguishes socket endpoints, events, manual delivery and query inputs', async () => {
+    const calls = []
+    const config = {url: '/query?index={index}', socket: 'ws://one.test/stream'}
+    const interactions = setup({onmove: config, onclick: config}, {
+        request: (url, context) => { calls.push({url, context}); return true },
+    })
+    const point = {index: 'cell', lat: 1, zoom: 2, _inputs: {time: 30}}
+    await interactions.move(point)
+    await interactions.move({...point, lat: 2, zoom: 3})
+    assert(calls.length === 1)
+    for (const socket of ['ws://two.test/stream', 'ws://two.test/other', 'ws://two.test/other?mode=arrow']) {
+        config.socket = socket
+        await interactions.move(point)
+        assert(calls.at(-1).context.socket === socket)
+    }
+    assert(calls.length === 4)
+    await interactions.click(point)
+    await interactions.click(point)
+    await interactions.move(point)
+    assert(calls.length === 7)
+    assert(calls[4].context.event === 'onclick' && calls[6].context.event === 'onmove')
+    assert(calls[4].context.manual === false && calls[6].context.manual === false)
+    await interactions.replay('onmove', point, {force: false})
+    await interactions.replay('onmove', point, {force: false})
+    assert(calls.length === 8 && calls[7].context.manual === true)
+    await interactions.replay('onmove', {...point, _inputs: {time: 60}}, {force: false})
+    assert(calls.length === 9 && calls[8].url === calls[7].url)
+    await interactions.retry()
+    assert(calls.length === 10 && calls[9].context.manual === true)
+    interactions.cancel()
+})
+
+Deno.test('replay retains socket metadata while automatic interactions are disabled', async () => {
+    const calls = []
+    const metadata = {onmove: {url: 'query?index={index}', socket: 'wss://example.test/stream', wait: 60000}}
+    const interactions = setup({onmove: false}, {
+        getReplaySettings: () => metadata,
+        request: (url, context) => { calls.push({url, context}); return true },
+    })
+    assert(await interactions.move({index: 'ignored'}) === false)
+    assert(await interactions.replay('onmove', {index: 'saved'}))
+    assert(await interactions.retry())
+    assert(calls.length === 2)
+    assert(calls.every(({url, context}) => url === '/maps/query?index=saved'
+        && context.socket === metadata.onmove.socket && context.manual === true && context.event === 'onmove'))
+})
+
+Deno.test('socket moves respect explicit waits and discard work for replaced endpoints', async () => {
+    const config = {url: '/{index}', socket: 'ws://one.test', wait: 10}
+    const interactions = setup({onmove: config})
+    interactions.move({index: 'first'})
+    interactions.move({index: 'trailing'})
+    assert(interactions.calls.join(',') === '/first')
+    await delay()
+    assert(interactions.calls.join(',') === '/first,/trailing')
+    interactions.move({index: 'second'})
+    interactions.move({index: 'obsolete'})
+    config.socket = 'ws://two.test'
+    await delay()
+    assert(interactions.calls.join(',') === '/first,/trailing,/second')
+    interactions.move({index: 'second'})
+    assert(interactions.calls.length === 4)
     interactions.cancel()
 })

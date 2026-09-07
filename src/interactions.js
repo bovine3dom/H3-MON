@@ -20,7 +20,7 @@ export function centralLinkedH3(indices, latLngForIndex) {
 export function createInteractions({getSettings, getReplaySettings = getSettings, getValues, request, onError = () => {}, baseURL}) {
     let moveConfig = null
     let moveTask = null
-    let lastURL = null
+    let lastKey = null
     let lastAction = null
     let lastDelivery = Promise.resolve(false)
 
@@ -33,20 +33,34 @@ export function createInteractions({getSettings, getReplaySettings = getSettings
             || ['focus', 'highlight'].some(key => config[key] !== undefined && typeof config[key] !== 'boolean')) {
             throw new Error(`Invalid ${key} configuration`)
         }
-        return {url: config.url, resolution: config.resolution, wait: config.wait ?? 350, focus: config.focus ?? true, highlight: config.highlight ?? true}
+        let socket
+        if (config.socket !== undefined) {
+            if (typeof config.socket !== 'string' || !/^wss?:\/\//i.test(config.socket) || /[{}#]/.test(config.socket)) {
+                throw new Error(`Invalid ${key} socket URL: expected an absolute WS(S) URL without templates or fragments`)
+            }
+            const endpoint = new URL(config.socket)
+            if (!['ws:', 'wss:'].includes(endpoint.protocol) || endpoint.username || endpoint.password) {
+                throw new Error(`Invalid ${key} socket URL: credentials are not allowed`)
+            }
+            socket = endpoint.href
+        }
+        return {url: config.url, socket, resolution: config.resolution, wait: config.wait ?? (socket ? 0 : 350), focus: config.focus ?? true, highlight: config.highlight ?? true}
     }
 
     function deliver({url, context}, config, force = false) {
         if (config && JSON.stringify(readConfig('onmove')) !== JSON.stringify(config)) return Promise.resolve(false)
-        if (!force && url === lastURL) return lastDelivery
-        lastURL = url
+        // Ignore untemplated pan/zoom changes, but retain transport and query-state identity.
+        const key = JSON.stringify([url, context.socket, context.event, context.manual,
+            context.values.index, context.values._inputs, context.point?.cartogram])
+        if (!force && key === lastKey) return lastDelivery
+        lastKey = key
         lastDelivery = (async () => {
             try {
                 const success = await request(url, context) !== false
-                if (!success && lastURL === url) lastURL = null
+                if (!success && lastKey === key) lastKey = null
                 return success
             } catch (error) {
-                if (lastURL === url) lastURL = null
+                if (lastKey === key) lastKey = null
                 onError(error)
                 return false
             }
@@ -58,7 +72,7 @@ export function createInteractions({getSettings, getReplaySettings = getSettings
         moveTask?.cancel()
         moveTask = null
         moveConfig = null
-        lastURL = null
+        lastKey = null
     }
 
     function run(key, point, {manual = false, force = true} = {}) {
@@ -69,9 +83,9 @@ export function createInteractions({getSettings, getReplaySettings = getSettings
             if (moving && JSON.stringify(config) !== JSON.stringify(moveConfig)) {
                 moveTask?.cancel()
                 moveConfig = config
-                moveTask = config && leadingThrottleDebounce(packet => {
+                moveTask = config && config.wait > 0 ? leadingThrottleDebounce(packet => {
                     try { deliver(packet, config) } catch (error) { cancel(); onError(error) }
-                }, config.wait)
+                }, config.wait) : null
             }
             if (!config) return Promise.resolve(false)
             lastAction = action
@@ -97,8 +111,11 @@ export function createInteractions({getSettings, getReplaySettings = getSettings
             if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
                 throw new Error('Interaction URLs must use HTTP(S) without credentials')
             }
-            const packet = {url: url.href, context: {event: key, point: lastAction.point, values}}
-            if (moving) moveTask(packet)
+            if (config.socket && url.href.includes('#')) throw new Error('Socket query URLs must not contain fragments')
+            const packet = {url: config.socket ? url.pathname + url.search : url.href,
+                context: {event: key, point: lastAction.point, values, socket: config.socket, manual}}
+            if (moving && moveTask) moveTask(packet)
+            else if (moving) return deliver(packet, config)
             else return deliver(packet, null, force)
         } catch (error) {
             lastAction = action

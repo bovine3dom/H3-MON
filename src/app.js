@@ -17,6 +17,7 @@ import {SETTINGS_SCHEMA, fixedLegendScale, readSettingLayers, serializeSettingVa
 import {centralLinkedH3, createInteractions} from './interactions'
 import {createRequestStatus} from './request-status'
 import {createRequestControls} from './request-controls'
+import {createQuerySocket} from './query-socket'
 import {readQueryState, writeQueryState} from './query-state'
 import {rankitScale} from './rankit'
 import {queryTitle} from './query-title'
@@ -2195,9 +2196,13 @@ function bootstrap(meta = {}){
         const useCartogramQuantiles = cartogramEnabled && settings.quantileSource === 'cartogram'
 
         if (format.layer === 'hex' && (ext === 'arrow' || ext === 'csv')) {
-            const resp = await current(measurePerf('data.fetch', {file: file_path, reload}, () => fetch(requestURL, {signal, cache: 'no-store'})))
-            if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${(await current(resp.text())).slice(0, 300)}`)
-            const buf = await current(measurePerf(ext === 'csv' ? 'data.read_text' : 'data.read_arrayBuffer', () => ext === 'csv' ? resp.text() : resp.arrayBuffer()))
+            let buf = source.bytes
+            if (source.socket && !buf) throw new Error('Missing query socket result bytes')
+            if (!buf) {
+                const resp = await current(measurePerf('data.fetch', {file: file_path, reload}, () => fetch(requestURL, {signal, cache: 'no-store'})))
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${(await current(resp.text())).slice(0, 300)}`)
+                buf = await current(measurePerf(ext === 'csv' ? 'data.read_text' : 'data.read_arrayBuffer', () => ext === 'csv' ? resp.text() : resp.arrayBuffer()))
+            }
             setLoadStage('Parsing data')
             let dataCols
             let schema
@@ -2822,9 +2827,7 @@ function bootstrap(meta = {}){
                 lat: point.lat, lng, zoom: point.zoom ?? map.getZoom(),
                 ...requestControls.encode(inputs), _inputs: requestControls.values(inputs)}
         },
-        request: (url, {event, point, values}) => {
-            requestError = null
-            failedSource = null
+        request: (url, {event, point, values, socket, manual}) => {
             const query = {event, index: values.index, lat: values.lat, lng: values.lng, zoom: values.zoom}
             if (point.cartogram) query.cartogram = point.cartogram
             const pageURL = writeQueryState(new URL(window.location.href), query)
@@ -2833,16 +2836,34 @@ function bootstrap(meta = {}){
             }
             history.replaceState(history.state, '', pageURL)
             lastQuery = query
-            return update({url, ext: 'arrow', format: FORMATS.arrow, cacheBust: false, query})
+            const source = {url, ext: 'arrow', format: FORMATS.arrow, cacheBust: false, query, socket}
+            const inputs = JSON.stringify(values._inputs)
+            const reset = !socket || socket !== latestSocketSource?.socket || event !== 'onmove' || manual
+                || latestSocketSource?.query.event !== event || latestSocketSource?.manual
+                || latestSocketSource?.inputs !== inputs
+            if (reset) {
+                invalidateSocket()
+                requestError = null
+                failedSource = null
+            }
+            if (!socket) return update(source)
+            Object.assign(source, {generation: socketGeneration, inputs, manual})
+            latestSocketSource = source
+            if (reset) {
+                loadProgress.interactive = mainLayers.length > 0
+                document.body.classList.toggle('interactive-load', loadProgress.interactive)
+                resetLoadProgress('Waiting for query result')
+                requestStatus.begin()
+            }
+            querySocket.submit(socket, url, source, {reset})
+            return true
         },
         onError: error => {
             console.warn('Interaction failed', error)
             requestError = error
             failedSource = null
             interactions.cancel()
-            updateController?.abort()
-            pendingSource = null
-            updatePending = false
+            invalidateSocket()
             document.body.classList.add('load-error')
             requestStatus.fail(error, {hasResult: mainLayers.length > 0, onRetry: retryRequest})
         },
@@ -2854,7 +2875,7 @@ function bootstrap(meta = {}){
     }
 
     function retryRequest() {
-        return failedSource ? update(failedSource) : interactions.retry()
+        return failedSource && !failedSource.socket ? update(failedSource) : interactions.retry()
     }
 
     let displayedSelection = null
@@ -2904,11 +2925,15 @@ function bootstrap(meta = {}){
         if (userInteractionMove) interactions.move(map.getCenter())
         userInteractionMove = false
     })
-    window.addEventListener('pagehide', () => {
+    window.addEventListener('pagehide', event => {
         interactions.cancel()
+        invalidateSocket()
+        if (event.persisted) querySocket.suspend()
+        else querySocket.dispose()
         requestStatus.clear()
-        updatePending = false
-        updateController?.abort()
+    })
+    window.addEventListener('pageshow', event => {
+        if (event.persisted && lastQuery) repeatQuery()
     })
 
     const searchInput = document.getElementById('city-search')
@@ -3024,13 +3049,55 @@ function bootstrap(meta = {}){
     let acceptedSource = fileSource
     let pendingSource = null
     let loadingSource = null
+    let socketGeneration = 0
+    let latestSocketSource = null
+    let pendingSocketResult = null
+    let socketRendering = false
+    let socketRenderPaused = 0
+
+    function invalidateSocket() {
+        socketGeneration++
+        latestSocketSource = pendingSocketResult = null
+        querySocket.invalidate()
+        updateController?.abort()
+        pendingSource = null
+        updatePending = false
+    }
+
+    function drainSocketResult() {
+        if (socketRenderPaused || socketRendering || !pendingSocketResult) return
+        const source = pendingSocketResult
+        pendingSocketResult = null
+        socketRendering = true
+        update(source).finally(() => {
+            socketRendering = false
+            drainSocketResult()
+        })
+    }
+
+    const querySocket = createQuerySocket({
+        onResult: (bytes, source) => {
+            if (source.generation !== socketGeneration) return
+            pendingSocketResult = {...source, bytes, requestSource: source}
+            drainSocketResult()
+        },
+        onError: (error, source) => {
+            if (source !== latestSocketSource) return
+            requestError = error
+            failedSource = source
+            document.body.classList.add('load-error')
+            requestStatus.fail(error, {hasResult: mainLayers.length > 0, onRetry: retryRequest})
+        },
+    })
 
     const updateOnce = async (source, signal) => {
         loadProgress.interactive = mainLayers.length > 0
         document.body.classList.toggle('interactive-load', loadProgress.interactive)
-        if (loadProgress.complete || loadProgress.interactive) resetLoadProgress('Loading data')
-        if (loadProgress.interactive) requestStatus.begin()
-        else requestStatus.clear()
+        if (!source.socket && !latestSocketSource) {
+            if (loadProgress.complete || loadProgress.interactive) resetLoadProgress('Loading data')
+            if (loadProgress.interactive) requestStatus.begin()
+            else requestStatus.clear()
+        }
         const doneMapReady = perfTimer('app.load_to_map_ready', {file: file_name, ext, layer: format.layer, renderer: 'packed', pickable: false, cartogramWeightsFile})
         const publishEarly = mainLayers.length === 0
         deferLegend = !publishEarly
@@ -3056,6 +3123,7 @@ function bootstrap(meta = {}){
             layers: mainLayers,
             legend: legendDiv.lastElementChild,
             legendFormatter,
+            displayedLegendBounds,
             cartogramReady: document.body.classList.contains('cartogram-ready'),
         }
         let mapReady = false
@@ -3091,8 +3159,12 @@ function bootstrap(meta = {}){
             signal.throwIfAborted()
             await restoreSelection(source.query || displayedSelection)
             signal.throwIfAborted()
-            if (failedSource === source) { requestError = null; failedSource = null }
-            finishLoadProgress({clearStatus: !requestError})
+            if (failedSource === source || source.socket && source.requestSource === latestSocketSource) {
+                requestError = null
+                failedSource = null
+                document.body.classList.remove('load-error')
+            }
+            finishLoadProgress({clearStatus: !requestError && (!latestSocketSource || source.generation === socketGeneration)})
             if (requestError) requestStatus.fail(requestError, {hasResult: true, onRetry: retryRequest})
             return true
         } catch (e) {
@@ -3120,6 +3192,7 @@ function bootstrap(meta = {}){
             deferLegend = false
             pendingLegend = null
             legendFormatter = previousState.legendFormatter
+            displayedLegendBounds = previousState.displayedLegendBounds
             legendVersion++
             legendDiv.replaceChildren(...(previousState.legend ? [previousState.legend] : []))
             if (mainLayers !== previousState.layers) {
@@ -3130,7 +3203,7 @@ function bootstrap(meta = {}){
             clearInterval(loadProgress.timer)
             loadProgress.timer = null
             loadProgress.active.clear()
-            if (!signal.aborted) {
+            if (!signal.aborted && (!source.socket || source.requestSource === latestSocketSource)) {
                 console.error(e)
                 if (!requestError || failedSource === source) { requestError = e; failedSource = source }
                 document.body.classList.add('load-error')
@@ -3158,7 +3231,7 @@ function bootstrap(meta = {}){
                     loadingSource = source
                     updateController = new AbortController()
                     succeeded = await updateOnce(source, updateController.signal)
-                    if (succeeded) acceptedSource = source
+                    if (succeeded && !updateController.signal.aborted) acceptedSource = source
                 } while (updatePending)
                 if (succeeded && !cartogramLoadError) settingsPanelApi?.refreshCompleted({requests: !requestError})
                 return succeeded
@@ -3190,12 +3263,16 @@ function bootstrap(meta = {}){
     let deferLegend = false
     let pendingLegend = null
     let legendFormatter
+    let displayedLegendBounds = null
     // todo: read impressum from metadata too
     function replaceLegend(legend) {
         if (deferLegend) {
             pendingLegend = legend
             return
         }
+        // Freeze captures the published legend, not a scale still being calculated.
+        const bounds = legendFormatter ? [legendFormatter(0), legendFormatter(1)] : [0, 1]
+        displayedLegendBounds = fixedLegendScale(bounds) ? bounds : null
         const previous = legendDiv.lastElementChild
         const version = ++legendVersion
         if (!previous || !COLOUR_TRANSITION_DURATION) {
@@ -3356,7 +3433,13 @@ function bootstrap(meta = {}){
                 await refreshPresentation(changedKeys)
             }
         }
-        settingsApplication = settingsApplication.then(apply, apply)
+        // Stop result draining before taking a finite render snapshot. Incoming
+        // replies still replace the single queued result while settings apply.
+        socketRenderPaused++
+        settingsApplication = settingsApplication.then(apply, apply).finally(() => {
+            socketRenderPaused--
+            drainSocketResult()
+        })
         return settingsApplication
     }
 
@@ -3366,11 +3449,7 @@ function bootstrap(meta = {}){
         overrides: settingOverrides,
         colourSchemes: availableColourSchemes(),
         onApply: applySettingOverrides,
-        getLegendBounds: () => {
-            if (updateRunning || !legendDiv.lastElementChild) return null
-            const bounds = legendFormatter ? [legendFormatter(0), legendFormatter(1)] : [0, 1]
-            return fixedLegendScale(bounds) ? bounds : null
-        },
+        getLegendBounds: () => displayedLegendBounds,
     })
 
     if (restoredQuery) repeatQuery()
@@ -3402,7 +3481,7 @@ function bootstrap(meta = {}){
         })
     } catch (e) {
         console.warn("WebSocket unavailable, automatic updates disabled", e)
-        update()
+        if (!lastQuery) update()
     }
 
     function fitCartogramToMapBounds(api = cartogramApi, h3map = h3toXY) {

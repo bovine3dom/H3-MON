@@ -37,8 +37,9 @@ Bounds keep their full precision and persist through movement, data requests and
 URLs. Values outside the bounds use the endpoint colours; equal bounds put that value
 at the midpoint. Freezing overrides Raw values, rankit, trim and quantile-source settings until
 **Unfreeze legend** restores automatic scaling (or raw 0..1 scaling if enabled).
-Freeze is available after loading finishes. New results rescale to the current viewport
-without requiring an extra map movement.
+Freeze captures the currently published legend whenever it has valid numeric bounds,
+even while a new result is loading or rendering; it does not capture a scale still being
+calculated. New results rescale to the current viewport without requiring an extra map movement.
 
 **Rankit colours** (`rankit=1`, default off) replaces uniform quantiles with normal
 scores in both panes, using the selected visible quantile source. Raw mode ignores
@@ -106,10 +107,12 @@ Static map/cartogram clicks also resolve the title when no endpoint query is nee
 Settings, metadata and shared URLs retain the template, never the substituted city;
 replay resolves it only after a successful result, and title edits use the displayed origin.
 
-JSON metadata can optionally define `onclick` and `onmove` objects. These issue **GET
-requests returning Arrow IPC files or streams**, then replace the current dataset using
-the existing map, legend, tooltip and cartogram rendering pipeline. Hook URLs are
-templates; optional input converters described below are trusted JavaScript.
+JSON metadata can optionally define `onclick` and `onmove` objects. By default these
+issue **GET requests returning Arrow IPC files or streams**; an optional `socket`
+selects the [query WebSocket protocol](docs/query-websocket.md) instead. Both replace
+the current dataset using the existing map, legend, tooltip and cartogram rendering
+pipeline. Hook URLs are templates; optional input converters described below are
+trusted JavaScript. No query WebSocket backend implementation is included.
 
 - `onclick` uses the geographic cell under a map click/tap, including cells absent
   from the current result. Cartogram clicks use a central cell from the linked H3
@@ -117,12 +120,16 @@ templates; optional input converters described below are trusted JavaScript.
 - `onmove` uses the geographic map centre during user pan/zoom, including keyboard
   navigation. It is not pointer hover. Programmatic camera changes, including search,
   hash navigation and cartogram synchronization, do not request data.
-- Movement sends immediately, then sends the latest position after a quiet period
-  (`wait`, milliseconds, default `350`). Identical URLs are deduplicated. A configured
-  click cancels pending movement delivery and always requests a fresh result.
+- With positive `wait`, movement uses leading throttle-debounce, including the latest
+  position after a quiet period. `wait` is milliseconds, default `350` for HTTP and
+  `0` for WebSocket; `0` bypasses this scheduling. Unchanged automatic query contexts
+  are deduplicated. A configured click cancels pending movement delivery and always
+  requests a fresh result.
 - `onmove` applies to the geographic map only. Cartogram panning keeps its existing
   navigation behavior without issuing requests through programmatic map synchronization.
-- New requests cancel obsolete fetches. Failed requests retain the last good dataset
+- New HTTP requests cancel obsolete fetches. WebSocket movement can display a trailing
+  result while newer work is pending; explicit query-context changes invalidate old
+  results without sending cancellation to the server. Failed requests retain the last good dataset
   and show an error in the loading status. Settings refreshes use the last successful
   endpoint, rather than reverting to the seed file. Seed-file watcher events are ignored
   once an endpoint result is active. Browser cancellation does not cancel server work.
@@ -153,6 +160,12 @@ the page URL. Existing query parameters are preserved; no cache-busting `v` para
 is added to endpoint URLs. Missing, null or false hooks are disabled; `?onmove=false`
 also disables a metadata hook. Structured hooks are metadata-only, not settings-panel
 controls or JavaScript/JSON strings in query parameters.
+
+For WebSocket queries, add an absolute `socket` such as `wss://api.example.com/query`
+to either hook. Keep `url` as an HTTP(S)-style template: only its resolved path and
+query string are sent to the socket server, not its origin. Matching `onclick` and
+`onmove` socket endpoints reuse one connection. See the [protocol specification](docs/query-websocket.md)
+for binary framing, server scheduling, retry/lifetime behavior, sharing and security.
 
 ## Rail-routing example
 

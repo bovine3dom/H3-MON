@@ -211,6 +211,7 @@ try {
         page.on('pageerror', error => failures.push(`${device}: pageerror: ${error.stack || error}`));
         page.on('console', message => {
             const text = message.text();
+            if (text.startsWith('Error: Expected to read 1635151465 metadata bytes, but only read 9.')) return; // Deliberate invalid-arrow payload.
             if (text.includes('HTTP 503: selection-test-failure') || text === 'Failed to load resource: the server responded with a status of 503 (Service Unavailable)') return;
             if (text === 'Error: <g> attribute transform: Expected transform function, "0".') return;
             if (message.type() === 'error') failures.push(`${device}: console: ${text}`);
@@ -524,9 +525,190 @@ try {
                     await page.goto('about:blank');
                 }
             }
+            // Real browser WebSockets, controlled server replies, and the normal app render lane.
+            const sockets = [], queries = [];
+            let streaming = false;
+            const reply = (request, value, malformed = false) => {
+                const id = Buffer.alloc(4);
+                id.writeUInt32BE(request.id);
+                request.socket.send(Buffer.concat([id, malformed ? Buffer.from('invalid-arrow')
+                    : scaleResponse([value, value + 10, value + 100, 10000])]));
+            };
+            await page.routeWebSocket('**/query-stream', socket => {
+                sockets.push(socket);
+                socket.onMessage(message => {
+                    const query = JSON.parse(String(message));
+                    assert.equal(query.type, 'query');
+                    assert(query.url.startsWith('/socket-result?'), 'Send only the resolved path and search');
+                    queries.push({...query, socket});
+                    if (streaming) reply(queries.at(-1), 35);
+                });
+            });
+            const received = async count => {
+                const deadline = Date.now() + 20000;
+                while (queries.length < count && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+                assert.equal(queries.length, count, 'Expected exactly one query per changed interaction');
+                return queries.at(-1);
+            };
+            const displayed = async value => {
+                await page.waitForFunction(value => window._columnData?.value[0] === value
+                    && document.body.classList.contains('load-complete'), value);
+                await settle(page);
+            };
+            const retained = async value => {
+                await settle(page);
+                assert.equal(await page.evaluate(() => window._columnData.value[0]), value, 'Stale or malformed reply must retain displayed data');
+            };
+            const move = async (count = 1) => {
+                const expected = queries.length + count;
+                await page.evaluate(count => {
+                    for (let i = 0; i < count; i++) {
+                        m.jumpTo({center: [m.getCenter().lng + 0.001, m.getCenter().lat]});
+                        m.fire('movestart', {keyboardMoving: true});
+                        m.fire('move');
+                        m.fire('moveend');
+                    }
+                }, count);
+                return received(expected);
+            };
+            const socketAction = {url: '/socket-result?index={index}&lng={lng}',
+                socket: origin.replace('http:', 'ws:') + '/query-stream', wait: 0, focus: false};
+            routes.set('/data/socket.csv', routes.get('/data/scaling.csv'));
+            routes.set('/data/socket.json', ['application/json', JSON.stringify({cartogram: 'none', trimFactor: 0,
+                onclick: socketAction, onmove: socketAction})]);
+            await page.goto(`${origin}/?data=socket.csv#x=${center[0]}&y=${center[1]}&z=7`);
+            await displayed(1);
+            await clickCell();
+            const first = await received(1);
+            reply(first, 10);
+            await displayed(10);
+            await clickCell(scaleCells[1]);
+            await received(2);
+            await clickCell(scaleCells[2]);
+            const clicked = await received(3);
+            reply(queries[1], 99);
+            await retained(10);
+            reply(clicked, 20);
+            await displayed(20);
+            await move(3);
+            const [older, trailing, newest] = queries.slice(-3);
+            reply(trailing, 30);
+            await displayed(30); // A newer request is on wire, not yet answered.
+            reply(older, 98);
+            await retained(30);
+            reply(newest, 40);
+            await displayed(40);
+            assert.equal(sockets.length, 1, 'Clicks and rapid wait:0 moves reuse one connection');
+
+            const invalidated = await move();
+            const explicitCount = queries.length + 1;
+            await clickCell();
+            const explicit = await received(explicitCount);
+            reply(invalidated, 97);
+            await retained(40);
+            reply(explicit, 50);
+            await displayed(50);
+            const bad = await move();
+            reply(bad, 0, true);
+            await page.waitForFunction(() => document.body.classList.contains('load-error'));
+            await retained(50);
+            const retryCount = queries.length + 1;
+            await page.getByRole('button', {name: 'Retry', exact: true}).click();
+            const retried = await received(retryCount);
+            assert.equal(retried.url, bad.url, 'Retry resubmits the failed origin');
+            reply(retried, 60);
+            await displayed(60);
+
+            await move(3);
+            const latest = queries.at(-1), reconnectCount = queries.length + 1;
+            await sockets[0].close({code: 1011, reason: 'controlled disconnect'});
+            const reconnected = await received(reconnectCount);
+            assert.equal(sockets.length, 2);
+            assert.equal(reconnected.url, latest.url, 'Reconnect replays only the latest outstanding query');
+            reply(reconnected, 70);
+            await displayed(70);
+            assert.equal(queries.length, reconnectCount, 'Reconnect must not replay the backlog');
+
+            const shared = new URL(page.url()), replayCount = queries.length + 1;
+            shared.searchParams.set('onmove', 'false');
+            await page.goto(shared.href);
+            const replayed = await received(replayCount);
+            assert.equal(replayed.url, latest.url, 'Shared URL replays socket query with automatic moves disabled');
+            reply(replayed, 10);
+            await displayed(10);
+
+            // Simulate bfcache lifecycle events; routing does not prove actual bfcache eligibility.
+            const hideCount = queries.length + 1;
+            await clickCell();
+            const suspended = await received(hideCount), socketCount = sockets.length;
+            let closed = false;
+            suspended.socket.onClose(() => { closed = true; });
+            await page.evaluate(() => dispatchEvent(new PageTransitionEvent('pagehide', {persisted: true})));
+            // Longer than the first reconnect delay: suspension must not reconnect itself.
+            await new Promise(resolve => setTimeout(resolve, 350));
+            assert(closed, 'Persisted pagehide closes the query connection');
+            assert.equal(sockets.length, socketCount, 'Suspension must not reconnect');
+            assert.equal(queries.length, hideCount, 'Suspension must not replay queries');
+            await retained(10);
+            await page.evaluate(() => dispatchEvent(new PageTransitionEvent('pageshow', {persisted: true})));
+            const restored = await received(hideCount + 1);
+            assert.equal(sockets.length, socketCount + 1, 'Persisted pageshow opens a fresh connection');
+            assert.notEqual(restored.socket, suspended.socket);
+            assert.equal(restored.url, suspended.url, 'Restore replays the pending origin');
+            reply(restored, 15);
+            await displayed(15);
+            const afterRestoreCount = queries.length + 1;
+            await clickCell(scaleCells[1]);
+            const afterRestore = await received(afterRestoreCount);
+            assert.equal(afterRestore.socket, restored.socket, 'Interactions reuse the restored connection');
+            reply(afterRestore, 25);
+            await displayed(25);
+
+            shared.searchParams.delete('onmove');
+            const enabledCount = queries.length + 1;
+            await page.goto(shared.href);
+            reply(await received(enabledCount), 10);
+            await displayed(10);
+            await page.locator('#settingsBtn').click();
+            streaming = true;
+            await page.evaluate(() => {
+                window.socketTestTraffic = setInterval(() => {
+                    m.jumpTo({center: [m.getCenter().lng + 0.0001, m.getCenter().lat]});
+                    m.fire('movestart', {keyboardMoving: true});
+                    m.fire('move');
+                    m.fire('moveend');
+                }, 40);
+            });
+            try {
+                await page.getByRole('checkbox', {name: 'Rankit colours', exact: true}).check();
+                await page.waitForFunction(() => new URL(location.href).searchParams.get('rankit') === '1'
+                    && window._columnData?.value[0] === 35 && window._columnData.quantile[1] === 0.5);
+                const visibleBounds = await page.getByRole('button', {name: 'Freeze legend', exact: true}).evaluate(button => {
+                    const ticks = [...document.querySelectorAll('#observable_legend > :last-child .tick')];
+                    const endpoints = [ticks[0], ticks.at(-1)].map(tick => ({value: tick.__data__, text: tick.textContent}));
+                    button.click(); // Capture the published legend and click without an intervening result.
+                    return endpoints;
+                });
+                assert.deepEqual(visibleBounds.map(tick => tick.value), [0, 1], 'Legend ticks include both scale endpoints');
+                await page.waitForFunction(() => new URL(location.href).searchParams.has('legendBounds'));
+                const frozenBounds = JSON.parse(new URL(page.url()).searchParams.get('legendBounds'));
+                assert.deepEqual(frozenBounds.map(value => Number(value.toPrecision(2)).toLocaleString()),
+                    visibleBounds.map(tick => tick.text), 'Freeze captures the published legend, not an in-flight scale');
+                await page.waitForFunction(([min, max]) => Math.abs(window._columnData.quantile[1]
+                    - Math.max(0, Math.min(1, (45 - min) / (max - min)))) < 1e-6, frozenBounds);
+                await page.waitForFunction(() => window._columnData?.value[0] === 35
+                    && document.body.classList.contains('load-complete'));
+                assert(queries.length > enabledCount + 1, 'Settings must finish while multiple results are arriving');
+            } finally {
+                await page.evaluate(() => clearInterval(window.socketTestTraffic));
+                streaming = false;
+            }
+            console.log(`${device}: persistent WebSocket regressions passed`);
         } catch (error) {
             console.error(await page.evaluate(() => ({classes: document.body.className,
                 status: document.querySelector('#request-status pre')?.textContent,
+                url: location.href, values: Array.from(window._columnData?.value || []),
+                quantiles: Array.from(window._columnData?.quantile || []),
                 columns: Object.keys(window._columnData || {}), loaded: window.m?.loaded()})));
             failures.push(`${device}: ${error.stack || error}`);
         } finally {
@@ -541,5 +723,5 @@ if (failures.length) {
     console.error(failures.join('\n'));
     process.exitCode = 1;
 } else {
-    console.log('Rendering regressions passed: desktop/mobile, cameras, panes, orientation, rankit, frozen bounds, raw mode, independent selection and nearest-city titles (click, cartogram, movement, replay, edits and static selection).');
+    console.log('Rendering regressions passed: desktop/mobile, cameras, panes, orientation, rankit, frozen bounds, raw mode, independent selection, nearest-city titles and persistent WebSocket transport.');
 }
