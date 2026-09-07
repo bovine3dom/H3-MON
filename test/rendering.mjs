@@ -4,7 +4,8 @@ import {createServer} from 'node:http';
 import {join} from 'node:path';
 import {chromium} from 'playwright';
 import {PNG} from 'pngjs';
-import {cellToBoundary, cellToLatLng} from 'h3-js';
+import {cellToBoundary, cellToLatLng, gridDisk, h3IndexToSplitLong, latLngToCell} from 'h3-js';
+import {tableFromArrays, tableToIPC} from 'apache-arrow';
 
 // Test the built application, never local user data or a replacement Deck layer.
 const www = new URL('../www/', import.meta.url);
@@ -33,6 +34,16 @@ const routes = new Map([
     ['/data/rendering.csv', ['text/csv', `index,value\n${cell},0.65\n`]],
     ['/favicon.ico', ['image/x-icon', '']],
 ]);
+const scaleCells = [cell, ...gridDisk(cell, 1).filter(index => index !== cell).slice(0, 2), latLngToCell(0, 0, 5)];
+const scaleResponse = values => Buffer.from(tableToIPC(tableFromArrays({
+    index_lower: Uint32Array.from(scaleCells, index => h3IndexToSplitLong(index)[0]),
+    index_upper: Uint32Array.from(scaleCells, index => h3IndexToSplitLong(index)[1]),
+    value: Float64Array.from(values),
+})));
+routes.set('/data/scaling.json', ['application/json', JSON.stringify({cartogram: 'none', trimFactor: 0,
+    onclick: {url: '/scaling-result?index={index}', defaultAction: false},
+})]);
+routes.set('/data/scaling.csv', ['text/csv', `index,value\n${cell},1\n`]);
 for (const [name, type] of [['index.html', 'text/html'], ['app.js', 'text/javascript'], ['app.css', 'text/css']]) {
     routes.set(`/${name}`, [type, await readFile(new URL(name, www))]);
 }
@@ -232,6 +243,58 @@ try {
             await frame(page, `${device}-orientation-closed`);
             await page.locator('#leftExpand').evaluate(button => button.click());
             await frame(page, `${device}-orientation-open`, true);
+
+            // A click response must use the visible distribution without a subsequent move.
+            routes.set('/scaling-result', ['application/octet-stream', scaleResponse([10, 20, 110, 10000])]);
+            await page.goto(`${origin}/?data=scaling.csv#x=${center[0]}&y=${center[1]}&z=7`);
+            await page.waitForFunction(() => document.body.classList.contains('load-complete'));
+            const clickCell = async () => {
+                const point = await page.evaluate(center => {
+                    const p = m.project(center), rect = m.getCanvas().getBoundingClientRect();
+                    return {x: rect.x + p.x, y: rect.y + p.y};
+                }, center);
+                await page.mouse.click(point.x, point.y);
+            };
+            const checkScaleColour = async () => {
+                await settle(page);
+                const {point, colour} = await page.evaluate(center => {
+                    const p = m.project(center), rect = m.getCanvas().getBoundingClientRect();
+                    const overlay = m._controls.find(control => control.getCanvas?.()?.id === 'deckgl-overlay');
+                    const layer = overlay._deck.props.layers.find(layer => layer.id === 'H3HexagonLayer');
+                    return {point: [rect.x + p.x, rect.y + p.y],
+                        colour: layer.props.getFillColor(null, {index: 0, data: layer.props.data, target: []})};
+                }, center);
+                const actual = rgb(PNG.sync.read(await page.screenshot({scale: 'css'})), point);
+                const expected = [24, 48, 60].map((base, i) => base * colour[i] / 255);
+                assert(difference(actual, expected) <= 4, `Stale map colour: ${actual}, expected ${expected}`);
+            };
+            await clickCell();
+            await page.waitForFunction(() => window._columnData?.value[0] === 10
+                && Math.abs(window._columnData.quantile[0] - 1 / 3) < 1e-6);
+            await checkScaleColour();
+            await page.locator('#settingsBtn').click();
+            await page.getByRole('button', {name: 'Freeze legend', exact: true}).click();
+            await page.waitForFunction(() => new URL(location.href).searchParams.get('legendBounds') === '[10,110]'
+                && window._columnData.quantile[1] === 0.1);
+            const legend = await page.locator('#observable_legend').innerText();
+            await page.locator('#settingsClose').click();
+            await page.evaluate(() => m.jumpTo({zoom: 6.8}));
+            assert.equal(await page.evaluate(() => window._columnData.quantile[1]), 0.1, 'Movement must not rerank frozen values');
+            routes.set('/scaling-result', ['application/octet-stream', scaleResponse([35, 60, 210, 10000])]);
+            await clickCell();
+            await page.waitForFunction(() => window._columnData?.value[0] === 35 && window._columnData.quantile[0] === 0.25);
+            assert.deepEqual(await page.evaluate(() => Array.from(window._columnData.quantile)), [0.25, 0.5, 1, 1]);
+            await checkScaleColour();
+            assert.equal(await page.locator('#observable_legend').innerText(), legend, 'Click load must retain frozen legend');
+            const sharedURL = page.url();
+            await page.goto('about:blank');
+            await page.goto(sharedURL);
+            await page.waitForFunction(() => window._columnData?.value[0] === 35 && window._columnData.quantile[0] === 0.25);
+            assert.equal(await page.locator('#observable_legend').innerText(), legend, 'Shared URL must restore numeric bounds');
+            await page.locator('#settingsBtn').click();
+            await page.getByRole('button', {name: 'Unfreeze legend', exact: true}).click();
+            await page.waitForFunction(() => new URL(location.href).searchParams.get('legendBounds') === 'null'
+                && Math.abs(window._columnData.quantile[0] - 1 / 3) < 1e-6);
         } catch (error) {
             console.error(await page.evaluate(() => ({classes: document.body.className,
                 status: document.querySelector('#request-status pre')?.textContent,

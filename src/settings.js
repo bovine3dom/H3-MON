@@ -88,6 +88,16 @@ export const SETTINGS_SCHEMA = [
         refresh: 'data',
     },
     {
+        key: 'legendBounds',
+        name: 'Legend bounds',
+        description: 'Freeze the current minimum and maximum as a fixed linear numeric scale. Unfreeze to restore automatic scaling.',
+        group: 'Values',
+        type: 'legendBounds',
+        defaultValue: null,
+        apply: 'immediate',
+        refresh: 'data',
+    },
+    {
         key: 'trimFactor',
         name: 'Trim fraction',
         description: '0.01 trims 1% from each end of the colour distribution.',
@@ -176,6 +186,10 @@ function parseNumber(value) {
 }
 
 export function parseSettingValue(setting, value) {
+    if (setting.type === 'legendBounds') {
+        if (typeof value !== 'string') return value
+        try { return JSON.parse(value) } catch (_) { return value }
+    }
     if (setting.type === 'boolean') return settingEnabled(value, false)
     if (setting.type === 'number') return parseNumber(value)
     if (setting.type === 'nullableNumber') {
@@ -197,6 +211,7 @@ export function parseSettingValue(setting, value) {
 }
 
 export function serializeSettingValue(setting, value) {
+    if (setting.type === 'legendBounds') return JSON.stringify(value)
     if (setting.type === 'boolean') return settingEnabled(value, false) ? '1' : '0'
     if (setting.type === 'nullableNumber' && value == null) return 'null'
     if (setting.type === 'scale') return value == null ? 'json:null' : (typeof value === 'object' ? `json:${JSON.stringify(value)}` : String(value))
@@ -227,6 +242,9 @@ export function effectiveSettingValue(metadata, overrides, setting) {
 }
 
 export function validateSettingValue(setting, value) {
+    if (setting.type === 'legendBounds' && value != null && !fixedLegendScale(value)) {
+        return `${setting.name} must be two finite numbers in ascending order.`
+    }
     if (setting.type === 'number') {
         if (!Number.isFinite(value)) return `${setting.name} must be a number.`
         if (setting.min != null && value < setting.min) return `${setting.name} must be at least ${setting.min}.`
@@ -249,6 +267,17 @@ export function validateSettingValue(setting, value) {
         }
     }
     return null
+}
+
+export function fixedLegendScale(bounds) {
+    if (!Array.isArray(bounds) || bounds.length !== 2 || !bounds.every(Number.isFinite) || bounds[0] > bounds[1]) return null
+    const [min, max] = bounds
+    return [
+        value => value == null || value === '' || !Number.isFinite(Number(value)) ? null
+            : min === max ? (Number(value) < min ? 0 : Number(value) > max ? 1 : 0.5)
+            : Math.max(0, Math.min(1, (Number(value) - min) / (max - min))),
+        fraction => min * (1 - fraction) + max * fraction,
+    ]
 }
 
 export function settingValuesEqual(left, right) {

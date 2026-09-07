@@ -1141,6 +1141,7 @@ export function render_cartogram(container, data, options = {}) {
     }
 
     return {
+        getVisibleIndices: () => visibleIndices(latestTransform),
         updateData: (newData, newDataCol) => {
             if (destroyed) return
             const doneUpdate = perfTimer('update_data', {rows: newData.x ? newData.x.length : 0})

@@ -1,6 +1,7 @@
 import {
     SETTINGS_BY_KEY,
     effectiveSettingValue,
+    fixedLegendScale,
     leadingThrottleDebounce,
     readSettingLayers,
     updateUrlSettingOverrides,
@@ -63,6 +64,32 @@ Deno.test('removing an override reveals metadata again', () => {
     assert(effectiveSettingValue(metadata, overrides, SETTINGS_BY_KEY.get('flip')) === false)
     delete overrides.flip
     assert(effectiveSettingValue(metadata, overrides, SETTINGS_BY_KEY.get('flip')) === true)
+})
+
+Deno.test('frozen numeric bounds round-trip and override metadata, including unfreeze', () => {
+    const url = new URL('https://example.test/?data=test.csv&query=saved#x=1&y=2&z=3')
+    updateUrlSettingOverrides(url, {legendBounds: [-12.345, 987.654]})
+    const layers = readSettingLayers({legendBounds: [0, 1]}, url.searchParams)
+    assert(JSON.stringify(layers.settings.legendBounds) === '[-12.345,987.654]')
+    assert(url.searchParams.get('query') === 'saved' && url.hash === '#x=1&y=2&z=3')
+    updateUrlSettingOverrides(url, {legendBounds: null})
+    assert(readSettingLayers({legendBounds: [0, 1]}, url.searchParams).settings.legendBounds === null)
+    const setting = SETTINGS_BY_KEY.get('legendBounds')
+    for (const value of [[2, 1], [0, Infinity], ['0', 1], [], {}, 'bad']) {
+        assert(validateSettingValue(setting, value) !== null)
+        assert(fixedLegendScale(value) === null)
+    }
+})
+
+Deno.test('frozen scale is linear, clamps outliers, preserves missing values and handles constant data', () => {
+    const [normalise, value] = fixedLegendScale([10, 110])
+    assert(normalise(10) === 0 && normalise(35) === 0.25 && normalise(110) === 1)
+    assert(normalise(-10) === 0 && normalise(200) === 1)
+    for (const missing of [null, undefined, '', NaN, Infinity]) assert(normalise(missing) === null)
+    assert(value(0) === 10 && value(0.25) === 35 && value(1) === 110)
+    const [constant, label] = fixedLegendScale([7, 7])
+    assert(constant(6) === 0 && constant(7) === 0.5 && constant(8) === 1)
+    assert(label(0) === 7 && label(1) === 7)
 })
 
 Deno.test('trim factor and scale validation reject malformed values', () => {

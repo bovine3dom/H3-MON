@@ -89,7 +89,29 @@ function makeScaleControl(value) {
     return {node: root, read, write}
 }
 
-function makeControl(setting, value, colourSchemes) {
+function makeControl(setting, value, colourSchemes, getLegendBounds) {
+    if (setting.type === 'legendBounds') {
+        const root = element('div')
+        const button = element('button')
+        button.type = 'button'
+        const bounds = element('div', 'setting-description')
+        let current
+        const write = next => {
+            current = next
+            button.textContent = next == null ? 'Freeze legend' : 'Unfreeze legend'
+            button.setAttribute('aria-label', button.textContent)
+            bounds.textContent = Array.isArray(next) ? next.join(' to ') : ''
+        }
+        button.addEventListener('click', () => {
+            const next = current == null ? getLegendBounds?.() : null
+            if (current == null && next == null) return
+            write(next)
+            root.dispatchEvent(new Event('settingchange', {bubbles: true}))
+        })
+        root.append(button, bounds)
+        write(value)
+        return {node: root, read: () => current, write}
+    }
     if (setting.type === 'scale') return makeScaleControl(value)
 
     if (setting.type === 'boolean') {
@@ -180,7 +202,7 @@ function makeControl(setting, value, colourSchemes) {
     }
 }
 
-export function createSettingsPanel({metadata, overrides, colourSchemes, onApply, schema = SETTINGS_SCHEMA}) {
+export function createSettingsPanel({metadata, overrides, colourSchemes, onApply, getLegendBounds, schema = SETTINGS_SCHEMA}) {
     const form = document.getElementById('settingsForm')
     const fieldsRoot = document.getElementById('settingsFields')
     const applyButton = document.getElementById('settingsApply')
@@ -333,7 +355,7 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
         if (setting.type === 'scale') root.classList.add('setting-field-wide')
         const name = element('label', 'setting-name', setting.name)
         const controlRow = element('div', 'setting-control-row')
-        const control = makeControl(setting, fieldValue(setting), colourSchemes)
+        const control = makeControl(setting, fieldValue(setting), colourSchemes, getLegendBounds)
         const reset = element('button', 'setting-reset', 'Reset')
         const error = element('div', 'setting-error')
         const focusTarget = control.node.matches('input, select, textarea, button') ? control.node : control.node.querySelector('input, select, textarea, button')

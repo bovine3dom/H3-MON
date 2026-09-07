@@ -13,7 +13,7 @@ import * as observablehq from './vendor/observablehq' // from https://observable
 import {getCitiesStartsWith} from 'tiny-geocoder'
 import {render_cartogram} from './cartogram'
 import {createSettingsPanel} from './settings-panel'
-import {SETTINGS_SCHEMA, readSettingLayers, serializeSettingValue, settingEnabled, updateUrlSettingOverrides} from './settings'
+import {SETTINGS_SCHEMA, fixedLegendScale, readSettingLayers, serializeSettingValue, settingEnabled, updateUrlSettingOverrides} from './settings'
 import {centralLinkedH3, createInteractions} from './interactions'
 import {createRequestStatus} from './request-status'
 import {createRequestControls} from './request-controls'
@@ -1731,7 +1731,7 @@ function bootstrap(meta = {}){
         }
         doneAssign()
         makeLegend(getvalue)
-        refreshH3LayerColours()
+        return refreshH3LayerColours()
     }
 
     function extractValues(raw, kind) {
@@ -2187,7 +2187,8 @@ function bootstrap(meta = {}){
         if (!loadProgress.totalWork) configureLoadProgress()
         setLoadStage('Loading data')
 
-        const doQuantiles = !settingEnabled(settings.raw, false)
+        const fixedScale = fixedLegendScale(settings.legendBounds)
+        const doQuantiles = !!fixedScale || !settingEnabled(settings.raw, false)
         const trimFactor = settings.trimFactor === '' || settings.trimFactor == null ? 0.01 : settings.trimFactor
         const useCartogramQuantiles = cartogramEnabled && settings.quantileSource === 'cartogram'
 
@@ -2247,7 +2248,7 @@ function bootstrap(meta = {}){
             if (doQuantiles) {
                 setLoadStage('Calculating quantiles')
                 const doneEcdf = perfTimer('data.quantile.ecdf', {rows: values.length, weighted: !!weights})
-                const [getquantile, getvalue] = ecdf(values, trimFactor, weights)
+                const [getquantile, getvalue] = fixedScale || ecdf(values, trimFactor, weights)
                 doneEcdf()
                 getquantileFn = getquantile
                 getvalueFn = getvalue
@@ -2325,7 +2326,7 @@ function bootstrap(meta = {}){
                     if (useCartogramQuantiles && doQuantiles) {
                         const cartoValues = cartoAggCols[cartoDataCol]
                         const doneCartoEcdf = perfTimer('cartogram.quantile.ecdf', {rows: cartoValues.length})
-                        const [getquantile, getvalue] = ecdf(cartoValues, trimFactor)
+                        const [getquantile, getvalue] = fixedScale || ecdf(cartoValues, trimFactor)
                         doneCartoEcdf()
                         getquantileFn = getquantile
                         getvalueFn = getvalue
@@ -2420,7 +2421,7 @@ function bootstrap(meta = {}){
                 failCartogram(error)
             }
 
-            if (doQuantiles && getquantileFn) {
+            if (doQuantiles && getquantileFn && !fixedScale) {
                 viewportQuantileState = {
                     source: useCartogramQuantiles && cartoValueCol ? 'cartogram' : 'map',
                     trimFactor,
@@ -2497,7 +2498,7 @@ function bootstrap(meta = {}){
                 }
             }
             const doneEcdf = perfTimer('data.quantile.ecdf', {rows: values.length, weighted: !!weights})
-            const [getquantile, getvalue] = ecdf(values, trimFactor, weights)
+            const [getquantile, getvalue] = fixedScale || ecdf(values, trimFactor, weights)
             doneEcdf()
             if (format.layer === 'hex') {
                 const doneQuantileAssign = perfTimer('data.quantile.assign', {rows: values.length})
@@ -2514,7 +2515,7 @@ function bootstrap(meta = {}){
             }
             valuekey = 'quantile'
             makeLegend(getvalue)
-            if (format.layer === 'hex') {
+            if (format.layer === 'hex' && !fixedScale) {
                 viewportQuantileState = {
                     source: 'map',
                     trimFactor,
@@ -3076,6 +3077,11 @@ function bootstrap(meta = {}){
             }
             await restoreSelection(source.query)
             signal.throwIfAborted()
+            // Loading can finish after the last movement event; scale the new visible data now.
+            const quantileSource = viewportQuantileState?.source
+            if (quantileSource) await updateViewportQuantiles(quantileSource,
+                quantileSource === 'cartogram' ? cartogramApi.getVisibleIndices() : null)
+            signal.throwIfAborted()
             if (failedSource === source) { requestError = null; failedSource = null }
             finishLoadProgress({clearStatus: !requestError})
             if (requestError) requestStatus.fail(requestError, {hasResult: true, onRetry: retryRequest})
@@ -3348,6 +3354,11 @@ function bootstrap(meta = {}){
         overrides: settingOverrides,
         colourSchemes: availableColourSchemes(),
         onApply: applySettingOverrides,
+        getLegendBounds: () => {
+            if (updateRunning || !legendDiv.lastElementChild) return null
+            const bounds = legendFormatter ? [legendFormatter(0), legendFormatter(1)] : [0, 1]
+            return fixedLegendScale(bounds) ? bounds : null
+        },
     })
 
     if (restoredQuery) repeatQuery()

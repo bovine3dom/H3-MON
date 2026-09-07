@@ -31,6 +31,15 @@ fields that only affect presentation use leading throttle-debounce. Settings tha
 require a data or cartogram rebuild are staged until **Apply** is pressed; that button
 appears only when needed.
 
+**Freeze legend** in Values captures the current legend's numeric minimum and maximum
+and switches both panes to a fixed **linear** scale, not a frozen quantile distribution.
+Bounds keep their full precision and persist through movement, data requests and shared
+URLs. Values outside the bounds use the endpoint colours; equal bounds put that value
+at the midpoint. Freezing overrides Raw values, trim and quantile-source settings until
+**Unfreeze legend** restores automatic scaling (or raw 0..1 scaling if enabled).
+Freeze is available after loading finishes. New results rescale to the current viewport
+without requiring an extra map movement.
+
 | Key | Name | Type | Description |
 |-----|------|------|-------------|
 | `t` | Title | string | Browser and legend title. |
@@ -39,6 +48,7 @@ appears only when needed.
 | `cyclical` | Cyclical colours | boolean | Uses Rainbow instead of Spectral when no explicit colour scheme is set. |
 | `flip` | Reverse colours | boolean | Reverses the colour scale. |
 | `raw` | Use raw values | boolean | Colours by source values instead of quantiles. |
+| `legendBounds` | Frozen legend bounds | JSON `[min,max]` or `null` | Fixed linear numeric bounds; `null` restores automatic scaling. |
 | `trimFactor` | Legend trim factor | number from 0 to less than 0.5 | Trims the ends of quantile legends. |
 | `quantileSource` | Quantile source | `map` or `cartogram` | Chooses which visible values determine quantiles. |
 | `scale` | Scale labels | object or null | Maps numeric breakpoints to raw legend labels. |
