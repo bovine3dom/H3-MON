@@ -1,6 +1,25 @@
 import {readQueryState, writeQueryState} from './query-state.js'
+import {queryTitle} from './query-title.js'
 
 function assert(condition) { if (!condition) throw new Error('Assertion failed') }
+
+Deno.test('query titles preserve templates until a city matches and use geographic coordinates', () => {
+    const template = 'From {TOWN_NAME} to {TOWN_NAME}'
+    const lookup = (lat, lng) => {
+        assert(lat === 48.8 && Math.abs(lng - 2.4) < 1e-10)
+        return {name: 'City $&'}
+    }
+    const point = {lat: 48.8, lng: 362.4, cartogram: [100, 200]}
+    assert(queryTitle(template, null, lookup) === template)
+    assert(queryTitle(template, {}, lookup) === template)
+    assert(queryTitle(template, point, () => undefined) === template)
+    assert(queryTitle(template, point, () => ({name: ''})) === template)
+    assert(queryTitle(template, point, lookup) === 'From City $& to City $&')
+    assert(queryTitle('Edited {TOWN_NAME}', point, lookup) === 'Edited City $&')
+    for (const title of ['', undefined, 'Plain title']) {
+        assert(queryTitle(title, point, () => { throw new Error('Unnecessary lookup') }) === title)
+    }
+})
 const query = {event: 'onclick', index: '851fb467fffffff', lat: 48.8, lng: 2.4, zoom: 6, cartogram: [3, 7]}
 
 Deno.test('query state round-trips without losing controls, data, or camera', () => {

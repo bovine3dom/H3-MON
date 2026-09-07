@@ -1,5 +1,5 @@
 {
-  "t": "Rail travel time (minutes)",
+  "t": "Rail travel time from {TOWN_NAME} (minutes)",
   "raw": false,
   "trimFactor": 0,
   "quantileSource": "map",

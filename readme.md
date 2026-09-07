@@ -56,7 +56,7 @@ so colours are less evenly distributed than the default quantiles.
 
 | Key | Name | Type | Description |
 |-----|------|------|-------------|
-| `t` | Title | string | Browser and legend title. |
+| `t` | Title | string | Browser and legend title; `{TOWN_NAME}` resolves to the nearest city for the displayed query. |
 | `c` | Additional attribution | comma-separated string | Attribution names prepended to the standard credits. |
 | `colourScheme` | Colour scheme | D3 interpolator name | Continuous D3 colour interpolator, such as `interpolateViridis`. |
 | `cyclical` | Cyclical colours | boolean | Uses Rainbow instead of Spectral when no explicit colour scheme is set. |
@@ -94,6 +94,17 @@ Example metadata:
 ```
 
 # Interaction endpoints
+
+Titles may contain `{TOWN_NAME}` (see the reachable example). The legend and browser
+tab substitute the nearest city from the bundled `tiny-geocoder` dataset, not an
+administrative boundary lookup. They use the last successfully displayed query's
+geographic coordinates: the map click, central linked H3 origin for cartogram clicks,
+or map centre for `onmove`. Pending, failed and superseded requests retain the displayed
+city and selection; a successful `onmove` updates the city and clears the click marker.
+Before the first result, or if no city matches, the placeholder stays unchanged.
+Static map/cartogram clicks also resolve the title when no endpoint query is needed.
+Settings, metadata and shared URLs retain the template, never the substituted city;
+replay resolves it only after a successful result, and title edits use the displayed origin.
 
 JSON metadata can optionally define `onclick` and `onmove` objects. These issue **GET
 requests returning Arrow IPC files or streams**, then replace the current dataset using

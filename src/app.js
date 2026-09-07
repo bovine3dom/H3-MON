@@ -10,7 +10,7 @@ import maplibregl from 'maplibre-gl'
 import * as d3 from 'd3'
 import {cellToBoundary, cellToLatLng, latLngToCell, getResolution, isValidCell, cellToParent, cellToChildren, h3IndexToSplitLong, splitLongToH3Index} from 'h3-js'
 import * as observablehq from './vendor/observablehq' // from https://observablehq.com/@d3/color-legend
-import {getCitiesStartsWith} from 'tiny-geocoder'
+import {getCitiesStartsWith, findClosestCity} from 'tiny-geocoder'
 import {render_cartogram} from './cartogram'
 import {createSettingsPanel} from './settings-panel'
 import {SETTINGS_SCHEMA, fixedLegendScale, readSettingLayers, serializeSettingValue, settingEnabled, updateUrlSettingOverrides} from './settings'
@@ -19,6 +19,7 @@ import {createRequestStatus} from './request-status'
 import {createRequestControls} from './request-controls'
 import {readQueryState, writeQueryState} from './query-state'
 import {rankitScale} from './rankit'
+import {queryTitle} from './query-title'
 
 const params = new URLSearchParams(window.location.search)
 const DEFAULT_DOCUMENT_TITLE = document.title
@@ -2365,7 +2366,7 @@ function bootstrap(meta = {}){
                                     const point = {index, lat, lng, zoom: map.getZoom(), cartogram: [data.x[i], data.y[i]]}
                                     userInteractionMove = false
                                     if (metadataSettings.onclick?.focus !== false) hex(cartoRefs, {fit: true, highlight: false})
-                                    if (!metadataSettings.onclick?.url && !acceptedSource.query) {
+                                    if (!updateRunning && !metadataSettings.onclick?.url && !acceptedSource.query) {
                                         restoreSelection({event: 'onclick', ...point}).catch(error => console.warn('Could not highlight linked cells', error))
                                     }
                                     interactions.click(point)
@@ -2859,6 +2860,7 @@ function bootstrap(meta = {}){
     let displayedSelection = null
     async function restoreSelection(query) {
         displayedSelection = query
+        if ((queryTitle(settings.t, query, findClosestCity) || DEFAULT_DOCUMENT_TITLE) !== document.title) await refreshLegend()
         if (query?.event !== 'onclick' || metadataSettings.onclick?.highlight === false) {
             hex([])
             cartogramApi?.highlightCells([])
@@ -2885,7 +2887,7 @@ function bootstrap(meta = {}){
                 focusCartogramForH3(index, {highlight: false}).catch(error => console.warn('Could not focus linked cells', error))
             }
             if (!metadataSettings.onclick?.url && !acceptedSource.query) {
-                restoreSelection({event: 'onclick', index}).catch(error => console.warn('Could not highlight linked cells', error))
+                restoreSelection({event: 'onclick', index, lat: event.lngLat.lat, lng: event.lngLat.lng}).catch(error => console.warn('Could not highlight linked cells', error))
             }
         }
         interactions.click(event.lngLat)
@@ -3221,12 +3223,14 @@ function bootstrap(meta = {}){
     }
 
     async function renderLegend(fmt) {
+        const title = queryTitle(settings.t, displayedSelection, findClosestCity)
+        document.title = title || DEFAULT_DOCUMENT_TITLE
         try {
             if (fmt !== undefined) {
-                const legend = observablehq.legend({color: colourRamp, title: settings.t, tickFormat: v => parseFloat(fmt(v).toPrecision(2)).toLocaleString()})
+                const legend = observablehq.legend({color: colourRamp, title, tickFormat: v => parseFloat(fmt(v).toPrecision(2)).toLocaleString()})
                 replaceLegend(legend)
             } else {
-                const legend_options = {color: colourRamp, title: settings.t}
+                const legend_options = {color: colourRamp, title}
                 if (settings.scale) {
                     const fmt = v => settings['scale'][Object.keys(settings['scale']).map(x => [x, Math.abs(x - v)]).sort((l,r)=>l[1] - r[1])[0][0]]
                     window.fmt = fmt
@@ -3237,7 +3241,7 @@ function bootstrap(meta = {}){
             }
         } catch(e) {
             console.warn(e)
-            const legend = observablehq.legend({color: colourRamp, title: settings.t})
+            const legend = observablehq.legend({color: colourRamp, title})
             replaceLegend(legend)
         }
     }
@@ -3285,7 +3289,7 @@ function bootstrap(meta = {}){
         settings = nextSettings
         infill = settingEnabled(settings.infill, false)
         showTrains = settingEnabled(settings.trains, false)
-        document.title = settings.t || DEFAULT_DOCUMENT_TITLE
+        document.title = queryTitle(settings.t, displayedSelection, findClosestCity) || DEFAULT_DOCUMENT_TITLE
         if (changedKeys.has('colourScheme') || changedKeys.has('cyclical') || changedKeys.has('flip')) rebuildColourRamp()
         if (changedKeys.has('cartogram')) resetCartogramState()
         updateAttribution()

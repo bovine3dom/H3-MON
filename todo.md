@@ -2,7 +2,7 @@
 
 # now
 
-- use the same tiny-geocoder package to do a reverse lookup of the click event and replace {TOWN_NAME} in the legend if it exists
+- [x] resolve {TOWN_NAME} with tiny-geocoder's nearest city for the displayed query; preserve the title template and retain the displayed city during pending or failed requests.
 
 - [x] optional rankit transform (Blom's formula + probit on rank) instead of uniform quantiles; gives tails more colour space and compresses the median.
 

@@ -6,6 +6,7 @@ import {chromium} from 'playwright';
 import {PNG} from 'pngjs';
 import {cellToBoundary, cellToLatLng, gridDisk, h3IndexToSplitLong, latLngToCell} from 'h3-js';
 import {tableFromArrays, tableToIPC} from 'apache-arrow';
+import {findClosestCity} from 'tiny-geocoder';
 
 // Test the built application, never local user data or a replacement Deck layer.
 const www = new URL('../www/', import.meta.url);
@@ -329,7 +330,9 @@ try {
             for (const [focus, highlight] of [[false, true], [true, false]]) {
                 routes.set('/data/selection.json', ['application/json', JSON.stringify({
                     cartogram: 'selection_hilo.arrow', raw: true,
+                    t: 'From {TOWN_NAME}',
                     onclick: {url: '/selection-result?index={index}', focus, highlight},
+                    onmove: {url: '/selection-result?index={index}', wait: 0},
                 })]);
                 let pending, receive;
                 const nextRequest = () => new Promise((resolve, reject) => {
@@ -344,6 +347,15 @@ try {
                 const camera = () => page.evaluate(() => [m.getCenter().lng, m.getCenter().lat, m.getZoom(), m.getBearing(), m.getPitch()]);
                 const marker = () => page.evaluate(() => m._controls.find(control => control.getCanvas?.()?.id === 'deckgl-overlay')
                     ._deck.props.layers.find(layer => layer.id === 'hex-highlight')?.props.data || []);
+                const checkTitle = async expected => {
+                    assert.equal(await page.title(), expected, 'Browser title follows displayed result');
+                    assert.equal(await page.locator('#observable_legend > :last-child .title').textContent(), expected);
+                };
+                const queryCity = () => {
+                    const query = JSON.parse(new URL(page.url()).searchParams.get('query'));
+                    return findClosestCity(query.lat, query.lng).name;
+                };
+                await checkTitle('From {TOWN_NAME}');
                 const cartoPoint = row => page.evaluate(row => {
                     const canvas = document.querySelector('#cartogram canvas'), rect = canvas.getBoundingClientRect();
                     const scale = Math.min(rect.width / 45, rect.height / 35);
@@ -377,7 +389,10 @@ try {
                 const before = await camera();
                 await clickOrigin();
                 assert.deepEqual(await marker(), [], 'Pending first query has no marker');
+                await checkTitle('From {TOWN_NAME}');
+                const firstCity = queryCity();
                 await respond(0.2);
+                await checkTitle(`From ${firstCity}`);
                 assert.deepEqual(await marker(), highlight ? [cell] : []);
                 assert.equal(await cartoMarked(), highlight, 'Geographic selection marks linked cartogram square');
                 if (!focus) assert.deepEqual(await camera(), before, 'Highlight must not move camera');
@@ -394,6 +409,7 @@ try {
                 const obsolete = pending;
                 await settle(page);
                 assert.deepEqual(await marker(), highlight ? [cell] : [], 'Pending geographic click retains displayed origin');
+                await checkTitle(`From ${firstCity}`);
 
                 const point = await cartoPoint(1);
                 const request = nextRequest();
@@ -405,6 +421,19 @@ try {
                 await settle(page);
                 assert.equal(await page.evaluate(() => window._columnData.value[0]), 0.2, 'Superseded response cannot replace displayed result');
                 assert.deepEqual(await marker(), highlight ? [cell] : [], 'Failed click retains displayed origin');
+                await checkTitle(`From ${firstCity}`);
+                await page.locator('#settingsBtn').click();
+                const titleInput = page.getByRole('textbox', {name: 'Title', exact: true});
+                assert.equal(await titleInput.inputValue(), 'From {TOWN_NAME}', 'Settings retain template');
+                await titleInput.fill('Plain title');
+                await titleInput.blur();
+                await page.waitForFunction(() => document.title === 'Plain title');
+                await checkTitle('Plain title');
+                await titleInput.fill('Edited {TOWN_NAME}');
+                await titleInput.blur();
+                await page.waitForFunction(() => new URL(location.href).searchParams.get('t') === 'Edited {TOWN_NAME}');
+                await checkTitle(`Edited ${firstCity}`);
+                await page.locator('#settingsClose').click();
                 assert.equal(await cartoMarked(), highlight, 'Failure retains cartogram selection');
                 if (!focus) assert.deepEqual(await camera(), before);
                 else assert.notDeepEqual(await camera(), before, 'Focus works with highlighting disabled');
@@ -413,6 +442,8 @@ try {
                 await page.getByRole('button', {name: 'Retry', exact: true}).click();
                 await retry;
                 await respond(0.4);
+                const secondCity = queryCity();
+                await checkTitle(`Edited ${secondCity}`);
                 assert.deepEqual(await marker(), highlight ? [scaleCells[1]] : [], 'Retry selects successful cartogram origin');
                 assert.equal(await cartoMarked(), highlight);
                 const savedCamera = await camera();
@@ -422,7 +453,9 @@ try {
                 await page.goto(shared.href);
                 await replay;
                 assert.deepEqual(await marker(), [], 'Replay does not mark an undisplayed result');
+                assert.equal(await page.title(), 'Edited {TOWN_NAME}', 'Replay waits for displayed result');
                 await respond(0.6);
+                await checkTitle(`Edited ${secondCity}`);
                 assert.deepEqual(await marker(), highlight ? [scaleCells[1]] : [], 'Shared URL restores selection even with automatic clicks disabled');
                 assert.equal(await cartoMarked(), highlight);
                 assert(difference(await camera(), savedCamera) < 0.001, 'Replay preserves camera');
@@ -435,8 +468,61 @@ try {
                     await page.waitForFunction(() => document.body.classList.contains('load-complete') && window._columnData?.quantile);
                     assert.deepEqual(await marker(), [scaleCells[1]], 'Settings refresh retains displayed selection');
                     assert.equal(await cartoMarked(), true);
+                    await checkTitle(`Edited ${secondCity}`);
+                    await page.locator('#settingsClose').click();
                 }
+
+                const moveRequest = nextRequest();
+                await page.evaluate(() => {
+                    m.jumpTo({center: [139.75, 35.68]});
+                    // Exercise the application's user-movement delivery, without a long pan across the globe.
+                    m.fire('movestart', {keyboardMoving: true});
+                    m.fire('moveend');
+                });
+                await moveRequest;
+                await checkTitle(`Edited ${secondCity}`);
+                assert.deepEqual(await marker(), highlight ? [scaleCells[1]] : [], 'Pending move retains click marker');
+                const moveCity = queryCity();
+                assert.notEqual(moveCity, secondCity, 'Movement must test a different city');
+                await respond(0.8, true);
+                await checkTitle(`Edited ${secondCity}`);
+                assert.deepEqual(await marker(), highlight ? [scaleCells[1]] : [], 'Failed move retains click marker');
+                const moveRetry = nextRequest();
+                await page.getByRole('button', {name: 'Retry', exact: true}).click();
+                await moveRetry;
+                await respond(0.8);
+                await checkTitle(`Edited ${moveCity}`);
+                assert.deepEqual(await marker(), [], 'Successful movement clears click marker');
+                assert.equal(await cartoMarked(), false);
+                const moveReplay = nextRequest();
+                await page.reload();
+                await moveReplay;
+                assert.equal(await page.title(), 'Edited {TOWN_NAME}');
+                await respond(0.9);
+                await checkTitle(`Edited ${moveCity}`);
+                assert.deepEqual(await marker(), [], 'Movement replay has no click marker');
                 await page.unroute('**/selection-result?*');
+
+                if (highlight) {
+                    routes.set('/data/selection.json', ['application/json', JSON.stringify({
+                        cartogram: 'selection_hilo.arrow', raw: true, t: 'Static {TOWN_NAME}', onclick: false,
+                    })]);
+                    await page.goto(`${origin}/?data=selection.csv#x=${center[0]}&y=${center[1]}&z=7`);
+                    await page.waitForFunction(() => document.body.classList.contains('load-complete')
+                        && document.body.classList.contains('cartogram-ready'));
+                    await checkTitle('Static {TOWN_NAME}');
+                    await clickCell();
+                    await settle(page);
+                    await checkTitle(`Static ${findClosestCity(center[1], center[0]).name}`);
+                    assert.deepEqual(await marker(), [cell]);
+                    const point = await cartoPoint(1);
+                    await page.mouse.click(point.x, point.y);
+                    await settle(page);
+                    await checkTitle(`Static ${findClosestCity(...cellToLatLng(scaleCells[1])).name}`);
+                    assert.deepEqual(await marker(), [scaleCells[1]]);
+                    assert.equal(new URL(page.url()).searchParams.has('query'), false, 'Static selection needs no query');
+                    await page.goto('about:blank');
+                }
             }
         } catch (error) {
             console.error(await page.evaluate(() => ({classes: document.body.className,
@@ -455,5 +541,5 @@ if (failures.length) {
     console.error(failures.join('\n'));
     process.exitCode = 1;
 } else {
-    console.log('Rendering regressions passed: desktop/mobile, cameras, panes, orientation, rankit, frozen bounds, raw mode and independent selection.');
+    console.log('Rendering regressions passed: desktop/mobile, cameras, panes, orientation, rankit, frozen bounds, raw mode, independent selection and nearest-city titles (click, cartogram, movement, replay, edits and static selection).');
 }
