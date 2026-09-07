@@ -66,14 +66,15 @@ Deno.test('removing an override reveals metadata again', () => {
     assert(effectiveSettingValue(metadata, overrides, SETTINGS_BY_KEY.get('flip')) === true)
 })
 
-Deno.test('rankit defaults off and URL overrides metadata in both directions', () => {
-    const setting = SETTINGS_BY_KEY.get('rankit')
+for (const key of ['rankit', 'linear']) Deno.test(`${key} defaults off and URL overrides metadata in both directions`, () => {
+    const setting = SETTINGS_BY_KEY.get(key)
     assert(effectiveSettingValue({}, {}, setting) === false)
+    assert(effectiveSettingValue({[key]: true}, {}, setting) === true)
     const url = new URL('https://example.test/?data=test.csv#x=1')
-    for (const rankit of [true, false]) {
-        updateUrlSettingOverrides(url, {rankit})
-        assert(readSettingLayers({rankit: !rankit}, url.searchParams).settings.rankit === rankit)
-        assert(url.searchParams.get('rankit') === (rankit ? '1' : '0'))
+    for (const value of [true, false]) {
+        updateUrlSettingOverrides(url, {[key]: value})
+        assert(readSettingLayers({[key]: !value}, url.searchParams).settings[key] === value)
+        assert(url.searchParams.get(key) === (value ? '1' : '0'))
     }
     assert(url.searchParams.get('data') === 'test.csv' && url.hash === '#x=1')
 })
@@ -107,7 +108,7 @@ Deno.test('frozen numeric bounds round-trip and override metadata, including unf
     }
 })
 
-Deno.test('frozen scale is linear, clamps outliers, preserves missing values and handles constant data', () => {
+Deno.test('shared frozen/linear scale clamps outliers, preserves missing values and handles constant data', () => {
     const [normalise, value] = fixedLegendScale([10, 110])
     assert(normalise(10) === 0 && normalise(35) === 0.25 && normalise(110) === 1)
     assert(normalise(-10) === 0 && normalise(200) === 1)

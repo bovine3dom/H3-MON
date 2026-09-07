@@ -36,10 +36,11 @@ const routes = new Map([
     ['/favicon.ico', ['image/x-icon', '']],
 ]);
 const scaleCells = [cell, ...gridDisk(cell, 1).filter(index => index !== cell).slice(0, 2), latLngToCell(0, 0, 5)];
-const scaleResponse = values => Buffer.from(tableToIPC(tableFromArrays({
+const scaleResponse = (values, weights) => Buffer.from(tableToIPC(tableFromArrays({
     index_lower: Uint32Array.from(scaleCells, index => h3IndexToSplitLong(index)[0]),
     index_upper: Uint32Array.from(scaleCells, index => h3IndexToSplitLong(index)[1]),
     value: Float64Array.from(values),
+    ...(weights ? {weight: Float64Array.from(weights)} : {}),
 })));
 routes.set('/data/scaling.json', ['application/json', JSON.stringify({cartogram: 'none', trimFactor: 0,
     onclick: {url: '/scaling-result?index={index}', focus: false, highlight: false},
@@ -369,6 +370,12 @@ try {
                 && window._columnData.quantile[0] === 0 && window._columnData.quantile[1] === 0.5);
             assert.equal(await page.locator('#observable_legend > :last-child').textContent(), rankitLegend, 'Shared rankit URL restores legend');
             await page.locator('#settingsBtn').click();
+            await page.getByRole('checkbox', {name: 'Linear colours', exact: true}).check();
+            await page.waitForFunction(() => new URL(location.href).searchParams.get('linear') === '1'
+                && window._columnData?.quantile?.[1] === 0.1);
+            assert.deepEqual(await page.evaluate(() => Array.from(window._columnData.quantile)), [0, 0.1, 1, 1], 'Linear overrides rankit and differs from uniform quantiles');
+            const linearLegend = await page.locator('#observable_legend > :last-child').textContent();
+            assert(linearLegend.includes('10') && linearLegend.includes('110'), `Linear legend uses visible original-unit endpoints: ${linearLegend}`);
             await page.getByRole('button', {name: 'Freeze legend', exact: true}).click();
             await page.waitForFunction(() => new URL(location.href).searchParams.get('legendBounds') === '[10,110]'
                 && window._columnData.quantile[1] === 0.1);
@@ -390,15 +397,56 @@ try {
             await page.locator('#settingsBtn').click();
             await page.getByRole('button', {name: 'Unfreeze legend', exact: true}).click();
             await page.waitForFunction(() => new URL(location.href).searchParams.get('legendBounds') === 'null'
-                && window._columnData.quantile[0] === 0 && window._columnData.quantile[1] === 0.5);
+                && window._columnData.quantile[0] === 0 && window._columnData.quantile[1] === 1 / 7);
             await page.getByRole('checkbox', {name: 'Raw values', exact: true}).check();
             await page.waitForFunction(() => new URL(location.href).searchParams.get('raw') === '1'
                 && window._columnData?.value[0] === 35 && !window._columnData.quantile);
             await page.getByRole('checkbox', {name: 'Raw values', exact: true}).uncheck();
+            await page.waitForFunction(() => window._columnData?.quantile?.[1] === 1 / 7);
+            await page.getByRole('checkbox', {name: 'Linear colours', exact: true}).uncheck();
             await page.waitForFunction(() => window._columnData?.quantile?.[1] === 0.5);
             await page.getByRole('checkbox', {name: 'Rankit colours', exact: true}).uncheck();
             await page.waitForFunction(() => new URL(location.href).searchParams.get('rankit') === '0'
                 && Math.abs(window._columnData.quantile[0] - 1 / 3) < 1e-6);
+
+            // Three visible rows: trim 0.34 selects the middle value at both ends, not min/max.
+            const linearURL = new URL(page.url());
+            for (const [key, value] of Object.entries({linear: '1', trimFactor: '0.34'})) linearURL.searchParams.set(key, value);
+            await page.goto(linearURL.href);
+            await page.waitForFunction(() => window._columnData?.quantile?.[1] === 0.5
+                && document.body.classList.contains('load-complete'));
+            await page.locator('#settingsBtn').click();
+            await page.getByRole('button', {name: 'Freeze legend', exact: true}).click();
+            await page.waitForFunction(() => new URL(location.href).searchParams.get('legendBounds') === '[60,60]');
+            await page.getByRole('button', {name: 'Unfreeze legend', exact: true}).click();
+            await page.locator('#settingsClose').click();
+            await page.evaluate(() => m.jumpTo({center: [0, 25], zoom: 0}));
+            await page.waitForFunction(() => window._columnData?.quantile?.[1] === 0
+                && window._columnData.quantile[2] === 1);
+
+            // Reuse the same replay fixture for weighted endpoints and finite/empty samples.
+            linearURL.searchParams.set('trimFactor', '0.01');
+            for (const [values, weights, expected] of [
+                [[10, 20, 110, 10000], [0.001, 1, 0.001, 1], [0, 0.5, 1, 1]],
+                [[10, 20, 110, 10000], [0, 0, 0, 0], [0, 0.1, 1, 1]],
+                [[NaN, 7, Infinity, 10000], null, [null, 0.5, null, 1]],
+                [[NaN, NaN, Infinity, NaN], null, [null, null, null, null]],
+            ]) {
+                routes.set('/scaling-result', ['application/octet-stream', scaleResponse(values, weights)]);
+                await page.goto('about:blank');
+                await page.goto(linearURL.href);
+                await page.waitForFunction(expected => document.body.classList.contains('load-complete')
+                    && JSON.stringify(window._columnData?.quantile) === JSON.stringify(expected), expected);
+            }
+            assert.equal(await page.locator('#observable_legend > :last-child .tick text').allTextContents().then(labels => labels.join('')), '', 'Empty sample has no numeric legend labels');
+            routes.set('/scaling-result', ['application/octet-stream', scaleResponse([10, 20, 110, 10000])]);
+            linearURL.searchParams.set('cartogram', 'selection_hilo.arrow');
+            linearURL.searchParams.set('quantileSource', 'cartogram');
+            linearURL.hash = '#x=0&y=0&z=7';
+            await page.goto(linearURL.href);
+            await page.waitForFunction(() => document.body.classList.contains('load-complete')
+                && document.body.classList.contains('cartogram-ready') && window._columnData?.quantile?.[1] === 0.1);
+            assert.deepEqual(await page.evaluate(() => Array.from(window._columnData.quantile)), [0, 0.1, 1, 1], 'Cartogram source overrides the distant visible map distribution');
 
             // Selection is independent of scaling and camera focus, in both panes.
             for (const [focus, highlight] of [[false, true], [true, false]]) {
@@ -796,5 +844,5 @@ if (failures.length) {
     console.error(failures.join('\n'));
     process.exitCode = 1;
 } else {
-    console.log('Rendering regressions passed: desktop/mobile, cameras, panes, orientation, rankit, frozen bounds, raw mode, independent selection, nearest-city titles and persistent WebSocket transport.');
+    console.log('Rendering regressions passed: desktop/mobile, cameras, panes, orientation, linear, rankit, frozen bounds, raw mode, independent selection, nearest-city titles and persistent WebSocket transport.');
 }

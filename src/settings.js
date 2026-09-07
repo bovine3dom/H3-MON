@@ -80,7 +80,17 @@ export const SETTINGS_SCHEMA = [
     {
         key: 'raw',
         name: 'Raw values',
-        description: 'Use values directly on the 0..1 colour scale instead of ranking them.',
+        description: 'Use values directly on the 0..1 colour scale. Overrides Linear and Rankit colours; ignored with frozen legend bounds.',
+        group: 'Values',
+        type: 'boolean',
+        defaultValue: false,
+        apply: 'immediate',
+        refresh: 'data',
+    },
+    {
+        key: 'linear',
+        name: 'Linear colours',
+        description: 'Spread colours linearly across the trimmed value range. Uses Trim fraction and Quantile source. Overrides Rankit; ignored with Raw values or frozen legend bounds.',
         group: 'Values',
         type: 'boolean',
         defaultValue: false,
@@ -90,7 +100,7 @@ export const SETTINGS_SCHEMA = [
     {
         key: 'rankit',
         name: 'Rankit colours',
-        description: 'Normal-score ranks give tails more colour space and compress the median. Ignored with Raw values or frozen legend bounds.',
+        description: 'Normal-score ranks give tails more colour space and compress the median. Ignored with Linear colours, Raw values or frozen legend bounds.',
         group: 'Values',
         type: 'boolean',
         defaultValue: false,

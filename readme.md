@@ -35,14 +35,29 @@ appears only when needed.
 and switches both panes to a fixed **linear** scale, not a frozen quantile distribution.
 Bounds keep their full precision and persist through movement, data requests and shared
 URLs. Values outside the bounds use the endpoint colours; equal bounds put that value
-at the midpoint. Freezing overrides Raw values, rankit, trim and quantile-source settings until
+at the midpoint. Freezing overrides Raw values, linear, rankit, trim and quantile-source settings until
 **Unfreeze legend** restores automatic scaling (or raw 0..1 scaling if enabled).
 Freeze captures the currently published legend whenever it has valid numeric bounds,
 even while a new result is loading or rendering; it does not capture a scale still being
 calculated. New results rescale to the current viewport without requiring an extra map movement.
 
+**Linear colours** (`linear=1`, or `"linear": true` in metadata, default off) uses
+empirical percentile endpoints from the selected visible **Quantile source** in both
+panes. The existing **Trim fraction** selects the endpoints: `trimFactor=0.01`
+means the 1st and 99th percentiles; zero uses the minimum and maximum. Colours are
+linear between these values, the legend stays in original units, and outliers clamp
+to the endpoint colours. It uses the existing finite-row sample and weighted
+quantiles (all-zero weights fall back to unweighted quantiles), without trimming
+twice. Singleton/constant endpoints use the midpoint and missing values stay missing.
+Bounds refresh after loads, viewport movement and query replay; Freeze legend captures
+the displayed percentile endpoints as fixed numeric bounds.
+
+Mode precedence is **frozen bounds > Raw values > Linear colours > Rankit colours >
+uniform quantiles**. Toggles remain independent; disabling a higher-priority mode
+restores the enabled mode below it.
+
 **Rankit colours** (`rankit=1`, default off) replaces uniform quantiles with normal
-scores in both panes, using the selected visible quantile source. Raw mode ignores
+scores in both panes, using the selected visible quantile source. Raw and linear modes ignore
 rankit. The existing finite-row sample is retained; ties use average ranks. With
 weights, positive weights determine midpoint cumulative mass `m`, and the effective
 rank is `r = n*m + 1/2`, where `n` is the number of positive-weight sampled rows.
@@ -63,9 +78,10 @@ so colours are less evenly distributed than the default quantiles.
 | `cyclical` | Cyclical colours | boolean | Uses Rainbow instead of Spectral when no explicit colour scheme is set. |
 | `flip` | Reverse colours | boolean | Reverses the colour scale. |
 | `raw` | Use raw values | boolean | Colours by source values instead of quantiles. |
-| `rankit` | Rankit colours | boolean, default false | Blom normal-score ranks instead of uniform quantiles; ignored in raw or frozen mode. |
+| `linear` | Linear colours | boolean, default false | Linear between empirical trim-percentile endpoints; ignored in raw or frozen mode. |
+| `rankit` | Rankit colours | boolean, default false | Blom normal-score ranks instead of uniform quantiles; ignored in linear, raw or frozen mode. |
 | `legendBounds` | Frozen legend bounds | JSON `[min,max]` or `null` | Fixed linear numeric bounds; `null` restores automatic scaling. |
-| `trimFactor` | Legend trim factor | number from 0 to less than 0.5 | Trims the ends of quantile legends. |
+| `trimFactor` | Legend trim factor | number from 0 to less than 0.5 | Trims quantile legends and selects linear percentile endpoints; default 0.01. |
 | `quantileSource` | Quantile source | `map` or `cartogram` | Chooses which visible values determine quantiles. |
 | `scale` | Scale labels | object or null | Maps numeric breakpoints to raw legend labels. |
 | `trains` | Railway speeds | boolean | Shows OpenRailwayMap maximum-speed tiles. |

@@ -27,16 +27,16 @@
   },
   "onclick": {
     "_old_url": "http://127.0.0.1:1988/reachable?index={index}&departure={controls.departure}&budget_s={controls.travelTime}&encoding=split&max_walk_s=3600",
-    "url": "http://127.0.0.1:1988/reachable?index={index}&departure={controls.departure}&budget_s={controls.travelTime}&window_s=86400&step_s=900&encoding=split&metric=distance_time_quantile&max_walk_s=3600",
+    "url": "http://127.0.0.1:1988/reachable?index={index}&departure={controls.departure}&budget_s={controls.travelTime}&window_s=86400&step_s=900&encoding=split&metric=distance_time_quantile&max_walk_s=3600&distance_mode=straight_line",
     "_no_walk_url": "http://127.0.0.1:1988/reachable?index={index}&departure={controls.departure}&budget_s={controls.travelTime}&window_s=86400&step_s=900&encoding=split&metric=distance_time_quantile&max_walk_s=0",
-    "resolution": 7,
+    "resolution": 5,
     "focus": false,
     "highlight": true
   },
   "onmove": {
     "socket": "ws://127.0.0.1:1988/query",
     "url": "/reachable?index={index}&departure={controls.departure}&window_s=86400&step_s=900&budget_s=10800&encoding=split&max_walk_s=3600&distance_mode=straight_line",
-    "resolution": 7,
+    "resolution": 5,
     "wait": 0,
     "_comment": "documented in docs/query-websocket.md"
   }

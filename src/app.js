@@ -3310,7 +3310,10 @@ function bootstrap(meta = {}){
         document.title = title || DEFAULT_DOCUMENT_TITLE
         try {
             if (fmt !== undefined) {
-                const legend = observablehq.legend({color: colourRamp, title, tickFormat: v => parseFloat(fmt(v).toPrecision(2)).toLocaleString()})
+                const legend = observablehq.legend({color: colourRamp, title, tickFormat: v => {
+                    const value = fmt(v)
+                    return Number.isFinite(value) ? parseFloat(value.toPrecision(2)).toLocaleString() : ''
+                }})
                 replaceLegend(legend)
             } else {
                 const legend_options = {color: colourRamp, title}
@@ -3664,11 +3667,16 @@ function bootstrap(meta = {}){
             if (values.length < Math.min(QUANTILE_SAMPLE_SIZE / 2, array.length)) reservoirSample()
         }
         if (!values.length) return [() => null, () => null, 0]
-        if (settingEnabled(settings.rankit, false)) return rankitScale(values, sampledWeights, trimFactor)
+        const linear = settingEnabled(settings.linear, false)
+        if (!linear && settingEnabled(settings.rankit, false)) return rankitScale(values, sampledWeights, trimFactor)
+        // Linear endpoints use the empirical inverse without its quantile-mode tail clamp.
+        const finish = scale => linear
+            ? [...fixedLegendScale([scale[1](trimFactor), scale[1](1 - trimFactor)]), values.length]
+            : scale
 
         const unweighted = () => {
             values.sort((a, b) => a - b)
-            return [
+            return finish([
                 target => {
                     const value = toFiniteNumber(target)
                     return value == null ? null : upperBound(values, value) / values.length
@@ -3676,12 +3684,12 @@ function bootstrap(meta = {}){
                 target => {
                     const quantile = toFiniteNumber(target)
                     if (quantile == null) return null
-                    if (quantile < trimFactor) return values[0]
-                    if (quantile >= 1 - trimFactor) return values[values.length - 1]
+                    if (!linear && quantile < trimFactor) return values[0]
+                    if (!linear && quantile >= 1 - trimFactor) return values[values.length - 1]
                     return values[Math.min(values.length - 1, Math.floor(quantile * values.length))]
                 },
                 values.length,
-            ]
+            ])
         }
         if (!sampledWeights) return unweighted()
 
@@ -3700,7 +3708,7 @@ function bootstrap(meta = {}){
         }
         for (let i = 0; i < cumulativeWeights.length; i++) cumulativeWeights[i] /= cumW
 
-        return [
+        return finish([
             target => {
                 const value = toFiniteNumber(target)
                 if (value == null) return null
@@ -3709,9 +3717,9 @@ function bootstrap(meta = {}){
             },
             target => {
                 const quantile = toFiniteNumber(target)
-                return quantile == null ? null : (sortedValues[upperBoundClamped(cumulativeWeights, quantile, trimFactor, 1 - trimFactor)] ?? sortedValues[sortedValues.length - 1])
+                return quantile == null ? null : (sortedValues[upperBoundClamped(cumulativeWeights, quantile, linear ? 0 : trimFactor, linear ? 1 : 1 - trimFactor)] ?? sortedValues[sortedValues.length - 1])
             },
             values.length,
-        ]
+        ])
     }
 }
