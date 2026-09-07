@@ -35,10 +35,24 @@ appears only when needed.
 and switches both panes to a fixed **linear** scale, not a frozen quantile distribution.
 Bounds keep their full precision and persist through movement, data requests and shared
 URLs. Values outside the bounds use the endpoint colours; equal bounds put that value
-at the midpoint. Freezing overrides Raw values, trim and quantile-source settings until
+at the midpoint. Freezing overrides Raw values, rankit, trim and quantile-source settings until
 **Unfreeze legend** restores automatic scaling (or raw 0..1 scaling if enabled).
 Freeze is available after loading finishes. New results rescale to the current viewport
 without requiring an extra map movement.
+
+**Rankit colours** (`rankit=1`, default off) replaces uniform quantiles with normal
+scores in both panes, using the selected visible quantile source. Raw mode ignores
+rankit. The existing finite-row sample is retained; ties use average ranks. With
+weights, positive weights determine midpoint cumulative mass `m`, and the effective
+rank is `r = n*m + 1/2`, where `n` is the number of positive-weight sampled rows.
+This is invariant to weight units; zero-weight rows do not determine the scale,
+and all-zero weights fall back to unweighted ranks.
+Blom probabilities `(r - 3/8)/(n + 1/4)` are transformed by the standard-normal
+probit. Symmetric finite endpoints at `p = 0.625/(n + 0.25)` (or the trim fraction,
+whichever is larger) normalize and clamp scores to 0..1. Singleton/constant data
+uses the midpoint. Between sampled values colours interpolate linearly; the legend
+inverts these knots to original units, not z-scores. Tails get more colour space,
+so colours are less evenly distributed than the default quantiles.
 
 | Key | Name | Type | Description |
 |-----|------|------|-------------|
@@ -48,6 +62,7 @@ without requiring an extra map movement.
 | `cyclical` | Cyclical colours | boolean | Uses Rainbow instead of Spectral when no explicit colour scheme is set. |
 | `flip` | Reverse colours | boolean | Reverses the colour scale. |
 | `raw` | Use raw values | boolean | Colours by source values instead of quantiles. |
+| `rankit` | Rankit colours | boolean, default false | Blom normal-score ranks instead of uniform quantiles; ignored in raw or frozen mode. |
 | `legendBounds` | Frozen legend bounds | JSON `[min,max]` or `null` | Fixed linear numeric bounds; `null` restores automatic scaling. |
 | `trimFactor` | Legend trim factor | number from 0 to less than 0.5 | Trims the ends of quantile legends. |
 | `quantileSource` | Quantile source | `map` or `cartogram` | Chooses which visible values determine quantiles. |

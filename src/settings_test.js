@@ -66,6 +66,18 @@ Deno.test('removing an override reveals metadata again', () => {
     assert(effectiveSettingValue(metadata, overrides, SETTINGS_BY_KEY.get('flip')) === true)
 })
 
+Deno.test('rankit defaults off and URL overrides metadata in both directions', () => {
+    const setting = SETTINGS_BY_KEY.get('rankit')
+    assert(effectiveSettingValue({}, {}, setting) === false)
+    const url = new URL('https://example.test/?data=test.csv#x=1')
+    for (const rankit of [true, false]) {
+        updateUrlSettingOverrides(url, {rankit})
+        assert(readSettingLayers({rankit: !rankit}, url.searchParams).settings.rankit === rankit)
+        assert(url.searchParams.get('rankit') === (rankit ? '1' : '0'))
+    }
+    assert(url.searchParams.get('data') === 'test.csv' && url.hash === '#x=1')
+})
+
 Deno.test('frozen numeric bounds round-trip and override metadata, including unfreeze', () => {
     const url = new URL('https://example.test/?data=test.csv&query=saved#x=1&y=2&z=3')
     updateUrlSettingOverrides(url, {legendBounds: [-12.345, 987.654]})

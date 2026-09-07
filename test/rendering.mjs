@@ -273,10 +273,24 @@ try {
                 && Math.abs(window._columnData.quantile[0] - 1 / 3) < 1e-6);
             await checkScaleColour();
             await page.locator('#settingsBtn').click();
+            await page.getByRole('checkbox', {name: 'Rankit colours', exact: true}).check();
+            await page.waitForFunction(() => new URL(location.href).searchParams.get('rankit') === '1'
+                && document.body.classList.contains('load-complete')
+                && window._columnData.quantile[0] === 0 && window._columnData.quantile[1] === 0.5);
+            const rankitLegend = await page.locator('#observable_legend > :last-child').textContent();
+            assert(rankitLegend.includes('10') && rankitLegend.includes('110'), `Rankit legend must use original units: ${rankitLegend}`);
+            await page.locator('#settingsClose').click();
+            await checkScaleColour();
+            await page.reload();
+            await page.waitForFunction(() => window._columnData?.value[0] === 10
+                && document.body.classList.contains('load-complete')
+                && window._columnData.quantile[0] === 0 && window._columnData.quantile[1] === 0.5);
+            assert.equal(await page.locator('#observable_legend > :last-child').textContent(), rankitLegend, 'Shared rankit URL restores legend');
+            await page.locator('#settingsBtn').click();
             await page.getByRole('button', {name: 'Freeze legend', exact: true}).click();
             await page.waitForFunction(() => new URL(location.href).searchParams.get('legendBounds') === '[10,110]'
                 && window._columnData.quantile[1] === 0.1);
-            const legend = await page.locator('#observable_legend').innerText();
+            const legend = await page.locator('#observable_legend > :last-child').textContent();
             await page.locator('#settingsClose').click();
             await page.evaluate(() => m.jumpTo({zoom: 6.8}));
             assert.equal(await page.evaluate(() => window._columnData.quantile[1]), 0.1, 'Movement must not rerank frozen values');
@@ -285,15 +299,23 @@ try {
             await page.waitForFunction(() => window._columnData?.value[0] === 35 && window._columnData.quantile[0] === 0.25);
             assert.deepEqual(await page.evaluate(() => Array.from(window._columnData.quantile)), [0.25, 0.5, 1, 1]);
             await checkScaleColour();
-            assert.equal(await page.locator('#observable_legend').innerText(), legend, 'Click load must retain frozen legend');
+            assert.equal(await page.locator('#observable_legend > :last-child').textContent(), legend, 'Click load must retain frozen legend');
             const sharedURL = page.url();
             await page.goto('about:blank');
             await page.goto(sharedURL);
             await page.waitForFunction(() => window._columnData?.value[0] === 35 && window._columnData.quantile[0] === 0.25);
-            assert.equal(await page.locator('#observable_legend').innerText(), legend, 'Shared URL must restore numeric bounds');
+            assert.equal(await page.locator('#observable_legend > :last-child').textContent(), legend, 'Shared URL must restore numeric bounds');
             await page.locator('#settingsBtn').click();
             await page.getByRole('button', {name: 'Unfreeze legend', exact: true}).click();
             await page.waitForFunction(() => new URL(location.href).searchParams.get('legendBounds') === 'null'
+                && window._columnData.quantile[0] === 0 && window._columnData.quantile[1] === 0.5);
+            await page.getByRole('checkbox', {name: 'Raw values', exact: true}).check();
+            await page.waitForFunction(() => new URL(location.href).searchParams.get('raw') === '1'
+                && window._columnData?.value[0] === 35 && !window._columnData.quantile);
+            await page.getByRole('checkbox', {name: 'Raw values', exact: true}).uncheck();
+            await page.waitForFunction(() => window._columnData?.quantile?.[1] === 0.5);
+            await page.getByRole('checkbox', {name: 'Rankit colours', exact: true}).uncheck();
+            await page.waitForFunction(() => new URL(location.href).searchParams.get('rankit') === '0'
                 && Math.abs(window._columnData.quantile[0] - 1 / 3) < 1e-6);
         } catch (error) {
             console.error(await page.evaluate(() => ({classes: document.body.className,
@@ -312,5 +334,5 @@ if (failures.length) {
     console.error(failures.join('\n'));
     process.exitCode = 1;
 } else {
-    console.log('Rendering regressions passed: desktop/mobile, cameras, pane transitions and orientation.');
+    console.log('Rendering regressions passed: desktop/mobile, cameras, panes, orientation, rankit, frozen bounds and raw mode.');
 }

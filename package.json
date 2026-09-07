@@ -4,7 +4,7 @@
     "scripts": {
         "serve_memleak": "node esbuild.config.mjs --servedir=www",
         "build": "node esbuild.config.mjs",
-        "test": "deno test src/settings_test.js src/interactions_test.js src/request-status_test.js src/request-controls_test.js src/query-state_test.js",
+        "test": "deno test src/settings_test.js src/rankit_test.js src/interactions_test.js src/request-status_test.js src/request-controls_test.js src/query-state_test.js",
         "test:rendering": "yarn build && node test/rendering.mjs",
         "watch": "node esbuild.config.mjs --watch",
         "serve": "yarn deno run --lock=deno.lock --allow-net --allow-read srv/watcher.ts",

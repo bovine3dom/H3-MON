@@ -18,6 +18,7 @@ import {centralLinkedH3, createInteractions} from './interactions'
 import {createRequestStatus} from './request-status'
 import {createRequestControls} from './request-controls'
 import {readQueryState, writeQueryState} from './query-state'
+import {rankitScale} from './rankit'
 
 const params = new URLSearchParams(window.location.search)
 const DEFAULT_DOCUMENT_TITLE = document.title
@@ -3566,6 +3567,7 @@ function bootstrap(meta = {}){
             if (values.length < Math.min(QUANTILE_SAMPLE_SIZE / 2, array.length)) reservoirSample()
         }
         if (!values.length) return [() => null, () => null, 0]
+        if (settingEnabled(settings.rankit, false)) return rankitScale(values, sampledWeights, trimFactor)
 
         const unweighted = () => {
             values.sort((a, b) => a - b)

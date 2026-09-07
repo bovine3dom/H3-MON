@@ -88,6 +88,16 @@ export const SETTINGS_SCHEMA = [
         refresh: 'data',
     },
     {
+        key: 'rankit',
+        name: 'Rankit colours',
+        description: 'Normal-score ranks give tails more colour space and compress the median. Ignored with Raw values or frozen legend bounds.',
+        group: 'Values',
+        type: 'boolean',
+        defaultValue: false,
+        apply: 'immediate',
+        refresh: 'data',
+    },
+    {
         key: 'legendBounds',
         name: 'Legend bounds',
         description: 'Freeze the current minimum and maximum as a fixed linear numeric scale. Unfreeze to restore automatic scaling.',
