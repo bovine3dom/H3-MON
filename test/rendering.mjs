@@ -41,9 +41,15 @@ const scaleResponse = values => Buffer.from(tableToIPC(tableFromArrays({
     value: Float64Array.from(values),
 })));
 routes.set('/data/scaling.json', ['application/json', JSON.stringify({cartogram: 'none', trimFactor: 0,
-    onclick: {url: '/scaling-result?index={index}', defaultAction: false},
+    onclick: {url: '/scaling-result?index={index}', focus: false, highlight: false},
 })]);
 routes.set('/data/scaling.csv', ['text/csv', `index,value\n${cell},1\n`]);
+routes.set('/data/selection.csv', routes.get('/data/scaling.csv'));
+routes.set('/data/selection_hilo.arrow', ['application/octet-stream', Buffer.from(tableToIPC(tableFromArrays({
+    x: Int32Array.from([0, 2, 4]), y: Int32Array.from([0, 2, 0]), code: Int32Array.from([100, 100, 100]),
+    index_lower: Uint32Array.from(scaleCells.slice(0, 3), index => h3IndexToSplitLong(index)[0]),
+    index_upper: Uint32Array.from(scaleCells.slice(0, 3), index => h3IndexToSplitLong(index)[1]),
+})))]);
 for (const [name, type] of [['index.html', 'text/html'], ['app.js', 'text/javascript'], ['app.css', 'text/css']]) {
     routes.set(`/${name}`, [type, await readFile(new URL(name, www))]);
 }
@@ -204,6 +210,7 @@ try {
         page.on('pageerror', error => failures.push(`${device}: pageerror: ${error.stack || error}`));
         page.on('console', message => {
             const text = message.text();
+            if (text.includes('HTTP 503: selection-test-failure') || text === 'Failed to load resource: the server responded with a status of 503 (Service Unavailable)') return;
             if (text === 'Error: <g> attribute transform: Expected transform function, "0".') return;
             if (message.type() === 'error') failures.push(`${device}: console: ${text}`);
             else if (message.type() === 'warning') console.warn(`${device}: ${text}`);
@@ -248,11 +255,11 @@ try {
             routes.set('/scaling-result', ['application/octet-stream', scaleResponse([10, 20, 110, 10000])]);
             await page.goto(`${origin}/?data=scaling.csv#x=${center[0]}&y=${center[1]}&z=7`);
             await page.waitForFunction(() => document.body.classList.contains('load-complete'));
-            const clickCell = async () => {
+            const clickCell = async (index = cell) => {
                 const point = await page.evaluate(center => {
                     const p = m.project(center), rect = m.getCanvas().getBoundingClientRect();
                     return {x: rect.x + p.x, y: rect.y + p.y};
-                }, center);
+                }, cellToLatLng(index).reverse());
                 await page.mouse.click(point.x, point.y);
             };
             const checkScaleColour = async () => {
@@ -317,6 +324,120 @@ try {
             await page.getByRole('checkbox', {name: 'Rankit colours', exact: true}).uncheck();
             await page.waitForFunction(() => new URL(location.href).searchParams.get('rankit') === '0'
                 && Math.abs(window._columnData.quantile[0] - 1 / 3) < 1e-6);
+
+            // Selection is independent of scaling and camera focus, in both panes.
+            for (const [focus, highlight] of [[false, true], [true, false]]) {
+                routes.set('/data/selection.json', ['application/json', JSON.stringify({
+                    cartogram: 'selection_hilo.arrow', raw: true,
+                    onclick: {url: '/selection-result?index={index}', focus, highlight},
+                })]);
+                let pending, receive;
+                const nextRequest = () => new Promise((resolve, reject) => {
+                    const timer = setTimeout(() => reject(new Error('Selection request was not routed')), 20000);
+                    receive = () => { clearTimeout(timer); resolve(); };
+                });
+                await page.route('**/selection-result?*', route => { pending = route; receive?.(); });
+                await page.goto(`${origin}/?data=selection.csv#x=${center[0]}&y=${center[1]}&z=7`);
+                await page.waitForFunction(() => document.body.classList.contains('load-complete')
+                    && document.body.classList.contains('cartogram-ready'));
+                await settle(page);
+                const camera = () => page.evaluate(() => [m.getCenter().lng, m.getCenter().lat, m.getZoom(), m.getBearing(), m.getPitch()]);
+                const marker = () => page.evaluate(() => m._controls.find(control => control.getCanvas?.()?.id === 'deckgl-overlay')
+                    ._deck.props.layers.find(layer => layer.id === 'hex-highlight')?.props.data || []);
+                const cartoPoint = row => page.evaluate(row => {
+                    const canvas = document.querySelector('#cartogram canvas'), rect = canvas.getBoundingClientRect();
+                    const scale = Math.min(rect.width / 45, rect.height / 35);
+                    const [x, y] = canvas.__zoom.apply([
+                        (rect.width - 45 * scale) / 2 + (12.5 + row * 10) * scale,
+                        (rect.height - 35 * scale) / 2 + (row === 1 ? 22.5 : 12.5) * scale,
+                    ]);
+                    return {x: rect.x + x, y: rect.y + y};
+                }, row);
+                const cartoMarked = () => page.evaluate(() => {
+                    const canvas = document.querySelector('#cartogram canvas');
+                    const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+                    for (let i = 0; i < pixels.length; i += 4) {
+                        if (pixels[i] > 240 && pixels[i + 1] > 140 && pixels[i + 1] < 190 && pixels[i + 2] < 20) return true;
+                    }
+                    return false;
+                });
+                const clickOrigin = async (index = cell) => {
+                    const request = nextRequest();
+                    await clickCell(index);
+                    await request;
+                };
+                const respond = async (value, fail = false) => {
+                    assert(pending, 'Click must issue a request');
+                    await pending.fulfill({status: fail ? 503 : 200, contentType: 'application/octet-stream',
+                        body: fail ? 'selection-test-failure' : scaleResponse([value, 0.5, 0.8, 1])});
+                    await page.waitForFunction(({value, fail}) => fail ? document.body.classList.contains('load-error')
+                        : document.body.classList.contains('load-complete') && window._columnData?.value[0] === value, {value, fail});
+                    await settle(page);
+                };
+                const before = await camera();
+                await clickOrigin();
+                assert.deepEqual(await marker(), [], 'Pending first query has no marker');
+                await respond(0.2);
+                assert.deepEqual(await marker(), highlight ? [cell] : []);
+                assert.equal(await cartoMarked(), highlight, 'Geographic selection marks linked cartogram square');
+                if (!focus) assert.deepEqual(await camera(), before, 'Highlight must not move camera');
+                if (highlight) {
+                    const point = await page.evaluate(center => {
+                        const p = m.project(center), rect = m.getCanvas().getBoundingClientRect();
+                        return [rect.x + p.x, rect.y + p.y];
+                    }, center);
+                    assert(difference(rgb(PNG.sync.read(await page.screenshot({scale: 'css'})), point), [24, 0, 0]) <= 4,
+                        'Origin marker must be visible in rendered map pixels');
+                }
+
+                await clickOrigin(scaleCells[2]);
+                const obsolete = pending;
+                await settle(page);
+                assert.deepEqual(await marker(), highlight ? [cell] : [], 'Pending geographic click retains displayed origin');
+
+                const point = await cartoPoint(1);
+                const request = nextRequest();
+                await page.mouse.click(point.x, point.y);
+                await request;
+                assert.deepEqual(await marker(), highlight ? [cell] : [], 'Pending cartogram click retains displayed origin');
+                await respond(0.3, true);
+                await obsolete.fulfill({contentType: 'application/octet-stream', body: scaleResponse([0.9, 0.5, 0.8, 1])});
+                await settle(page);
+                assert.equal(await page.evaluate(() => window._columnData.value[0]), 0.2, 'Superseded response cannot replace displayed result');
+                assert.deepEqual(await marker(), highlight ? [cell] : [], 'Failed click retains displayed origin');
+                assert.equal(await cartoMarked(), highlight, 'Failure retains cartogram selection');
+                if (!focus) assert.deepEqual(await camera(), before);
+                else assert.notDeepEqual(await camera(), before, 'Focus works with highlighting disabled');
+
+                const retry = nextRequest();
+                await page.getByRole('button', {name: 'Retry', exact: true}).click();
+                await retry;
+                await respond(0.4);
+                assert.deepEqual(await marker(), highlight ? [scaleCells[1]] : [], 'Retry selects successful cartogram origin');
+                assert.equal(await cartoMarked(), highlight);
+                const savedCamera = await camera();
+                const replay = nextRequest();
+                const shared = new URL(page.url());
+                shared.searchParams.set('onclick', 'false');
+                await page.goto(shared.href);
+                await replay;
+                assert.deepEqual(await marker(), [], 'Replay does not mark an undisplayed result');
+                await respond(0.6);
+                assert.deepEqual(await marker(), highlight ? [scaleCells[1]] : [], 'Shared URL restores selection even with automatic clicks disabled');
+                assert.equal(await cartoMarked(), highlight);
+                assert(difference(await camera(), savedCamera) < 0.001, 'Replay preserves camera');
+                if (highlight) {
+                    await page.locator('#settingsBtn').click();
+                    const refresh = nextRequest();
+                    await page.getByRole('checkbox', {name: 'Raw values', exact: true}).uncheck();
+                    await refresh;
+                    await respond(0.7);
+                    await page.waitForFunction(() => document.body.classList.contains('load-complete') && window._columnData?.quantile);
+                    assert.deepEqual(await marker(), [scaleCells[1]], 'Settings refresh retains displayed selection');
+                    assert.equal(await cartoMarked(), true);
+                }
+                await page.unroute('**/selection-result?*');
+            }
         } catch (error) {
             console.error(await page.evaluate(() => ({classes: document.body.className,
                 status: document.querySelector('#request-status pre')?.textContent,
@@ -334,5 +455,5 @@ if (failures.length) {
     console.error(failures.join('\n'));
     process.exitCode = 1;
 } else {
-    console.log('Rendering regressions passed: desktop/mobile, cameras, panes, orientation, rankit, frozen bounds and raw mode.');
+    console.log('Rendering regressions passed: desktop/mobile, cameras, panes, orientation, rankit, frozen bounds, raw mode and independent selection.');
 }

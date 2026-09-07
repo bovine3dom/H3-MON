@@ -28,6 +28,7 @@
   "onclick": {
     "url": "http://127.0.0.1:1988/reachable?index={index}&departure={controls.departure}&budget_s={controls.travelTime}&window_s=86400&step_s=900&encoding=split&metric=distance_time_quantile",
     "resolution": 5,
-    "defaultAction": false
+    "focus": false,
+    "highlight": true
   }
 }

@@ -30,10 +30,10 @@ export function createInteractions({getSettings, getReplaySettings = getSettings
         if (typeof config !== 'object' || Array.isArray(config) || typeof config.url !== 'string' || !config.url.trim()
             || config.resolution !== undefined && (!Number.isInteger(config.resolution) || config.resolution < 0 || config.resolution > 15)
             || config.wait !== undefined && (!Number.isFinite(config.wait) || config.wait < 0 || config.wait > 60000)
-            || config.defaultAction !== undefined && typeof config.defaultAction !== 'boolean') {
+            || ['focus', 'highlight'].some(key => config[key] !== undefined && typeof config[key] !== 'boolean')) {
             throw new Error(`Invalid ${key} configuration`)
         }
-        return {url: config.url, resolution: config.resolution, wait: config.wait ?? 350, defaultAction: config.defaultAction ?? true}
+        return {url: config.url, resolution: config.resolution, wait: config.wait ?? 350, focus: config.focus ?? true, highlight: config.highlight ?? true}
     }
 
     function deliver({url, context}, config, force = false) {

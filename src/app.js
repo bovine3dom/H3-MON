@@ -2364,9 +2364,9 @@ function bootstrap(meta = {}){
                                     const [lat, lng] = cellToLatLng(index)
                                     const point = {index, lat, lng, zoom: map.getZoom(), cartogram: [data.x[i], data.y[i]]}
                                     userInteractionMove = false
-                                    if (defaultClickEnabled()) {
-                                        cartogramApi?.highlightCells([i])
-                                        hex(cartoRefs, {fit: true})
+                                    if (metadataSettings.onclick?.focus !== false) hex(cartoRefs, {fit: true, highlight: false})
+                                    if (!metadataSettings.onclick?.url && !acceptedSource.query) {
+                                        restoreSelection({event: 'onclick', ...point}).catch(error => console.warn('Could not highlight linked cells', error))
                                     }
                                     interactions.click(point)
                                 } catch (e) {
@@ -2403,7 +2403,6 @@ function bootstrap(meta = {}){
                     } else {
                         setLoadStage('Updating cartogram')
                         const doneUpdateCartogram = perfTimer('cartogram.update.call', {rows: cartoAggCols.x.length})
-                        cartogramApi.highlightCells([])
                         cartogramApi.updateData(cartoAggCols, cartoDataCol)
                         doneUpdateCartogram()
                     }
@@ -2745,8 +2744,8 @@ function bootstrap(meta = {}){
         if (mapHoverRaf === null) mapHoverRaf = requestAnimationFrame(updateMapHoverTooltip)
     }
 
-    async function focusCartogramForH3(h3Index, {focus = true} = {}) {
-        hex([h3Index], {fit: false, highlight: true})
+    async function focusCartogramForH3(h3Index, {focus = true, highlight = true} = {}) {
+        if (highlight) hex([h3Index], {fit: false})
         if (!cartogramEnabled || !cartogramApi || !cartoAggCols) return
         const cartoH3s = cartoH3sForDataH3(h3Index)
         const h3map = await ensureH3ToXY()
@@ -2776,9 +2775,8 @@ function bootstrap(meta = {}){
                 if (cellSet.has(`${cartoAggCols.x[i]},${cartoAggCols.y[i]}`)) rowSet.add(i)
             }
         }
+        if (highlight) cartogramApi.highlightCells(Array.from(rowSet))
         if (!rowSet.size || xMin === Infinity) return
-
-        cartogramApi.highlightCells(Array.from(rowSet))
         const padding = 20
         if (focus) cartogramApi.fitToBounds([[xMin - padding, yMin - padding, xMax + padding, yMax + padding]])
     }
@@ -2858,12 +2856,14 @@ function bootstrap(meta = {}){
         return failedSource ? update(failedSource) : interactions.retry()
     }
 
-    function defaultClickEnabled() {
-        return metadataSettings.onclick?.defaultAction !== false
-    }
-
+    let displayedSelection = null
     async function restoreSelection(query) {
-        if (query?.event !== 'onclick' || !defaultClickEnabled()) return
+        displayedSelection = query
+        if (query?.event !== 'onclick' || metadataSettings.onclick?.highlight === false) {
+            hex([])
+            cartogramApi?.highlightCells([])
+            return
+        }
         if (query.cartogram && cartoAggCols && cartogramApi) {
             const row = cartoAggCols.x.findIndex((x, i) => x === query.cartogram[0] && cartoAggCols.y[i] === query.cartogram[1])
             if (row >= 0) {
@@ -2879,9 +2879,14 @@ function bootstrap(meta = {}){
         const original = event.originalEvent
         if (!original || original.button !== 0 || original.target?.closest?.('#search-container, .maplibregl-ctrl, .maplibregl-popup, .pane-btn')) return
         hideMapHoverTooltip()
-        if (defaultClickEnabled() && !updateRunning && dataH3Res != null) {
+        if (!updateRunning && dataH3Res != null) {
             const index = latLngToCell(event.lngLat.lat, event.lngLat.lng, dataH3Res)
-            focusCartogramForH3(index).catch(error => console.warn('Could not focus linked cells', error))
+            if (metadataSettings.onclick?.focus !== false) {
+                focusCartogramForH3(index, {highlight: false}).catch(error => console.warn('Could not focus linked cells', error))
+            }
+            if (!metadataSettings.onclick?.url && !acceptedSource.query) {
+                restoreSelection({event: 'onclick', index}).catch(error => console.warn('Could not highlight linked cells', error))
+            }
         }
         interactions.click(event.lngLat)
     })
@@ -3029,6 +3034,7 @@ function bootstrap(meta = {}){
         deferLegend = !publishEarly
         pendingLegend = null
         const previousState = {
+            selection: displayedSelection,
             activeH3Layer,
             viewportQuantileState,
             h3DataRowLookup,
@@ -3076,12 +3082,12 @@ function bootstrap(meta = {}){
                 signal.throwIfAborted()
                 h3DataRowLookup = buildH3DataRowLookup(window._columnData)
             }
-            await restoreSelection(source.query)
-            signal.throwIfAborted()
             // Loading can finish after the last movement event; scale the new visible data now.
             const quantileSource = viewportQuantileState?.source
             if (quantileSource) await updateViewportQuantiles(quantileSource,
                 quantileSource === 'cartogram' ? cartogramApi.getVisibleIndices() : null)
+            signal.throwIfAborted()
+            await restoreSelection(source.query || displayedSelection)
             signal.throwIfAborted()
             if (failedSource === source) { requestError = null; failedSource = null }
             finishLoadProgress({clearStatus: !requestError})
@@ -3105,6 +3111,7 @@ function bootstrap(meta = {}){
             cartogramApi = previousState.cartogramApi
             activeCartogramDataCol = previousState.activeCartogramDataCol
             if (cartogramApi && cartoAggCols && activeCartogramDataCol) cartogramApi.updateData(cartoAggCols, activeCartogramDataCol)
+            await restoreSelection(previousState.selection)
             document.body.classList.toggle('cartogram-ready', previousState.cartogramReady)
             window._columnData = previousState.columnData
             window.raw_data = previousState.rawData

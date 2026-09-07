@@ -17,23 +17,25 @@ Deno.test('cartogram origin is central, deterministic, and one of the linked cel
     assert(centralLinkedH3(Object.keys(dateline), key => dateline[key]) !== 'distant')
 })
 
-Deno.test('disabling default actions leaves the click request intact', async () => {
+Deno.test('focus and highlight default independently and leave requests and replay intact', async () => {
     let calls = 0
-    for (const defaultAction of [undefined, true, false]) {
+    for (const focus of [undefined, true, false]) for (const highlight of [undefined, true, false]) {
         const interactions = createInteractions({
-            getSettings: () => ({onclick: {url: '/{index}', defaultAction}}),
-            getValues: (config, point) => { assert(config.defaultAction === (defaultAction ?? true)); return point },
+            getSettings: () => ({onclick: {url: '/{index}', focus, highlight}}),
+            getValues: (config, point) => {
+                assert(config.focus === (focus ?? true) && config.highlight === (highlight ?? true))
+                return point
+            },
             request: async () => { calls++; return true }, baseURL: 'https://example.test',
         })
         assert(await interactions.click({index: '851fb467fffffff'}))
+        assert(await interactions.replay('onclick', {index: '851fb467fffffff'}))
     }
-    assert(calls === 3)
-    const errors = []
-    const interactions = createInteractions({
-        getSettings: () => ({onclick: {url: '/x', defaultAction: 'false'}}), getValues: () => ({}),
-        request: async () => { calls++ }, onError: error => errors.push(error), baseURL: 'https://example.test',
-    })
-    assert(await interactions.click({}) === false && errors.length === 1 && calls === 3)
+    assert(calls === 18)
+    for (const key of ['focus', 'highlight']) for (const value of ['false', 0, null]) {
+        const interactions = setup({onclick: {url: '/x', [key]: value}})
+        assert(await interactions.click({}) === false && interactions.errors.length === 1 && interactions.calls.length === 0)
+    }
 })
 
 Deno.test('explicit replay uses metadata, carries context, and can deduplicate parameter edits', async () => {

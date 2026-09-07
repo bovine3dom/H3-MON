@@ -118,10 +118,15 @@ templates; optional input converters described below are trusted JavaScript.
 
 Each object requires `url`. Optional `resolution` is an integer from 0 to 15; otherwise
 the current dataset's H3 resolution is used. `wait` must be between 0 and 60000.
-Set `onclick.defaultAction` to `false` to disable built-in highlighting and camera
-focusing on both panes while still sending the configured request. It defaults to
-`true` when omitted and also controls highlight restoration from shared URLs.
-No replacement origin marker is added.
+`onclick.focus` and `onclick.highlight` are independent booleans, both defaulting to
+`true`. Set `focus: false` to keep the camera in place while still marking the origin;
+set `highlight: false` to hide selection in both panes without disabling camera focus
+or requests. Geographic clicks mark the resolved query H3 cell, even if absent from
+the response; cartogram clicks mark the selected square and its linked geographic cells.
+The marker tracks the last successfully displayed result, not pending, failed or
+superseded clicks. A successful movement result clears the click marker. Shared-query
+replay and settings refreshes restore selection without focusing the camera, including
+when automatic requests are disabled. Static datasets still select immediately.
 
 URL templates support these placeholders, with substituted values URL-encoded:
 
@@ -179,7 +184,9 @@ query instead. The essential metadata shape is:
   },
   "onclick": {
     "url": "http://127.0.0.1:1988/reachable?index={index}&departure={controls.departure}&budget_s={controls.travelTime}&encoding=split",
-    "resolution": 5
+    "resolution": 5,
+    "focus": false,
+    "highlight": true
   },
   "onmove": {
     "url": "http://127.0.0.1:1988/reachable?index={index}&departure={controls.departure}&budget_s={controls.travelTime}&encoding=split",
@@ -246,7 +253,10 @@ yarn test:rendering
 
 The rendering tests check multiply-blended pixels, polygon edges, and Deck/MapLibre
 alignment against an in-memory basemap on desktop and mobile, including rotated,
-pitched and resized views. They need no backend or external tiles. `CHROMIUM_PATH`
+pitched and resized views. Separate fixtures cover rankit/frozen scaling and independent
+focus/highlight controls, including selection pixels in both panes, pending/failed and
+superseded requests, Retry, settings refreshes and shared-query replay.
+They need no backend or external tiles. `CHROMIUM_PATH`
 can select an existing Chromium executable; `ARTIFACT_DIR` optionally retains
 diagnostic screenshots.
 

@@ -8,7 +8,7 @@
 
 - [x] fix lack of legend colour/rescale on data load after click. workaround: user must move map a little after load
 
-- make clicked tile highlighted somehow so it is obvious where the centre is?
+- [x] highlight the clicked origin independently of camera focus; retain the last successful result's selection during pending or failed queries.
 
 - [x] add "freeze legend" button to settings. it'll need to bake the bounds in + read them from the current state
 
