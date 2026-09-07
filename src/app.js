@@ -3288,7 +3288,8 @@ function bootstrap(meta = {}){
         legend.style.opacity = 0
         legendDiv.append(legend)
         d3.select(legend).transition()
-            .duration(COLOUR_TRANSITION_DURATION)
+            .duration(0) // dumb fix
+            //.duration(COLOUR_TRANSITION_DURATION)
             .ease(d3.easeCubicInOut)
             .style('opacity', 1)
             .on('end', () => {
