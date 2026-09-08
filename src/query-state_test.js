@@ -1,5 +1,6 @@
 import {readQueryState, writeQueryState} from './query-state.js'
 import {queryTitle} from './query-title.js'
+import {createRequestControls} from './request-controls.js'
 
 function assert(condition) { if (!condition) throw new Error('Assertion failed') }
 
@@ -19,6 +20,38 @@ Deno.test('query titles preserve templates until a city matches and use geograph
     for (const title of ['', undefined, 'Plain title']) {
         assert(queryTitle(title, point, () => { throw new Error('Unnecessary lookup') }) === title)
     }
+})
+
+Deno.test('query titles use raw controls, not encoded request values, without expanding inserted text', () => {
+    const controls = createRequestControls({
+        departure: {label: 'Departure', type: 'time', default: '08:00', encode: 'value => Number(value.slice(0, 2))'},
+        duration: {label: 'Duration', type: 'number', default: 360, encode: 'value => value * 60'},
+        mode: {label: 'Mode', type: 'select', default: 'rail', options: [{value: 'rail', label: 'Train'}]},
+        enabled: {label: 'Enabled', type: 'boolean', default: false},
+        zero: {label: 'Zero', type: 'number', default: 0},
+        empty: {label: 'Empty', type: 'text', default: ''},
+        text: {label: 'Text', type: 'text', default: '$& / <rail> ?&= {controls.departure} {TOWN_NAME}'},
+    })
+    const encoded = controls.encode()
+    assert(encoded['controls.departure'] === '8' && encoded['controls.duration'] === '21600')
+    const displayed = {...encoded, lat: 0, lng: 0, _inputs: controls.values()}
+    const template = '{controls.departure}|{controls.duration}|{controls.mode}|{controls.enabled}|{controls.zero}|{controls.empty}|{controls.text}|{TOWN_NAME}'
+    assert(queryTitle(template, displayed, () => ({name: 'City {controls.duration}'})) ===
+        '08:00|360|rail|false|0||$& / <rail> ?&= {controls.departure} {TOWN_NAME}|City {controls.duration}')
+    assert(displayed._inputs.departure === '08:00' && template.includes('{controls.departure}'))
+})
+
+Deno.test('query titles resolve available query scalars and preserve unknown or unavailable tokens', () => {
+    const lookup = () => { throw new Error('Unnecessary lookup') }
+    const template = '{index}|{index_lower}|{index_upper}|{lat}|{lng}|{zoom}'
+    const displayed = {index: '851fb467fffffff', index_lower: 2147483647, index_upper: 139590470, lat: 0, lng: 2.4, zoom: 0}
+    assert(queryTitle(template, displayed, lookup) === '851fb467fffffff|2147483647|139590470|0|2.4|0')
+    for (const point of [null, {}, {lat: 1, lng: 2}, {'controls.departure': '8'},
+        {_inputs: {departure: null, invalid: {}, nan: NaN}}]) {
+        const unknown = '{controls.departure}|{controls.missing}|{controls.toString}|{controls.invalid}|{controls.nan}|{unknown}|{event}'
+        assert(queryTitle(unknown, point, lookup) === unknown)
+    }
+    assert(queryTitle('{lat}|{lng}|{zoom}', {lat: NaN, lng: Infinity, zoom: null}, lookup) === '{lat}|{lng}|{zoom}')
 })
 const query = {event: 'onclick', index: '851fb467fffffff', lat: 48.8, lng: 2.4, zoom: 6, cartogram: [3, 7]}
 

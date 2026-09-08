@@ -1,10 +1,8 @@
 import {
     SETTINGS_SCHEMA,
     effectiveSettingValue,
-    leadingThrottleDebounce,
     parseSettingValue,
     settingEnabled,
-    settingValuesEqual,
     validateSettingValue,
 } from './settings.js'
 import './settings-panel.css'
@@ -79,7 +77,7 @@ function makeScaleControl(value) {
         if (enabled.checked && !rows.children.length) addRow()
         root.dispatchEvent(new Event('settingchange', {bubbles: true}))
     })
-    rows.addEventListener('input', () => root.dispatchEvent(new Event('settingchange', {bubbles: true})))
+    rows.addEventListener('input', () => root.dispatchEvent(new CustomEvent('settingchange', {bubbles: true, detail: {typed: true}})))
     add.addEventListener('click', () => {
         addRow()
         rows.lastElementChild.querySelector('input').focus()
@@ -173,7 +171,7 @@ function makeControl(setting, value, colourSchemes, getLegendBounds) {
             if (enabled.checked && input.value === '') input.value = '0'
             wrapper.dispatchEvent(new Event('settingchange', {bubbles: true}))
         })
-        input.addEventListener('input', () => wrapper.dispatchEvent(new Event('settingchange', {bubbles: true})))
+        input.addEventListener('input', () => wrapper.dispatchEvent(new CustomEvent('settingchange', {bubbles: true, detail: {typed: true}})))
         wrapper.append(enabledLabel, input)
         write(value)
         return {
@@ -196,7 +194,7 @@ function makeControl(setting, value, colourSchemes, getLegendBounds) {
     input.value = value ?? setting.defaultValue
     return {
         node: input,
-        event: setting.apply === 'immediate' ? 'change' : 'input',
+        event: 'input',
         read: () => parseSettingValue(setting, input.value),
         write: nextValue => { input.value = nextValue ?? setting.defaultValue },
     }
@@ -205,41 +203,34 @@ function makeControl(setting, value, colourSchemes, getLegendBounds) {
 export function createSettingsPanel({metadata, overrides, colourSchemes, onApply, getLegendBounds, schema = SETTINGS_SCHEMA}) {
     const form = document.getElementById('settingsForm')
     const fieldsRoot = document.getElementById('settingsFields')
-    const applyButton = document.getElementById('settingsApply')
     const resetAllButton = document.getElementById('settingsResetAll')
     const status = document.getElementById('settingsStatus')
-    let appliedOverrides = {...overrides}
+    const appliedOverrides = {...overrides}
     let draftOverrides = {...overrides}
     let applyToken = 0
     let commitQueue = Promise.resolve()
     let requestTimer = null
-    const fields = new Map()
-    const throttles = new Map()
+    const fields = new Map(schema.map(setting => [setting.key, {version: 0, timer: null}]))
     const failedSettings = new Set()
     const requestSettings = schema.filter(setting => setting.refresh === 'request')
-
-    applyButton.textContent = 'Apply'
-    resetAllButton.textContent = 'Reset'
+    const colourAliases = schema.filter(setting => setting.hidden && ['raw', 'linear', 'rankit'].includes(setting.key))
 
     const hasOverride = (values, key) => Object.prototype.hasOwnProperty.call(values, key)
     const fieldValue = setting => effectiveSettingValue(metadata, draftOverrides, setting)
-    const isChanged = setting => {
-        const draftHas = hasOverride(draftOverrides, setting.key)
-        const appliedHas = hasOverride(appliedOverrides, setting.key)
-        return draftHas !== appliedHas || draftHas && !settingValuesEqual(draftOverrides[setting.key], appliedOverrides[setting.key])
-    }
 
     function refreshField(setting) {
         const field = fields.get(setting.key)
-        field.reset.hidden = !hasOverride(draftOverrides, setting.key)
-        const input = field.control.node
-        const error = ((setting.type === 'time' || input.validity?.rangeUnderflow || input.validity?.rangeOverflow) && input.validationMessage) ||
+        if (setting.hidden) return true
+        const targets = field.control.node.matches('input, select, textarea')
+            ? [field.control.node]
+            : [...field.control.node.querySelectorAll('input, select, textarea')]
+        const invalidInput = targets.find(input => input.willValidate &&
+            (input.validity.badInput || input.validity.rangeUnderflow || input.validity.rangeOverflow ||
+                input.validity.valueMissing || input.type === 'time' && !input.validity.valid))
+        const error = invalidInput?.validationMessage ||
             validateSettingValue(setting, field.control.read())
         field.error.textContent = error || ''
         field.error.hidden = !error
-        const targets = field.control.node.matches('input, select, textarea')
-            ? [field.control.node]
-            : field.control.node.querySelectorAll('input, select, textarea')
         for (const target of targets) {
             target.setAttribute('aria-describedby', field.error.id)
             target.setAttribute('aria-invalid', String(!!error))
@@ -247,25 +238,14 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
         return !error
     }
 
-    function pendingSettings() {
-        return schema.filter(setting => setting.refresh !== 'request' &&
-            (failedSettings.has(setting.key) || setting.apply === 'staged' && isChanged(setting)))
-    }
-
     function refreshActions() {
-        const pending = pendingSettings()
-        const invalid = pending.some(setting => !refreshField(setting))
-        applyButton.hidden = !pending.length
-        applyButton.disabled = !pending.length || invalid
         resetAllButton.disabled = !Object.keys(draftOverrides).length && !Object.keys(appliedOverrides).length && !failedSettings.size
-        resetAllButton.hidden = resetAllButton.disabled
-        applyButton.parentElement.hidden = applyButton.hidden && resetAllButton.hidden && !status.textContent
     }
 
-    function edited(setting, cancelQueued = false) {
+    function edited(setting) {
         const field = fields.get(setting.key)
         field.version++
-        if (cancelQueued) field.cancelledVersion = field.version - 1
+        clearTimeout(field.timer)
         failedSettings.delete(setting.key)
         applyToken++
         status.textContent = ''
@@ -283,13 +263,16 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
 
     async function performCommit({settings, overrides, versions, token}) {
         if (settings.some(setting => setting.refresh === 'request' && versions.get(setting.key) !== fields.get(setting.key).version)) return
-        settings = settings.filter(setting => versions.get(setting.key) > fields.get(setting.key).cancelledVersion)
+        settings = settings.filter(setting => versions.get(setting.key) === fields.get(setting.key).version)
         if (!settings.length) return
         if (settings.some(setting => validateSettingValue(setting, effectiveSettingValue(metadata, overrides, setting)))) return
         // Merge only this commit's captured fields, not a later draft or stale unrelated values.
         for (const setting of settings) {
             if (hasOverride(overrides, setting.key)) appliedOverrides[setting.key] = overrides[setting.key]
             else delete appliedOverrides[setting.key]
+        }
+        if (settings.some(setting => setting.key === 'colourScale')) {
+            for (const alias of colourAliases) delete appliedOverrides[alias.key]
         }
         refreshActions()
         try {
@@ -315,7 +298,7 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
         return commitQueue
     }
 
-    function schedule(setting) {
+    function schedule(setting, typed = false) {
         const valid = refreshField(setting)
         refreshActions()
         if (setting.refresh === 'request') {
@@ -324,24 +307,25 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
             if (!validRequest) return
             const values = snapshot(requestSettings)
             requestTimer = setTimeout(() => performCommit(values), 350)
-        } else if (!valid) {
-            throttles.get(setting.key).cancel()
-            fields.get(setting.key).cancelledVersion = fields.get(setting.key).version
-        } else if (setting.apply === 'throttle') {
-            throttles.get(setting.key)(snapshot([setting]))
-        } else if (setting.apply !== 'staged') {
-            commit(snapshot([setting]))
+        } else if (valid) {
+            const values = snapshot([setting])
+            if (typed) fields.get(setting.key).timer = setTimeout(() => commit(values), 350)
+            else commit(values)
         }
     }
 
-    function changed(setting) {
+    function changed(setting, event) {
         edited(setting)
+        if (setting.key === 'colourScale') {
+            for (const alias of colourAliases) delete draftOverrides[alias.key]
+        }
         draftOverrides[setting.key] = fields.get(setting.key).control.read()
-        schedule(setting)
+        schedule(setting, event.type === 'input' || event.detail?.typed)
     }
 
     const groups = new Map()
     for (const setting of schema) {
+        if (setting.hidden) continue
         let group = groups.get(setting.group)
         if (!group) {
             group = document.createElement('fieldset')
@@ -356,12 +340,9 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
         const name = element('label', 'setting-name', setting.name)
         const controlRow = element('div', 'setting-control-row')
         const control = makeControl(setting, fieldValue(setting), colourSchemes, getLegendBounds)
-        const reset = element('button', 'setting-reset', 'Reset')
         const error = element('div', 'setting-error')
         const focusTarget = control.node.matches('input, select, textarea, button') ? control.node : control.node.querySelector('input, select, textarea, button')
         const controlId = `setting-${setting.key}`
-        reset.type = 'button'
-        reset.setAttribute('aria-label', `Reset ${setting.name}`)
         error.id = `${controlId}-error`
         error.setAttribute('aria-live', 'polite')
         if (focusTarget) {
@@ -369,7 +350,7 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
             name.htmlFor = controlId
         }
         controlRow.append(control.node)
-        root.append(name, controlRow, reset, error)
+        root.append(name, controlRow, error)
         if (setting.description) {
             const help = element('details', 'setting-help')
             const summary = element('summary', '', '?')
@@ -378,39 +359,25 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
             root.append(help)
         }
         group.append(root)
-        fields.set(setting.key, {control, focusTarget, reset, error, version: 0, cancelledVersion: -1})
-        throttles.set(setting.key, leadingThrottleDebounce(commit))
-
-        if (control.event) control.node.addEventListener(control.event, () => changed(setting))
-        else control.node.addEventListener('settingchange', () => changed(setting))
-        reset.addEventListener('click', () => {
-            edited(setting, true)
-            throttles.get(setting.key).cancel()
-            delete draftOverrides[setting.key]
-            control.write(fieldValue(setting))
-            schedule(setting)
-            focusTarget?.focus()
-        })
+        Object.assign(fields.get(setting.key), {control, focusTarget, error})
+        control.node.addEventListener(control.event || 'settingchange', event => changed(setting, event))
         refreshField(setting)
     }
 
-    form.addEventListener('submit', event => {
-        event.preventDefault()
-        if (applyButton.disabled) return
-        status.textContent = ''
-        commit(snapshot(pendingSettings()))
-    })
+    form.addEventListener('submit', event => event.preventDefault())
     resetAllButton.addEventListener('click', () => {
-        for (const throttle of throttles.values()) throttle.cancel()
         clearTimeout(requestTimer)
         const changedSettings = schema.filter(setting => hasOverride(appliedOverrides, setting.key) || failedSettings.has(setting.key))
+        const colourScale = schema.find(setting => setting.key === 'colourScale')
+        if (colourScale && changedSettings.some(setting => colourAliases.includes(setting)) && !changedSettings.includes(colourScale)) {
+            changedSettings.push(colourScale)
+        }
         draftOverrides = {}
         for (const setting of schema) {
-            edited(setting, true)
-            fields.get(setting.key).control.write(fieldValue(setting))
+            edited(setting)
+            fields.get(setting.key).control?.write(fieldValue(setting))
             refreshField(setting)
         }
-        appliedOverrides = {}
         refreshActions()
         commit(snapshot(changedSettings.filter(setting => setting.refresh !== 'request')))
         if (changedSettings.some(setting => setting.refresh === 'request')) schedule(requestSettings[0])
@@ -426,7 +393,7 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
     }
 
     return {
-        focusFirst: () => fields.get(schema[0]?.key)?.focusTarget?.focus(),
+        focusFirst: () => fields.get(schema.find(setting => !setting.hidden)?.key)?.focusTarget?.focus(),
         getOverrides: () => ({...draftOverrides}),
         refreshCompleted,
     }

@@ -14,7 +14,7 @@
     --btn-font: 14px/1 sans-serif;
     --search-border: 1px solid #ccc;
     --search-radius: 4px;
-    --search-shadow: 0 2px 4px rgba(0,0,0,0.2);
+    --control-shadow: 0 2px 4px rgba(0,0,0,0.2);
 }
 #layout {
     position: fixed;
@@ -54,6 +54,7 @@ body.pane-full #map {
     display: none;
 }
 .pane-btn {
+    box-shadow: var(--control-shadow);
     position: absolute;
     top: 0.5em;
     z-index: 2;
@@ -186,7 +187,7 @@ body.pane-full #map {
     border: var(--search-border);
     border-radius: var(--search-radius);
     font-size: 14px;
-    box-shadow: var(--search-shadow);
+    box-shadow: var(--control-shadow);
 }
 #city-results {
     background: white;
@@ -194,7 +195,7 @@ body.pane-full #map {
     border-radius: var(--search-radius);
     max-height: 300px;
     overflow-y: auto;
-    box-shadow: var(--search-shadow);
+    box-shadow: var(--control-shadow);
     display: none;
 }
 #city-results div {
@@ -207,9 +208,10 @@ body.pane-full #map {
     background: #f0f0f0;
 }
 #load-progress {
+    box-sizing: border-box;
     position: fixed;
     z-index: 20;
-    top: 0.75rem;
+    top: 3.5rem;
     left: 50%;
     transform: translateX(-50%);
     width: min(28rem, calc(100vw - 2rem));
@@ -271,6 +273,7 @@ body.load-error #load-progress {
 }
 #request-status[hidden], #request-status [hidden] { display: none; }
 .request-spinner {
+    box-shadow: var(--control-shadow);
     display: grid;
     place-items: center;
     box-sizing: border-box;
@@ -390,8 +393,7 @@ body.cartogram-ready #leftExpand {
                     <div id="settingsFields"></div>
                     <div class="settings-actions">
                         <span id="settingsStatus" role="status" aria-live="polite"></span>
-                        <button id="settingsResetAll" type="button" aria-label="Reset all settings">Reset</button>
-                        <button id="settingsApply" type="submit" hidden disabled>Apply</button>
+                        <button id="settingsResetAll" type="button" disabled>Restore dataset defaults</button>
                     </div>
                 </form>
             </aside>

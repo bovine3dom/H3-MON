@@ -7,6 +7,7 @@ import {PNG} from 'pngjs';
 import {cellToBoundary, cellToChildren, cellToParent, cellToLatLng, gridDisk, h3IndexToSplitLong, splitLongToH3Index, latLngToCell} from 'h3-js';
 import {tableFromArrays, tableToIPC} from 'apache-arrow';
 import {findClosestCity} from 'tiny-geocoder';
+import {colourScale} from '../src/settings.js';
 
 // Test the built application, never local user data or a replacement Deck layer.
 const www = new URL('../www/', import.meta.url);
@@ -53,7 +54,7 @@ const h3Columns = indexes => ({
     index_lower: Uint32Array.from(indexes, index => h3IndexToSplitLong(index)[0]),
     index_upper: Uint32Array.from(indexes, index => h3IndexToSplitLong(index)[1]),
 });
-const coverageMath = new Function('settings', 'cartogramAgg', 'cellToChildren', 'cellToParent', 'splitLongToH3Index', `
+const coverageMath = new Function('settings', 'cartogramAgg', 'cellToChildren', 'cellToParent', 'splitLongToH3Index', 'colourScale', `
     const H3_INDEX_LOWER = 'index_lower', H3_INDEX_UPPER = 'index_upper', cartoRes = 5;
     const requireCompleteCoverage = settings.requireCompleteCoverage, infill = settings.infill;
     const perfTimer = () => () => {};
@@ -66,7 +67,7 @@ const aggregateFixture = (indexes, rowCell = indexes.map(() => 0), weights = nul
     h3Cols: {index: indexes, ...h3Columns(indexes)}, rowCell, weightValues: weights,
     x: [...new Set(rowCell)], y: [...new Set(rowCell)],
 });
-const mathFor = (settings, fixture) => coverageMath(settings, fixture, cellToChildren, cellToParent, splitLongToH3Index);
+const mathFor = (settings, fixture) => coverageMath(settings, fixture, cellToChildren, cellToParent, splitLongToH3Index, colourScale);
 for (const split of [false, true]) {
     for (const missing of [undefined, null, NaN]) {
         for (const weight of [1, 0]) {
@@ -367,7 +368,7 @@ try {
                     await reticule.waitFor({state: 'hidden'});
                     await crosshair.check();
                     await reticule.waitFor({state: metadata.onmove && !query.includes('onmove=false') ? 'visible' : 'hidden'});
-                    await page.getByRole('button', {name: 'Reset Centre crosshair', exact: true}).click();
+                    await page.locator('#settingsResetAll').click();
                     await page.waitForFunction(() => !new URL(location.href).searchParams.has('crosshair'));
                     assert.equal(await crosshair.isChecked(), metadata.crosshair !== false, 'Reset restores metadata, not just schema default');
                     await reticule.waitFor({state: metadata.onmove && !query.includes('onmove=false')
@@ -433,14 +434,62 @@ try {
                 const actual = rgb(PNG.sync.read(await page.screenshot({scale: 'css'})), point);
                 const expected = [24, 48, 60].map((base, i) => base * colour[i] / 255);
                 assert(difference(actual, expected) <= 4, `Stale map colour: ${actual}, expected ${expected}`);
+                return actual;
             };
             await clickCell();
             await page.waitForFunction(() => window._columnData?.value[0] === 10
                 && Math.abs(window._columnData.quantile[0] - 1 / 3) < 1e-6);
             await checkScaleColour();
+            const scaleSelector = page.getByRole('combobox', {name: 'Colour scale', exact: true});
+            const replayURL = page.url();
+            const scaleMetadata = routes.get('/data/scaling.json');
+            routes.set('/data/scaling.json', ['application/json', JSON.stringify({
+                ...JSON.parse(scaleMetadata[1]), colourScale: 'rankit', raw: true,
+            })]);
+            for (let mask = 0; mask < 8; mask++) {
+                const legacy = new URL(replayURL);
+                const flags = {raw: mask & 1 ? 'true' : 'false', linear: mask & 2 ? '1' : '0', rankit: mask & 4 ? 'on' : 'off'};
+                for (const [key, value] of Object.entries(flags)) legacy.searchParams.set(key, value);
+                const mode = mask & 1 ? 'raw' : mask & 2 ? 'linear' : mask & 4 ? 'rankit' : 'quantile';
+                await page.goto(legacy.href);
+                await page.waitForFunction(() => document.body.classList.contains('load-complete') && window._columnData?.value[0] === 10);
+                const pixels = await checkScaleColour();
+                const quantiles = await page.evaluate(() => window._columnData.quantile ?? null);
+                await page.locator('#settingsBtn').click();
+                assert.equal(await scaleSelector.inputValue(), mode, `Legacy precedence for ${legacy.search}`);
+                assert.equal(await page.locator('#setting-raw, #setting-linear, #setting-rankit').count(), 0);
+                await page.getByRole('textbox', {name: 'Title', exact: true}).fill('Legacy title');
+                await page.waitForFunction(() => new URL(location.href).searchParams.get('t') === 'Legacy title');
+                for (const [key, value] of Object.entries(flags)) assert.equal(new URL(page.url()).searchParams.get(key), value);
+                assert.equal(new URL(page.url()).searchParams.has('colourScale'), false, 'Unrelated edits do not canonicalize legacy flags');
+                assert.deepEqual(await page.evaluate(() => window._columnData.quantile ?? null), quantiles);
+                await scaleSelector.selectOption(mode === 'raw' ? 'linear' : 'raw');
+                await page.waitForFunction(mode => new URL(location.href).searchParams.get('colourScale') === mode,
+                    mode === 'raw' ? 'linear' : 'raw');
+                await scaleSelector.selectOption(mode);
+                await page.waitForFunction(mode => document.body.classList.contains('load-complete')
+                    && new URL(location.href).searchParams.get('colourScale') === mode, mode);
+                for (const key of Object.keys(flags)) assert.equal(new URL(page.url()).searchParams.has(key), false, 'Selector removes old keys');
+                await page.locator('#settingsClose').click();
+                assert.deepEqual(await page.evaluate(() => window._columnData.quantile ?? null), quantiles);
+                assert(difference(await checkScaleColour(), pixels) <= 4, 'Canonical selector and legacy URL render identical pixels');
+                await page.reload();
+                await page.waitForFunction(() => document.body.classList.contains('load-complete') && window._columnData?.value[0] === 10);
+                await page.locator('#settingsBtn').click();
+                assert.equal(await scaleSelector.inputValue(), mode, 'Shared canonical URL restores selector');
+                await page.locator('#settingsResetAll').click();
+                await page.waitForFunction(() => document.body.classList.contains('load-complete')
+                    && !new URL(location.href).searchParams.has('colourScale'));
+                assert.equal(await scaleSelector.inputValue(), 'rankit', 'Global reset restores canonical dataset scale, not schema default or legacy metadata');
+                assert.equal(new URL(page.url()).searchParams.has('t'), false);
+            }
+            routes.set('/data/scaling.json', scaleMetadata);
+            await page.goto('about:blank');
+            await page.goto(replayURL);
+            await page.waitForFunction(() => document.body.classList.contains('load-complete') && window._columnData?.value[0] === 10);
             await page.locator('#settingsBtn').click();
-            await page.getByRole('checkbox', {name: 'Rankit colours', exact: true}).check();
-            await page.waitForFunction(() => new URL(location.href).searchParams.get('rankit') === '1'
+            await scaleSelector.selectOption('rankit');
+            await page.waitForFunction(() => new URL(location.href).searchParams.get('colourScale') === 'rankit'
                 && document.body.classList.contains('load-complete')
                 && window._columnData.quantile[0] === 0 && window._columnData.quantile[1] === 0.5);
             const rankitLegend = await page.locator('#observable_legend > :last-child').textContent();
@@ -453,10 +502,10 @@ try {
                 && window._columnData.quantile[0] === 0 && window._columnData.quantile[1] === 0.5);
             assert.equal(await page.locator('#observable_legend > :last-child').textContent(), rankitLegend, 'Shared rankit URL restores legend');
             await page.locator('#settingsBtn').click();
-            await page.getByRole('checkbox', {name: 'Linear colours', exact: true}).check();
-            await page.waitForFunction(() => new URL(location.href).searchParams.get('linear') === '1'
+            await scaleSelector.selectOption('linear');
+            await page.waitForFunction(() => new URL(location.href).searchParams.get('colourScale') === 'linear'
                 && window._columnData?.quantile?.[1] === 0.1);
-            assert.deepEqual(await page.evaluate(() => Array.from(window._columnData.quantile)), [0, 0.1, 1, 1], 'Linear overrides rankit and differs from uniform quantiles');
+            assert.deepEqual(await page.evaluate(() => Array.from(window._columnData.quantile)), [0, 0.1, 1, 1], 'Linear replaces rankit and differs from uniform quantiles');
             const linearLegend = await page.locator('#observable_legend > :last-child').textContent();
             assert(linearLegend.includes('10') && linearLegend.includes('110'), `Linear legend uses visible original-unit endpoints: ${linearLegend}`);
             await page.getByRole('button', {name: 'Freeze legend', exact: true}).click();
@@ -481,19 +530,20 @@ try {
             await page.getByRole('button', {name: 'Unfreeze legend', exact: true}).click();
             await page.waitForFunction(() => new URL(location.href).searchParams.get('legendBounds') === 'null'
                 && window._columnData.quantile[0] === 0 && window._columnData.quantile[1] === 1 / 7);
-            await page.getByRole('checkbox', {name: 'Raw values', exact: true}).check();
-            await page.waitForFunction(() => new URL(location.href).searchParams.get('raw') === '1'
+            await scaleSelector.selectOption('raw');
+            await page.waitForFunction(() => new URL(location.href).searchParams.get('colourScale') === 'raw'
                 && window._columnData?.value[0] === 35 && !window._columnData.quantile);
-            await page.getByRole('checkbox', {name: 'Raw values', exact: true}).uncheck();
+            await scaleSelector.selectOption('linear');
             await page.waitForFunction(() => window._columnData?.quantile?.[1] === 1 / 7);
-            await page.getByRole('checkbox', {name: 'Linear colours', exact: true}).uncheck();
+            await scaleSelector.selectOption('rankit');
             await page.waitForFunction(() => window._columnData?.quantile?.[1] === 0.5);
-            await page.getByRole('checkbox', {name: 'Rankit colours', exact: true}).uncheck();
-            await page.waitForFunction(() => new URL(location.href).searchParams.get('rankit') === '0'
+            await scaleSelector.selectOption('quantile');
+            await page.waitForFunction(() => new URL(location.href).searchParams.get('colourScale') === 'quantile'
                 && Math.abs(window._columnData.quantile[0] - 1 / 3) < 1e-6);
 
             // Three visible rows: trim 0.34 selects the middle value at both ends, not min/max.
             const linearURL = new URL(page.url());
+            linearURL.searchParams.delete('colourScale'); // Keep exercising shipped legacy URLs.
             for (const [key, value] of Object.entries({linear: '1', trimFactor: '0.34'})) linearURL.searchParams.set(key, value);
             await page.goto(linearURL.href);
             await page.waitForFunction(() => window._columnData?.quantile?.[1] === 0.5
@@ -562,12 +612,11 @@ try {
             await page.waitForFunction(() => new URL(location.href).searchParams.get('requireCompleteCoverage') === '1');
             await coverageTooltip(0, null);
             await coverageTooltip(1, 0);
-            for (const name of ['Raw values', 'Linear colours']) {
-                if (name === 'Linear colours') await page.getByRole('checkbox', {name: 'Raw values', exact: true}).uncheck();
-                await page.getByRole('checkbox', {name, exact: true}).check();
+            for (const mode of ['raw', 'linear']) {
+                await scaleSelector.selectOption(mode);
                 await page.waitForFunction(raw => document.body.classList.contains('load-complete')
-                    && (raw ? !window._columnData.quantile : new URL(location.href).searchParams.get('linear') === '1'
-                        && window._columnData.quantile?.[0] === 1), name === 'Raw values');
+                    && (raw ? !window._columnData.quantile : new URL(location.href).searchParams.get('colourScale') === 'linear'
+                        && window._columnData.quantile?.[0] === 1), mode === 'raw');
                 await coverageTooltip(0, null);
                 await coverageTooltip(1, 0);
             }
@@ -579,11 +628,134 @@ try {
             await coverageTooltip(0, null);
             await page.locator('#settingsBtn').click();
             assert.equal(await coverage.isChecked(), true, 'Shared URL and reload restore strict coverage');
-            await page.getByRole('button', {name: 'Reset Require complete coverage', exact: true}).click();
+            await page.locator('#settingsResetAll').click();
             await page.waitForFunction(() => !new URL(location.href).searchParams.has('requireCompleteCoverage'));
             assert.equal(await coverage.isChecked(), false, 'Reset restores metadata default');
             await coverageTooltip(0, 0.6);
             console.log(`${device}: complete coverage recomputation, colour modes, shared URL/reload and reset passed`);
+
+            assert.equal(await page.getByRole('button', {name: 'Restore dataset defaults', exact: true}).count(), 1);
+            assert.equal(await page.getByRole('button', {name: /^(Apply|Reset )/}).count(), 0);
+            for (const size of [{width, height}, {width: height, height: width}]) {
+                await page.setViewportSize(size);
+                const fixed = await page.evaluate(() => {
+                    const rect = selector => document.querySelector(selector).getBoundingClientRect().toJSON();
+                    const fields = document.querySelector('#settingsFields');
+                    fields.querySelectorAll('details').forEach(help => { help.open = true; });
+                    fields.scrollTop = 0;
+                    const before = ['.settings-panel-header', '.settings-actions'].map(rect);
+                    fields.scrollTop = fields.scrollHeight;
+                    return {before, after: ['.settings-panel-header', '.settings-actions'].map(rect),
+                        scroll: fields.scrollTop, fields: rect('#settingsFields'),
+                        shadows: ['#settingsBtn', '#helpBtn', '#city-search', '.request-spinner'].map(selector => getComputedStyle(document.querySelector(selector)).boxShadow),
+                        progress: rect('#load-progress'), buttons: ['#settingsBtn', '#helpBtn', '#city-search'].map(rect)};
+                });
+                assert(fixed.scroll > 0, 'Fields scroll in both orientations');
+                assert.deepEqual(fixed.after, fixed.before, 'Header and footer stay fixed while fields scroll');
+                assert(fixed.fields.top >= fixed.before[0].bottom && fixed.fields.bottom <= fixed.before[1].top);
+                assert(fixed.before[1].bottom <= size.height && fixed.before[0].top >= 0);
+                assert(fixed.shadows[0] !== 'none' && fixed.shadows.every(shadow => shadow === fixed.shadows[0]), 'Utility buttons, search and request spinner share computed shadows');
+                for (const button of fixed.buttons) assert(fixed.progress.bottom <= button.top || fixed.progress.top >= button.bottom
+                    || fixed.progress.right <= button.left || fixed.progress.left >= button.right, 'Loading progress must not collide with controls');
+                assert(fixed.progress.top >= fixed.buttons[0].bottom, 'Loading progress occupies a second row');
+            }
+            await page.locator('#settingsFields details').evaluateAll(helps => helps.forEach(help => { help.open = false; }));
+            await page.setViewportSize({width, height});
+            const trim = page.getByRole('spinbutton', {name: 'Trim fraction', exact: true});
+            const cartogram = page.getByRole('textbox', {name: 'Cartogram weights', exact: true});
+            const missing = page.getByRole('spinbutton', {name: 'Missing value', exact: true});
+            await page.getByRole('checkbox', {name: 'Use Missing value', exact: true}).check();
+            await page.waitForFunction(() => new URL(location.href).searchParams.get('defaultValue') === '0'
+                && document.body.classList.contains('load-complete'));
+            for (const [control, key, value] of [[trim, 'trimFactor', '0.1'], [cartogram, 'cartogram', 'selection_hilo.arrow'], [missing, 'defaultValue', '0.2']]) {
+                const before = new URL(page.url()).searchParams.get(key);
+                await control.fill(value);
+                await new Promise(resolve => setTimeout(resolve, 200));
+                assert.equal(new URL(page.url()).searchParams.get(key), before, `${key} waits for trailing debounce`);
+                await control.fill(value);
+                await new Promise(resolve => setTimeout(resolve, 200));
+                assert.equal(new URL(page.url()).searchParams.get(key), before, `${key} restarts the trailing debounce on input`);
+                await page.waitForFunction(([key, value]) => new URL(location.href).searchParams.get(key) === value
+                    && document.body.classList.contains('load-complete'), [key, value]);
+            }
+            const requests = [];
+            const record = request => requests.push(request.url());
+            page.on('request', record);
+            try {
+                const before = page.url();
+                await trim.fill('0.2');
+                await trim.fill('0.8');
+                await new Promise(resolve => setTimeout(resolve, 600));
+                assert.equal(await trim.getAttribute('aria-invalid'), 'true');
+                assert.equal(page.url(), before, 'Invalid input cancels the pending valid edit without URL changes');
+                assert.deepEqual(requests, [], 'Invalid input cannot refetch data');
+                await page.evaluate(() => { window.invalidMissingData = window._columnData; });
+                await missing.press('ControlOrMeta+A');
+                await missing.press('-');
+                assert.equal(await missing.evaluate(input => input.validity.badInput), true, 'Real keyboard input produces badInput, not a sanitized empty fill');
+                await new Promise(resolve => setTimeout(resolve, 600));
+                assert.equal(await missing.getAttribute('aria-invalid'), 'true');
+                assert.equal(page.url(), before, 'Enabled invalid Missing value must not commit null');
+                assert.equal(await page.evaluate(() => window._columnData === window.invalidMissingData), true, 'Invalid Missing value must not rerender data');
+                assert.deepEqual(requests, []);
+                await missing.fill('0.4');
+                await page.waitForFunction(() => new URL(location.href).searchParams.get('defaultValue') === '0.4'
+                    && document.body.classList.contains('load-complete'));
+                await missing.press('ControlOrMeta+A');
+                await missing.press('-');
+                await page.getByRole('checkbox', {name: 'Use Missing value', exact: true}).uncheck();
+                await page.waitForFunction(() => new URL(location.href).searchParams.get('defaultValue') === 'null'
+                    && document.body.classList.contains('load-complete'));
+                assert.equal(await missing.isDisabled(), true);
+                assert.equal(await missing.getAttribute('aria-invalid'), 'false', 'Disabled numeric validity cannot block disabling Missing value');
+                await trim.fill('0.3');
+                await cartogram.fill('must-not-request.arrow');
+                await page.locator('#settingsResetAll').click();
+                await page.waitForFunction(() => document.body.classList.contains('load-complete')
+                    && !new URL(location.href).searchParams.has('trimFactor') && !new URL(location.href).searchParams.has('cartogram'));
+                await new Promise(resolve => setTimeout(resolve, 600));
+                assert.equal(await trim.inputValue(), '0');
+                assert.equal(await cartogram.inputValue(), 'coverage-cartogram_hilo.arrow');
+                assert.equal(await missing.isDisabled(), true);
+                assert.equal(new URL(page.url()).searchParams.has('defaultValue'), false);
+                assert(!requests.some(url => url.includes('must-not-request')), 'Reset cancels pending edits without reviving their requests');
+                assert.equal(await trim.getAttribute('aria-invalid'), 'false');
+            } finally {
+                page.off('request', record);
+            }
+            await coverageTooltip(0, 0.6);
+            await page.goto(`${origin}/?data=coverage.arrow&raw=true&trimFactor=0.2#x=${center[0]}&y=${center[1]}&z=7`);
+            await coverageTooltip(0, 0.6);
+            await page.locator('#settingsBtn').click();
+            let held;
+            await page.route('**/queued-cartogram_hilo.arrow', route => { held = route; });
+            try {
+                const requested = page.waitForRequest('**/queued-cartogram_hilo.arrow');
+                await cartogram.fill('queued-cartogram_hilo.arrow');
+                await requested;
+                await page.locator('#settingsResetAll').click(); // This reset queues behind the in-flight load.
+                const title = page.getByRole('textbox', {name: 'Title', exact: true});
+                await title.fill('Obsolete queued title');
+                await new Promise(resolve => setTimeout(resolve, 450)); // Let this commit queue behind the held cartogram load.
+                assert.equal(new URL(page.url()).searchParams.has('t'), false);
+                await page.locator('#settingsResetAll').click();
+                await held.fulfill({contentType: 'application/octet-stream', body: routes.get('/data/selection_hilo.arrow')[1]});
+                await page.waitForFunction(() => document.body.classList.contains('load-complete')
+                    && !new URL(location.href).searchParams.has('cartogram'));
+                await new Promise(resolve => setTimeout(resolve, 600));
+                assert.equal(new URL(page.url()).searchParams.has('t'), false, 'Reset invalidates already queued commits');
+                for (const key of ['raw', 'linear', 'rankit', 'colourScale', 'trimFactor', 'cartogram']) {
+                    assert.equal(new URL(page.url()).searchParams.has(key), false, `Repeated reset must still clear ${key}`);
+                }
+                assert.equal(await scaleSelector.inputValue(), 'quantile');
+                assert.equal(await title.inputValue(), '');
+                assert.equal(await cartogram.inputValue(), 'coverage-cartogram_hilo.arrow');
+                await coverageTooltip(0, 0.6);
+            } finally {
+                await page.unroute('**/queued-cartogram_hilo.arrow');
+            }
+            console.log(`${device}: fixed settings layout, shared shadows, validated trailing auto-apply and reset cancellation passed`);
+            await page.setViewportSize({width: height, height: width});
 
             // Selection is independent of scaling and camera focus, in both panes.
             for (const [focus, highlight] of [[false, true], [true, false]]) {
@@ -721,7 +893,7 @@ try {
                 if (highlight) {
                     await page.locator('#settingsBtn').click();
                     const refresh = nextRequest();
-                    await page.getByRole('checkbox', {name: 'Raw values', exact: true}).uncheck();
+                    await scaleSelector.selectOption('quantile');
                     await refresh;
                     await respond(0.7);
                     await page.waitForFunction(() => document.body.classList.contains('load-complete') && window._columnData?.quantile);
@@ -938,8 +1110,8 @@ try {
                 }, 40);
             });
             try {
-                await page.getByRole('checkbox', {name: 'Rankit colours', exact: true}).check();
-                await page.waitForFunction(() => new URL(location.href).searchParams.get('rankit') === '1'
+                await scaleSelector.selectOption('rankit');
+                await page.waitForFunction(() => new URL(location.href).searchParams.get('colourScale') === 'rankit'
                     && window._columnData?.value[0] === 35 && window._columnData.quantile[1] === 0.5);
                 const visibleBounds = await page.getByRole('button', {name: 'Freeze legend', exact: true}).evaluate(button => {
                     const ticks = [...document.querySelectorAll('#observable_legend > :last-child .tick')];
@@ -962,6 +1134,122 @@ try {
                 streaming = false;
             }
             console.log(`${device}: persistent WebSocket regressions passed`);
+
+            // The same result-title lifecycle must use raw controls on HTTP and socket transports.
+            for (const transport of ['http', 'socket']) {
+                const pending = [];
+                const note = '{controls.time}/{index}/{TOWN_NAME}';
+                const template = 'From {TOWN_NAME} | {controls.time} min at {controls.departure} | {index}/{index_lower}/{index_upper} | {lat},{lng}@{zoom} | {controls.note} | {unknown} {controls.missing}';
+                const controls = {
+                    time: {label: 'Travel time', type: 'number', default: 360, min: 0, encode: 'value => value * 60'},
+                    departure: {label: 'Departure', type: 'time', default: '08:00', encode: 'value => Number(value.slice(0, 2)) + Number(value.slice(3, 5)) / 60'},
+                    note: {label: 'Note', type: 'text', default: note},
+                };
+                const action = {url: '/selection-result?index={index}&time={controls.time}&departure={controls.departure}',
+                    focus: false, highlight: false,
+                    ...(transport === 'socket' ? {socket: origin.replace('http:', 'ws:') + '/title-stream'} : {})};
+                routes.set('/data/socket.json', ['application/json', JSON.stringify({cartogram: 'none', trimFactor: 0,
+                    t: template, controls, onclick: action})]);
+                if (transport === 'http') {
+                    await page.route('**/selection-result?*', route => pending.push({url: route.request().url(),
+                        respond: (value, fail) => route.fulfill({status: fail ? 503 : 200, contentType: 'application/octet-stream',
+                            body: fail ? 'selection-test-failure' : scaleResponse([value, 20, 110, 10000])})}));
+                } else {
+                    await page.routeWebSocket('**/title-stream', socket => socket.onMessage(message => {
+                        const query = JSON.parse(String(message));
+                        pending.push({url: query.url, respond: (value, fail) => {
+                            const id = Buffer.alloc(4);
+                            id.writeUInt32BE(query.id);
+                            socket.send(Buffer.concat([id, fail ? Buffer.from('invalid-arrow') : scaleResponse([value, 20, 110, 10000])]));
+                        }});
+                    }));
+                }
+                const receivedTitle = async (count, time, departure) => {
+                    const deadline = Date.now() + 20000;
+                    while (pending.length < count && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+                    assert.equal(pending.length, count, `${transport}: exactly one request per trailing edit`);
+                    const request = pending.at(-1), params = new URL(request.url, origin).searchParams;
+                    assert.equal(params.get('time'), String(time * 60), 'Request uses converted seconds');
+                    assert.equal(params.get('departure'), String(Number(departure.slice(0, 2)) + Number(departure.slice(3, 5)) / 60), 'Request uses converted hours');
+                    const saved = new URL(page.url()).searchParams, query = JSON.parse(saved.get('query'));
+                    assert.equal(saved.get('p.time'), String(time), 'Shared URL retains raw numeric input');
+                    assert.equal(saved.get('p.departure'), departure, 'Shared URL retains raw time string');
+                    const [lower, upper] = h3IndexToSplitLong(query.index);
+                    request.title = `From ${findClosestCity(query.lat, query.lng).name} | ${time} min at ${departure} | ${query.index}/${lower >>> 0}/${upper >>> 0} | ${query.lat},${query.lng}@${query.zoom} | ${note} | {unknown} {controls.missing}`;
+                    return request;
+                };
+                const checkTitle = async expected => {
+                    assert.equal(await page.title(), expected, `${transport}: title uses the displayed query's raw inputs and builtins`);
+                    assert.equal(await page.locator('#observable_legend > :last-child .title').textContent(), expected);
+                };
+                await page.goto('about:blank');
+                await page.goto(`${origin}/?data=socket.csv#x=${center[0]}&y=${center[1]}&z=7`);
+                await displayed(1);
+                await checkTitle(template);
+                await clickCell();
+                const first = await receivedTitle(1, 360, '08:00');
+                await checkTitle(template);
+                await first.respond(10);
+                await displayed(10);
+                await checkTitle(first.title);
+                await page.locator('#settingsBtn').click();
+                const time = page.getByRole('spinbutton', {name: 'Travel time', exact: true});
+                const departure = page.getByLabel('Departure', {exact: true});
+                const title = page.getByRole('textbox', {name: 'Title', exact: true});
+                await time.fill('480');
+                await departure.fill('09:30');
+                const edited = await receivedTitle(2, 480, '09:30');
+                await checkTitle(first.title);
+                await title.fill(`Edited ${template}`);
+                await edited.respond(0, true);
+                await page.waitForFunction(() => document.body.classList.contains('load-error'));
+                await page.waitForFunction(template => new URL(location.href).searchParams.get('t') === `Edited ${template}`, template);
+                await checkTitle(`Edited ${first.title}`); // Latest controls are 480/09:30; displayed controls are still 360/08:00.
+                assert.equal(await page.evaluate(() => window._columnData.value[0]), 10);
+                await page.locator('#settingsClose').click();
+                await page.getByRole('button', {name: 'Retry', exact: true}).click();
+                const retried = await receivedTitle(3, 480, '09:30');
+                assert.equal(retried.url, edited.url);
+                await retried.respond(12);
+                await displayed(12);
+                await checkTitle(`Edited ${retried.title}`);
+                await page.locator('#settingsBtn').click();
+                await scaleSelector.selectOption('linear');
+                // HTTP refresh refetches its accepted source; socket refresh can reuse accepted bytes.
+                if (transport === 'http') await (await receivedTitle(4, 480, '09:30')).respond(12);
+                await page.waitForFunction(() => document.body.classList.contains('load-complete') && window._columnData?.quantile?.[1] === 8 / 98);
+                await checkTitle(`Edited ${retried.title}`);
+                const replayCount = pending.length + 1;
+                const titleURL = new URL(page.url());
+                titleURL.searchParams.delete('colourScale'); // Isolate request-reset coalescing from a separate data refresh.
+                await page.goto(titleURL.href);
+                const replayed = await receivedTitle(replayCount, 480, '09:30');
+                assert.equal(await page.title(), `Edited ${template}`, 'Replay leaves the title unresolved until its first result');
+                await replayed.respond(14);
+                await displayed(14);
+                await checkTitle(`Edited ${replayed.title}`);
+                await page.locator('#settingsBtn').click();
+                const resetCount = pending.length + 1;
+                await page.evaluate(() => {
+                    document.querySelector('#settingsResetAll').click();
+                    const title = document.querySelector('#setting-t');
+                    title.value = 'Must not survive repeated reset';
+                    title.dispatchEvent(new Event('input', {bubbles: true}));
+                    document.querySelector('#settingsResetAll').click();
+                });
+                const reset = await receivedTitle(resetCount, 360, '08:00');
+                await reset.respond(16);
+                await displayed(16);
+                await new Promise(resolve => setTimeout(resolve, 600));
+                assert.equal(pending.length, resetCount, 'Repeated reset within 350ms coalesces request defaults');
+                for (const key of ['t', 'colourScale', 'raw', 'trimFactor']) assert.equal(new URL(page.url()).searchParams.has(key), false);
+                assert.equal(await time.inputValue(), '360');
+                assert.equal(await departure.inputValue(), '08:00');
+                assert.equal(await scaleSelector.inputValue(), 'quantile');
+                await checkTitle(reset.title);
+                if (transport === 'http') await page.unroute('**/selection-result?*');
+                console.log(`${device}: ${transport} raw-control/builtin titles, pending edits, failure/retry, refresh/replay and repeated request reset passed`);
+            }
         } catch (error) {
             console.error(await page.evaluate(() => ({classes: document.body.className,
                 status: document.querySelector('#request-status pre')?.textContent,

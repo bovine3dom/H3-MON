@@ -1,6 +1,8 @@
 import {
     SETTINGS_BY_KEY,
+    colourScale,
     effectiveSettingValue,
+    inheritedSettingValue,
     fixedLegendScale,
     leadingThrottleDebounce,
     readSettingLayers,
@@ -28,6 +30,97 @@ Deno.test('legacy non-JSON setting values retain their old string semantics', ()
     assert(layers.settings.scale === '{"0":"Low"}')
     assert(layers.settings.cartogram === 'false')
     assert(layers.settings.t === '')
+})
+
+Deno.test('colour scale schema keeps hidden aliases and validates canonical choices', () => {
+    const setting = SETTINGS_BY_KEY.get('colourScale')
+    assert(setting.type === 'select' && setting.defaultValue === 'quantile')
+    assert(setting.apply === 'immediate' && setting.refresh === 'data')
+    for (const key of ['raw', 'linear', 'rankit']) {
+        const alias = SETTINGS_BY_KEY.get(key)
+        assert(alias.hidden === true && alias.type === 'boolean' && alias.name)
+    }
+    for (const value of ['quantile', 'rankit', 'linear', 'raw']) assert(validateSettingValue(setting, value) === null)
+    for (const value of ['', 'unknown', 'Linear', null]) assert(validateSettingValue(setting, value) !== null)
+})
+
+Deno.test('legacy colour scale matrix preserves metadata precedence and every query spelling', () => {
+    const setting = SETTINGS_BY_KEY.get('colourScale')
+    const keys = ['raw', 'linear', 'rankit']
+    const spellings = ['', '1', 'true', 'yes', '0', 'false', 'off', 'no', ' FALSE ']
+    for (let mask = 0; mask < 8; mask++) {
+        const metadata = Object.fromEntries(keys.map((key, i) => [key, !!(mask & (1 << i))]))
+        const expected = keys.find(key => metadata[key]) || 'quantile'
+        assert(colourScale(metadata) === expected)
+        assert(inheritedSettingValue(metadata, setting) === expected)
+        for (const key of keys) for (const spelling of spellings) {
+            const enabled = !['0', 'false', 'off', 'no'].includes(spelling.trim().toLowerCase())
+            const params = new URLSearchParams({[key]: spelling})
+            const before = params.toString()
+            const layers = readSettingLayers(metadata, params)
+            const merged = {...metadata, [key]: enabled}
+            const resolved = keys.find(key => merged[key]) || 'quantile'
+            assert(layers.overrides[key] === enabled)
+            assert(layers.settings.colourScale === resolved, `${mask}: ${key}=${spelling}`)
+            assert(effectiveSettingValue(layers.metadata, layers.overrides, setting) === resolved)
+            assert(JSON.stringify(layers.metadata) === JSON.stringify(metadata))
+            assert(!Object.hasOwn(layers.overrides, 'colourScale') && params.toString() === before)
+        }
+    }
+    assert(readSettingLayers({}, new URLSearchParams('raw')).settings.colourScale === 'raw')
+    assert(colourScale({raw: 'off', linear: 'no', rankit: 'true'}) === 'rankit')
+})
+
+Deno.test('canonical and legacy layers resolve without mutating original settings', () => {
+    const setting = SETTINGS_BY_KEY.get('colourScale')
+    const cases = [
+        [{colourScale: 'rankit', raw: true}, '', 'rankit'],
+        [{colourScale: 'rankit', raw: true, linear: true}, 'raw=false', 'linear'],
+        [{colourScale: 'raw'}, 'linear=off', 'quantile'],
+        [{raw: true, linear: true, rankit: true}, 'raw=no&linear=off', 'rankit'],
+        [{raw: true, linear: true, rankit: true}, 'raw=0&linear=false&rankit=no', 'quantile'],
+        [{colourScale: 'linear', raw: true}, 'colourScale=unknown', 'linear'],
+        [{colourScale: 'linear', raw: true}, 'colourScale=unknown&raw=false&rankit', 'rankit'],
+        [{colourScale: 'unknown', raw: true}, '', 'raw'],
+        [{raw: true}, 'colourScale=unknown', 'raw'],
+        [{}, 'colourScale=unknown', 'quantile'],
+    ]
+    for (const value of ['quantile', 'rankit', 'linear', 'raw']) {
+        cases.push([{colourScale: 'raw', raw: true, linear: true}, `colourScale=${value}&raw&linear&rankit`, value])
+    }
+    for (const [metadata, query, expected] of cases) {
+        const original = JSON.stringify(metadata)
+        const layers = readSettingLayers(metadata, new URLSearchParams(query))
+        assert(layers.settings.colourScale === expected, query)
+        assert(effectiveSettingValue(metadata, layers.overrides, setting) === expected, query)
+        assert(colourScale(layers.settings) === expected)
+        assert(JSON.stringify(metadata) === original && JSON.stringify(layers.metadata) === original)
+    }
+})
+
+Deno.test('selector edits clear legacy URL overrides while unrelated writes preserve originals', () => {
+    const metadata = {colourScale: 'linear', raw: true, rankit: true}
+    const original = JSON.stringify(metadata)
+    const url = new URL('https://example.test/?raw&linear=OFF&rankit=false&colourScale=unknown&data=a.csv#x=1')
+    const layers = readSettingLayers(metadata, url.searchParams)
+    updateUrlSettingOverrides(url, {...layers.overrides, t: 'New title'}, [SETTINGS_BY_KEY.get('t')])
+    updateUrlSettingOverrides(url, {...layers.overrides, t: 'New title'})
+    assert(url.searchParams.get('raw') === '' && url.searchParams.get('linear') === 'OFF')
+    assert(url.searchParams.get('rankit') === 'false' && url.searchParams.get('colourScale') === 'unknown')
+    const overrides = {...layers.overrides, colourScale: 'quantile'}
+    for (const key of ['raw', 'linear', 'rankit']) delete overrides[key]
+    updateUrlSettingOverrides(url, overrides, [SETTINGS_BY_KEY.get('colourScale')])
+    for (const key of ['raw', 'linear', 'rankit']) assert(!url.searchParams.has(key))
+    assert(readSettingLayers(metadata, url.searchParams).settings.colourScale === 'quantile')
+    assert(url.searchParams.get('t') === 'New title')
+    updateUrlSettingOverrides(url, {})
+    assert(url.search === '?data=a.csv' && url.hash === '#x=1')
+    assert(readSettingLayers(metadata, url.searchParams).settings.colourScale === 'linear')
+    assert(JSON.stringify(metadata) === original)
+    const legacyUrl = new URL('https://example.test/?raw&linear=0&rankit=true&colourScale=raw')
+    updateUrlSettingOverrides(legacyUrl, {})
+    assert(legacyUrl.search === '')
+    assert(readSettingLayers({rankit: true}, legacyUrl.searchParams).settings.colourScale === 'rankit')
 })
 
 Deno.test('scale overrides round-trip while unrelated URL state is preserved', () => {
@@ -147,7 +240,7 @@ Deno.test('every setting defines user-facing and application metadata', () => {
     for (const setting of SETTINGS_BY_KEY.values()) {
         assert(setting.name)
         assert(setting.description === undefined || typeof setting.description === 'string')
-        assert(['immediate', 'throttle', 'staged'].includes(setting.apply))
+        assert(['immediate', 'debounce'].includes(setting.apply))
         assert(['render', 'data', 'cartogram'].includes(setting.refresh))
     }
 })

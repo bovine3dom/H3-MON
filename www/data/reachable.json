@@ -28,16 +28,16 @@
     }
   },
   "onclick": {
-    "_old_url": "http://127.0.0.1:1988/reachable?index={index}&departure_h={controls.departure}&budget_h={controls.travelTime}&encoding=split&max_walk_h=1",
-    "_url": "http://127.0.0.1:1988/reachable?index={index}&departure_h={controls.departure}&budget_h={controls.travelTime}&window_h=24&step_h=0.25&encoding=split&metric=distance_time_quantile&max_walk_h=1&distance_mode=straight_line",
-    "_no_walk_url": "http://127.0.0.1:1988/reachable?index={index}&departure_h={controls.departure}&budget_h={controls.travelTime}&window_h=24&step_h=0.25&encoding=split&metric=distance_time_quantile&max_walk_h=0",
-    "url": "http://127.0.0.1:1988/reachable?index={index}&departure_h=7&window_h=11&step_h=0.25&budget_h=6&encoding=split&max_walk_h=1&distance_mode=straight_line",
-    "resolution": 6,
+    "_old_url": "https://proto.olie.science/router/reachable?index={index}&departure_h={controls.departure}&budget_h={controls.travelTime}&encoding=split&max_walk_h=1",
+    "_url": "https://proto.olie.science/router/reachable?index={index}&departure_h={controls.departure}&budget_h={controls.travelTime}&window_h=24&step_h=0.25&encoding=split&metric=distance_time_quantile&max_walk_h=1&distance_mode=straight_line",
+    "_no_walk_url": "https://proto.olie.science/router/reachable?index={index}&departure_h={controls.departure}&budget_h={controls.travelTime}&window_h=24&step_h=0.25&encoding=split&metric=distance_time_quantile&max_walk_h=0",
+    "url": "https://proto.olie.science/router/reachable?index={index}&departure_h=7&window_h=11&step_h=0.25&budget_h=6&encoding=split&max_walk_h=1&distance_mode=straight_line&window_mode=min_union",
+    "resolution": 7,
     "focus": false,
     "highlight": true
   },
-  "_onmove": {
-    "socket": "ws://127.0.0.1:1988/query",
+  "onmove": {
+    "socket": "wss://proto.olie.science/router/query",
     "url": "/reachable?index={index}&departure_h=7&window_h=11&step_h=0.25&budget_h=3&encoding=split&max_walk_h=1&distance_mode=straight_line",
     "resolution": 8,
     "wait": 0,

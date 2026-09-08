@@ -13,7 +13,7 @@ import * as observablehq from './vendor/observablehq' // from https://observable
 import {getCitiesStartsWith, findClosestCity} from 'tiny-geocoder'
 import {render_cartogram} from './cartogram'
 import {createSettingsPanel} from './settings-panel'
-import {SETTINGS_SCHEMA, fixedLegendScale, readSettingLayers, serializeSettingValue, settingEnabled, updateUrlSettingOverrides} from './settings'
+import {SETTINGS_SCHEMA, colourScale, fixedLegendScale, readSettingLayers, serializeSettingValue, settingEnabled, updateUrlSettingOverrides} from './settings'
 import {centralLinkedH3, createInteractions} from './interactions'
 import {createRequestStatus} from './request-status'
 import {createRequestControls} from './request-controls'
@@ -2209,7 +2209,7 @@ function bootstrap(meta = {}){
         setLoadStage('Loading data')
 
         const fixedScale = fixedLegendScale(settings.legendBounds)
-        const doQuantiles = !!fixedScale || !settingEnabled(settings.raw, false)
+        const doQuantiles = !!fixedScale || colourScale(settings) !== 'raw'
         const trimFactor = settings.trimFactor === '' || settings.trimFactor == null ? 0.01 : settings.trimFactor
         const useCartogramQuantiles = cartogramEnabled && settings.quantileSource === 'cartogram'
 
@@ -2854,7 +2854,8 @@ function bootstrap(meta = {}){
             }
             history.replaceState(history.state, '', pageURL)
             lastQuery = query
-            const source = {url, ext: 'arrow', format: FORMATS.arrow, cacheBust: false, query, socket}
+            const source = {url, ext: 'arrow', format: FORMATS.arrow, cacheBust: false, socket,
+                query: {...query, index_lower: values.index_lower, index_upper: values.index_upper, _inputs: values._inputs}}
             const inputs = JSON.stringify(values._inputs)
             const reset = !socket || socket !== latestSocketSource?.socket || event !== 'onmove' || manual
                 || latestSocketSource?.query.event !== event || latestSocketSource?.manual
@@ -3681,8 +3682,8 @@ function bootstrap(meta = {}){
             if (values.length < Math.min(QUANTILE_SAMPLE_SIZE / 2, array.length)) reservoirSample()
         }
         if (!values.length) return [() => null, () => null, 0]
-        const linear = settingEnabled(settings.linear, false)
-        if (!linear && settingEnabled(settings.rankit, false)) return rankitScale(values, sampledWeights, trimFactor)
+        const linear = colourScale(settings) === 'linear'
+        if (colourScale(settings) === 'rankit') return rankitScale(values, sampledWeights, trimFactor)
         // Linear endpoints use the empirical inverse without its quantile-mode tail clamp.
         const finish = scale => linear
             ? [...fixedLegendScale([scale[1](trimFactor), scale[1](1 - trimFactor)]), values.length]

@@ -26,22 +26,28 @@ Retry and expandable error details beside the spinner.
 For a data file named `example.arrow`, H3-MON loads metadata from `www/data/example.json`. Query-string values override metadata values, so existing links such as `?data=example.arrow&flip&raw=false` continue to work and views configured in the settings panel can be shared directly.
 
 The cog opens compact groups of labelled controls. Optional explanations are behind
-`?`; Reset restores a field's default. Selects and toggles apply immediately. Text
-fields that only affect presentation use leading throttle-debounce. Settings that
-require a data or cartogram rebuild are staged until **Apply** is pressed; that button
-appears only when needed.
+`?`; the header and footer stay pinned while the fields scroll. Valid typed edits
+apply after a 350 ms trailing debounce, including data and cartogram rebuild settings.
+Selects and toggles apply immediately, except request controls, which debounce the
+whole valid request together for 350 ms. There is no Apply button or per-field reset.
+**Restore dataset defaults** clears all settings and request-control overrides,
+restoring metadata values (or built-in defaults where absent).
+
+Use the **Colour scale** selector in Values, `colourScale=quantile` in the URL, or
+`"colourScale": "quantile"` in metadata. The choices are `quantile` (default),
+`rankit`, `linear` and `raw`; raw expects values already scaled to 0..1.
 
 **Freeze legend** in Values captures the current legend's numeric minimum and maximum
 and switches both panes to a fixed **linear** scale, not a frozen quantile distribution.
 Bounds keep their full precision and persist through movement, data requests and shared
 URLs. Values outside the bounds use the endpoint colours; equal bounds put that value
-at the midpoint. Freezing overrides Raw values, linear, rankit, trim and quantile-source settings until
-**Unfreeze legend** restores automatic scaling (or raw 0..1 scaling if enabled).
+at the midpoint. Frozen bounds override the selected colour scale, trim and
+quantile-source settings until **Unfreeze legend** restores the selected mode.
 Freeze captures the currently published legend whenever it has valid numeric bounds,
 even while a new result is loading or rendering; it does not capture a scale still being
 calculated. New results rescale to the current viewport without requiring an extra map movement.
 
-**Linear colours** (`linear=1`, or `"linear": true` in metadata, default off) uses
+**Linear** (`colourScale=linear`, or `"colourScale": "linear"` in metadata) uses
 empirical percentile endpoints from the selected visible **Quantile source** in both
 panes. The existing **Trim fraction** selects the endpoints: `trimFactor=0.01`
 means the 1st and 99th percentiles; zero uses the minimum and maximum. Colours are
@@ -52,13 +58,18 @@ twice. Singleton/constant endpoints use the midpoint and missing values stay mis
 Bounds refresh after loads, viewport movement and query replay; Freeze legend captures
 the displayed percentile endpoints as fixed numeric bounds.
 
-Mode precedence is **frozen bounds > Raw values > Linear colours > Rankit colours >
-uniform quantiles**. Toggles remain independent; disabling a higher-priority mode
-restores the enabled mode below it.
+Legacy `raw`, `linear` and `rankit` booleans remain supported in URLs and metadata,
+but are hidden from the panel. Invalid `colourScale` values are ignored. A valid URL
+`colourScale` wins. Otherwise, any legacy
+URL flag (even `raw=false`) selects the legacy rules: merge metadata flags with URL
+overrides, then use **raw > linear > rankit > quantile**. Without legacy URL flags,
+a valid metadata `colourScale` wins; otherwise the metadata flags use the legacy rules.
+Changing the selector writes `colourScale` and removes legacy URL flags; unrelated
+edits preserve their spellings and meaning. Metadata is not rewritten.
 
-**Rankit colours** (`rankit=1`, default off) replaces uniform quantiles with normal
-scores in both panes, using the selected visible quantile source. Raw and linear modes ignore
-rankit. The existing finite-row sample is retained; ties use average ranks. With
+**Rankit** (`colourScale=rankit`) replaces uniform quantiles with normal
+scores in both panes, using the selected visible quantile source.
+The existing finite-row sample is retained; ties use average ranks. With
 weights, positive weights determine midpoint cumulative mass `m`, and the effective
 rank is `r = n*m + 1/2`, where `n` is the number of positive-weight sampled rows.
 This is invariant to weight units; zero-weight rows do not determine the scale,
@@ -77,10 +88,9 @@ so colours are less evenly distributed than the default quantiles.
 | `colourScheme` | Colour scheme | D3 interpolator name | Continuous D3 colour interpolator, such as `interpolateViridis`. |
 | `cyclical` | Cyclical colours | boolean | Uses Rainbow instead of Spectral when no explicit colour scheme is set. |
 | `flip` | Reverse colours | boolean | Reverses the colour scale. |
-| `raw` | Use raw values | boolean | Colours by source values instead of quantiles. |
-| `linear` | Linear colours | boolean, default false | Linear between empirical trim-percentile endpoints; ignored in raw or frozen mode. |
-| `rankit` | Rankit colours | boolean, default false | Blom normal-score ranks instead of uniform quantiles; ignored in linear, raw or frozen mode. |
-| `legendBounds` | Frozen legend bounds | JSON `[min,max]` or `null` | Fixed linear numeric bounds; `null` restores automatic scaling. |
+| `colourScale` | Colour scale | `quantile`, `rankit`, `linear` or `raw` | Selects the colour mapping; default `quantile`. |
+| `raw`, `linear`, `rankit` | Legacy colour modes | boolean, default false | URL/metadata compatibility only; prefer `colourScale`. See precedence above. |
+| `legendBounds` | Frozen legend bounds | JSON `[min,max]` or `null` | Fixed linear numeric bounds override the selected mode; `null` restores it. |
 | `trimFactor` | Legend trim factor | number from 0 to less than 0.5 | Trims quantile legends and selects linear percentile endpoints; default 0.01. |
 | `quantileSource` | Quantile source | `map` or `cartogram` | Chooses which visible values determine quantiles. |
 | `scale` | Scale labels | object or null | Maps numeric breakpoints to raw legend labels. |
@@ -90,7 +100,7 @@ so colours are less evenly distributed than the default quantiles.
 | `infill` | Infill empty cells | boolean | Allows the missing value to fill wholly unobserved cartogram cells. |
 | `requireCompleteCoverage` | Require complete coverage | boolean, default false | Leaves a cartogram cell null if any finite positive-weight contributor is missing; overrides `defaultValue` and `infill`. |
 
-Boolean URL values retain the existing accepted forms: bare parameters and most values enable a setting, while `0`, `false`, `off`, and `no` disable it. The settings panel writes explicit `1` or `0` values and preserves unrelated query parameters and the map-position hash.
+Boolean URL values retain the existing accepted forms: bare parameters and most values enable a setting, while `0`, `false`, `off`, and `no` disable it (case-insensitive, ignoring surrounding whitespace). The settings panel writes changed booleans as explicit `1` or `0` values and preserves unrelated query parameters and the map-position hash.
 
 **Require complete coverage** applies immediately from Settings, or can be enabled with
 `requireCompleteCoverage=1` in the URL or `"requireCompleteCoverage": true` in global
@@ -133,6 +143,16 @@ Before the first result, or if no city matches, the placeholder stays unchanged.
 Static map/cartogram clicks also resolve the title when no endpoint query is needed.
 Settings, metadata and shared URLs retain the template, never the substituted city;
 replay resolves it only after a successful result, and title edits use the displayed origin.
+
+Titles also support `{index}`, `{index_lower}`, `{index_upper}`, `{lat}`, `{lng}`,
+`{zoom}` and `{controls.<id>}` from the successfully displayed request. For example,
+`"t": "From {TOWN_NAME} at {controls.departure}"` displays `08:00` for a time input,
+even if its `encode` converter sends `8`. Controls use raw typed values before
+conversion or URL encoding; selects use option values, not labels. Pending or failed
+requests and later control edits do not change the displayed values. Unknown or
+unavailable placeholders stay unchanged, including controls before a query result
+or on static datasets. Substituted text is not expanded again. Shared URLs retain
+the title template and raw `p.<id>` inputs; successful replay resolves them again.
 
 JSON metadata can optionally define `onclick` and `onmove` objects. By default these
 issue **GET requests returning Arrow IPC files or streams**; an optional `socket`
@@ -219,7 +239,7 @@ query instead. The essential metadata shape is:
 ```json
 {
   "t": "Rail travel time (hours)",
-  "raw": false,
+  "colourScale": "quantile",
   "cartogram": "none",
   "controls": {
     "travelTime": {
@@ -264,7 +284,7 @@ The endpoint must allow CORS when served from another origin.
 The routing response must include `value` (elapsed hours for `metric=time`), plus string
 `index` or unsigned split indices; `elapsed_h` is displayed in the tooltip as an extra column.
 Keep Arrow IPC uncompressed and string columns non-dictionary-encoded for the installed
-reader. `raw: false` gives quantile colours with hour-valued legend labels; raw mode
+reader. `"colourScale": "quantile"` gives quantile colours with hour-valued legend labels; raw mode
 expects values already scaled to 0..1. Res5 routing merges stops within each cell and
 does not imply that every point inside a returned cell is reachable.
 

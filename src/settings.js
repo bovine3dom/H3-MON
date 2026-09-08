@@ -35,7 +35,7 @@ export const SETTINGS_SCHEMA = [
         group: 'General',
         type: 'text',
         defaultValue: '',
-        apply: 'throttle',
+        apply: 'debounce',
         refresh: 'render',
     },
     {
@@ -45,7 +45,7 @@ export const SETTINGS_SCHEMA = [
         group: 'General',
         type: 'text',
         defaultValue: '',
-        apply: 'throttle',
+        apply: 'debounce',
         refresh: 'render',
     },
     {
@@ -78,9 +78,25 @@ export const SETTINGS_SCHEMA = [
         refresh: 'render',
     },
     {
+        key: 'colourScale',
+        name: 'Colour scale',
+        description: 'Choose how values map to colours. Frozen legend bounds take precedence.',
+        group: 'Values',
+        type: 'select',
+        defaultValue: 'quantile',
+        options: [
+            {value: 'quantile', name: 'Quantile'},
+            {value: 'rankit', name: 'Rankit'},
+            {value: 'linear', name: 'Linear'},
+            {value: 'raw', name: 'Raw'},
+        ],
+        apply: 'immediate',
+        refresh: 'data',
+    },
+    {
         key: 'raw',
+        hidden: true,
         name: 'Raw values',
-        description: 'Use values directly on the 0..1 colour scale. Overrides Linear and Rankit colours; ignored with frozen legend bounds.',
         group: 'Values',
         type: 'boolean',
         defaultValue: false,
@@ -89,8 +105,8 @@ export const SETTINGS_SCHEMA = [
     },
     {
         key: 'linear',
+        hidden: true,
         name: 'Linear colours',
-        description: 'Spread colours linearly across the trimmed value range. Uses Trim fraction and Quantile source. Overrides Rankit; ignored with Raw values or frozen legend bounds.',
         group: 'Values',
         type: 'boolean',
         defaultValue: false,
@@ -99,8 +115,8 @@ export const SETTINGS_SCHEMA = [
     },
     {
         key: 'rankit',
+        hidden: true,
         name: 'Rankit colours',
-        description: 'Normal-score ranks give tails more colour space and compress the median. Ignored with Linear colours, Raw values or frozen legend bounds.',
         group: 'Values',
         type: 'boolean',
         defaultValue: false,
@@ -127,7 +143,7 @@ export const SETTINGS_SCHEMA = [
         min: 0,
         max: 0.499999,
         step: 0.001,
-        apply: 'staged',
+        apply: 'debounce',
         refresh: 'data',
     },
     {
@@ -151,7 +167,7 @@ export const SETTINGS_SCHEMA = [
         group: 'Values',
         type: 'scale',
         defaultValue: null,
-        apply: 'throttle',
+        apply: 'debounce',
         refresh: 'render',
     },
     {
@@ -181,7 +197,7 @@ export const SETTINGS_SCHEMA = [
         type: 'text',
         defaultValue: '',
         placeholder: 'cartogram_weights.arrow',
-        apply: 'staged',
+        apply: 'debounce',
         refresh: 'cartogram',
     },
     {
@@ -191,7 +207,7 @@ export const SETTINGS_SCHEMA = [
         group: 'Map and cartogram',
         type: 'nullableNumber',
         defaultValue: null,
-        apply: 'staged',
+        apply: 'debounce',
         refresh: 'data',
     },
     {
@@ -217,6 +233,18 @@ export const SETTINGS_SCHEMA = [
 ]
 
 export const SETTINGS_BY_KEY = new Map(SETTINGS_SCHEMA.map(setting => [setting.key, setting]))
+
+const LEGACY_COLOUR_SCALES = ['raw', 'linear', 'rankit']
+
+export function colourScale(settings = {}, overrides = {}) {
+    const valid = value => SETTINGS_BY_KEY.get('colourScale').options.some(option => option.value === value)
+    if (valid(overrides.colourScale)) return overrides.colourScale
+    // A legacy query flag selects the legacy rules, even when it disables a mode.
+    const legacyQuery = LEGACY_COLOUR_SCALES.some(key => Object.prototype.hasOwnProperty.call(overrides, key))
+    if (!legacyQuery && valid(settings.colourScale)) return settings.colourScale
+    const merged = {...settings, ...overrides}
+    return LEGACY_COLOUR_SCALES.find(key => settingEnabled(merged[key])) || 'quantile'
+}
 
 function parseNumber(value) {
     if (typeof value === 'number') return value
@@ -267,16 +295,18 @@ export function readSettingLayers(metadata = {}, searchParams = new URLSearchPar
     return {
         metadata: {...metadata},
         overrides,
-        settings: {...metadata, ...query, ...overrides},
+        settings: {...metadata, ...query, ...overrides, colourScale: colourScale(metadata, {...query, ...overrides})},
     }
 }
 
 export function inheritedSettingValue(metadata, setting) {
+    if (setting.key === 'colourScale') return colourScale(metadata)
     if (Object.prototype.hasOwnProperty.call(metadata, setting.key)) return parseSettingValue(setting, metadata[setting.key])
     return setting.defaultValue
 }
 
 export function effectiveSettingValue(metadata, overrides, setting) {
+    if (setting.key === 'colourScale') return colourScale(metadata, overrides)
     if (Object.prototype.hasOwnProperty.call(overrides, setting.key)) return overrides[setting.key]
     return inheritedSettingValue(metadata, setting)
 }
@@ -327,11 +357,18 @@ export function settingValuesEqual(left, right) {
 }
 
 export function updateUrlSettingOverrides(url, overrides, schema = SETTINGS_SCHEMA) {
-    for (const setting of schema) {
-        url.searchParams.delete(setting.key)
-        if (Object.prototype.hasOwnProperty.call(overrides, setting.key)) {
-            url.searchParams.set(setting.key, serializeSettingValue(setting, overrides[setting.key]))
+    // Selector edits remove aliases from the draft, including with a subset schema.
+    if (schema.some(setting => setting.key === 'colourScale')) {
+        for (const key of LEGACY_COLOUR_SCALES) {
+            if (!Object.prototype.hasOwnProperty.call(overrides, key)) url.searchParams.delete(key)
         }
+    }
+    for (const setting of schema) {
+        if (Object.prototype.hasOwnProperty.call(overrides, setting.key)) {
+            if (!url.searchParams.has(setting.key) || !settingValuesEqual(parseSettingValue(setting, url.searchParams.get(setting.key)), overrides[setting.key])) {
+                url.searchParams.set(setting.key, serializeSettingValue(setting, overrides[setting.key]))
+            }
+        } else url.searchParams.delete(setting.key)
     }
     return url
 }
