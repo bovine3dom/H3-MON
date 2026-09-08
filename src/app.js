@@ -2900,7 +2900,7 @@ function bootstrap(meta = {}){
     let displayedSelection = null
     async function restoreSelection(query) {
         displayedSelection = query
-        if ((queryTitle(settings.t, query, findClosestCity) || DEFAULT_DOCUMENT_TITLE) !== document.title) await refreshLegend()
+        if ((queryTitle(settings.t, query, findClosestCity, requestControls.schema) || DEFAULT_DOCUMENT_TITLE) !== document.title) await refreshLegend()
         if (query?.event !== 'onclick' || metadataSettings.onclick?.highlight === false) {
             hex([])
             cartogramApi?.highlightCells([])
@@ -3320,30 +3320,35 @@ function bootstrap(meta = {}){
     }
 
     async function renderLegend(fmt) {
-        const title = queryTitle(settings.t, displayedSelection, findClosestCity)
+        const title = queryTitle(settings.t, displayedSelection, findClosestCity, requestControls.schema)
         document.title = title || DEFAULT_DOCUMENT_TITLE
+        const options = {color: colourRamp, marginTop: 0, height: 32}
+        let legend
         try {
             if (fmt !== undefined) {
-                const legend = observablehq.legend({color: colourRamp, title, tickFormat: v => {
+                legend = observablehq.legend({...options, tickFormat: v => {
                     const value = fmt(v)
                     return Number.isFinite(value) ? parseFloat(value.toPrecision(2)).toLocaleString() : ''
                 }})
-                replaceLegend(legend)
             } else {
-                const legend_options = {color: colourRamp, title}
                 if (settings.scale) {
                     const fmt = v => settings['scale'][Object.keys(settings['scale']).map(x => [x, Math.abs(x - v)]).sort((l,r)=>l[1] - r[1])[0][0]]
                     window.fmt = fmt
-                    legend_options.tickFormat = fmt
+                    options.tickFormat = fmt
                 }
-                const legend = observablehq.legend(legend_options)
-                replaceLegend(legend)
+                legend = observablehq.legend(options)
             }
         } catch(e) {
             console.warn(e)
-            const legend = observablehq.legend({color: colourRamp, title})
-            replaceLegend(legend)
+            legend = observablehq.legend({...options, tickFormat: undefined})
         }
+        legend.querySelector('.title')?.remove()
+        const entry = document.createElement('div')
+        const heading = document.createElement('div')
+        heading.className = 'title'
+        heading.textContent = title || ''
+        entry.append(heading, legend)
+        replaceLegend(entry)
     }
 
     function makeLegend(fmt) {
@@ -3391,7 +3396,7 @@ function bootstrap(meta = {}){
         infill = settingEnabled(settings.infill, false)
         requireCompleteCoverage = settingEnabled(settings.requireCompleteCoverage, false)
         showTrains = settingEnabled(settings.trains, false)
-        document.title = queryTitle(settings.t, displayedSelection, findClosestCity) || DEFAULT_DOCUMENT_TITLE
+        document.title = queryTitle(settings.t, displayedSelection, findClosestCity, requestControls.schema) || DEFAULT_DOCUMENT_TITLE
         if (changedKeys.has('colourScheme') || changedKeys.has('cyclical') || changedKeys.has('flip')) rebuildColourRamp()
         if (changedKeys.has('cartogram')) resetCartogramState()
         updateAttribution()

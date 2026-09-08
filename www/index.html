@@ -164,13 +164,27 @@ body.pane-full #map {
     text-align: right;
     font-size: 8pt;
     border-radius: 0px;
-    max-width: 350px;
+    width: 320px;
+    max-width: calc(100% - 3em);
+    overflow-wrap: anywhere;
 }
 #observable_legend {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
 }
-#observable_legend > svg {
+#observable_legend > div {
     grid-area: 1 / 1;
+    min-width: 0;
+}
+#observable_legend .title {
+    font: bold 10px/1.3 sans-serif;
+    text-align: left;
+    padding-bottom: 5px;
+}
+#observable_legend .title:empty { display: none; }
+#observable_legend svg {
+    width: 100%;
+    height: auto;
 }
 #search-container {
     position: absolute;

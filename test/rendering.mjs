@@ -634,7 +634,7 @@ try {
             await coverageTooltip(0, 0.6);
             console.log(`${device}: complete coverage recomputation, colour modes, shared URL/reload and reset passed`);
 
-            assert.equal(await page.getByRole('button', {name: 'Restore dataset defaults', exact: true}).count(), 1);
+            assert.equal(await page.getByRole('button', {name: 'Reset', exact: true}).count(), 1);
             assert.equal(await page.getByRole('button', {name: /^(Apply|Reset )/}).count(), 0);
             for (const size of [{width, height}, {width: height, height: width}]) {
                 await page.setViewportSize(size);
@@ -1138,7 +1138,7 @@ try {
             // The same result-title lifecycle must use raw controls on HTTP and socket transports.
             for (const transport of ['http', 'socket']) {
                 const pending = [];
-                const note = '{controls.time}/{index}/{TOWN_NAME}';
+                const note = `${transport === 'http' ? 'An ordinary long place name with many words '.repeat(3).trim() : 'N'.repeat(150)} <b>literal</b> {controls.time}/{index}/{TOWN_NAME}`;
                 const template = 'From {TOWN_NAME} | {controls.time} min at {controls.departure} | {index}/{index_lower}/{index_upper} | {lat},{lng}@{zoom} | {controls.note} | {unknown} {controls.missing}';
                 const controls = {
                     time: {label: 'Travel time', type: 'number', default: 360, min: 0, encode: 'value => value * 60'},
@@ -1181,6 +1181,25 @@ try {
                 const checkTitle = async expected => {
                     assert.equal(await page.title(), expected, `${transport}: title uses the displayed query's raw inputs and builtins`);
                     assert.equal(await page.locator('#observable_legend > :last-child .title').textContent(), expected);
+                    await page.waitForFunction(() => document.querySelector('#observable_legend').childElementCount === 1);
+                    const geometry = await page.locator('#observable_legend > :last-child').evaluate(entry => {
+                        const title = entry.querySelector('div.title'), svg = entry.querySelector('svg');
+                        const range = document.createRange();
+                        range.selectNodeContents(title);
+                        const lines = [...range.getClientRects()];
+                        return {lines: new Set(lines.map(rect => rect.top)).size, widths: lines.map(rect => rect.width),
+                            bounds: [entry, title, svg, document.querySelector('#attribution')]
+                                .map(element => element.getBoundingClientRect().toJSON()).concat(lines.map(rect => rect.toJSON())),
+                            titleBottom: title.getBoundingClientRect().bottom, barTop: svg.getBoundingClientRect().top,
+                            markup: title.childElementCount, svgTitles: svg.querySelectorAll('.title').length};
+                    });
+                    assert(geometry.lines >= 2, `${transport}: long title wraps onto multiple lines`);
+                    assert(geometry.bounds.every(rect => rect.width > 0 && rect.left >= -1 && rect.right <= page.viewportSize().width + 1),
+                        `${transport}: title text, entry, bar and attribution stay horizontally on screen`);
+                    assert(geometry.barTop >= geometry.titleBottom, `${transport}: bar stays below the title without overlap`);
+                    assert.equal(geometry.markup, 0, 'HTML and braces remain literal title text');
+                    assert.equal(geometry.svgTitles, 0, 'SVG must not duplicate the HTML title');
+                    return geometry.widths;
                 };
                 await page.goto('about:blank');
                 await page.goto(`${origin}/?data=socket.csv#x=${center[0]}&y=${center[1]}&z=7`);
@@ -1189,9 +1208,30 @@ try {
                 await clickCell();
                 const first = await receivedTitle(1, 360, '08:00');
                 await checkTitle(template);
+                const previousEntry = await page.locator('#observable_legend > :last-child').elementHandle();
                 await first.respond(10);
                 await displayed(10);
                 await checkTitle(first.title);
+                assert.equal(await previousEntry.evaluate(entry => entry.isConnected), false, 'Transition replaces the whole legend entry');
+                await previousEntry.dispose();
+                const resizeRequests = [], lineWidths = [];
+                const recordResize = request => resizeRequests.push(request.url());
+                const originalSize = page.viewportSize();
+                page.on('request', recordResize);
+                try {
+                    for (const width of [1200, 375, 320, 1200]) {
+                        await page.setViewportSize({width, height: originalSize.height});
+                        await settle(page);
+                        lineWidths.push(await checkTitle(first.title));
+                    }
+                    assert.notDeepEqual(lineWidths[2], lineWidths[0], 'Narrow viewport naturally changes title wrapping');
+                    assert.deepEqual(lineWidths[3], lineWidths[0], 'Widening restores the original wrapping');
+                    assert.deepEqual(resizeRequests, [], 'Legend resize needs no HTTP requests');
+                    assert.equal(pending.length, 1, 'Legend resize needs no socket queries');
+                } finally {
+                    page.off('request', recordResize);
+                    await page.setViewportSize(originalSize);
+                }
                 await page.locator('#settingsBtn').click();
                 const time = page.getByRole('spinbutton', {name: 'Travel time', exact: true});
                 const departure = page.getByLabel('Departure', {exact: true});

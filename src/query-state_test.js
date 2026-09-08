@@ -36,9 +36,27 @@ Deno.test('query titles use raw controls, not encoded request values, without ex
     assert(encoded['controls.departure'] === '8' && encoded['controls.duration'] === '21600')
     const displayed = {...encoded, lat: 0, lng: 0, _inputs: controls.values()}
     const template = '{controls.departure}|{controls.duration}|{controls.mode}|{controls.enabled}|{controls.zero}|{controls.empty}|{controls.text}|{TOWN_NAME}'
-    assert(queryTitle(template, displayed, () => ({name: 'City {controls.duration}'})) ===
-        '08:00|360|rail|false|0||$& / <rail> ?&= {controls.departure} {TOWN_NAME}|City {controls.duration}')
+    assert(queryTitle(template, displayed, () => ({name: 'City {controls.duration}'}), controls.schema) ===
+        '08:00|360|Train|false|0||$& / <rail> ?&= {controls.departure} {TOWN_NAME}|City {controls.duration}')
     assert(displayed._inputs.departure === '08:00' && template.includes('{controls.departure}'))
+})
+
+Deno.test('select titles use displayed option labels without changing request or saved values', () => {
+    const controls = createRequestControls({mode: {
+        label: 'Mode', type: 'select', default: 'min_union', encode: 'value => value.toUpperCase()',
+        options: [{value: 'min_union', label: 'Best-case $& {controls.mode}'},
+            {value: 'mean_intersection', label: 'Average travel time'}],
+    }})
+    const query = {_inputs: controls.values()}
+    const title = () => queryTitle('{controls.mode}', query, null, controls.schema)
+    assert(title() === 'Best-case $& {controls.mode}')
+    assert(controls.encode()['controls.mode'] === 'MIN_UNION' && query._inputs.mode === 'min_union')
+    query._inputs = controls.values({'p.mode': 'mean_intersection'})
+    assert(title() === 'Average travel time')
+    query._inputs = {mode: 'removed-option'}
+    assert(title() === 'removed-option')
+    query._inputs = {}
+    assert(title() === '{controls.mode}')
 })
 
 Deno.test('query titles resolve available query scalars and preserve unknown or unavailable tokens', () => {

@@ -148,7 +148,7 @@ Titles also support `{index}`, `{index_lower}`, `{index_upper}`, `{lat}`, `{lng}
 `{zoom}` and `{controls.<id>}` from the successfully displayed request. For example,
 `"t": "From {TOWN_NAME} at {controls.departure}"` displays `08:00` for a time input,
 even if its `encode` converter sends `8`. Controls use raw typed values before
-conversion or URL encoding; selects use option values, not labels. Pending or failed
+conversion or URL encoding; selects use the selected option's label instead of its value. Pending or failed
 requests and later control edits do not change the displayed values. Unknown or
 unavailable placeholders stay unchanged, including controls before a query result
 or on static datasets. Substituted text is not expanded again. Shared URLs retain
