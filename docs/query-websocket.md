@@ -13,14 +13,14 @@ Metadata `onclick` and `onmove` hooks require `url` and optionally accept `socke
 {
   "onclick": {
     "socket": "wss://api.example.com/query",
-    "url": "/reachable?index={index}&budget_s=10800&encoding=split",
+    "url": "/reachable?index={index}&departure_h=8&budget_h=3&encoding=split",
     "resolution": 5,
     "focus": false,
     "highlight": true
   },
   "onmove": {
     "socket": "wss://api.example.com/query",
-    "url": "/reachable?index={index}&budget_s=10800&encoding=split",
+    "url": "/reachable?index={index}&departure_h=8&budget_h=3&encoding=split",
     "resolution": 5,
     "wait": 0
   }
@@ -56,7 +56,7 @@ its `ping` and `watch:` messages do not belong here.
 Each request is one WebSocket **text message** containing JSON:
 
 ```json
-{"type":"query","id":42,"url":"/reachable?index=851fb467fffffff&budget_s=10800&encoding=split"}
+{"type":"query","id":42,"url":"/reachable?index=851fb467fffffff&departure_h=8&budget_h=3&encoding=split"}
 ```
 
 `id` is a nonzero unsigned 32-bit integer (`1` through `4294967295`), represented as

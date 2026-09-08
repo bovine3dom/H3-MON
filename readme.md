@@ -207,34 +207,37 @@ query instead. The essential metadata shape is:
 
 ```json
 {
-  "t": "Rail travel time (minutes)",
+  "t": "Rail travel time (hours)",
   "raw": false,
   "cartogram": "none",
   "controls": {
     "travelTime": {
       "label": "Travel time",
       "type": "number",
-      "unit": "min",
-      "default": 180,
+      "unit": "h",
+      "default": 3,
       "min": 0,
-      "max": 10080,
-      "encode": "value => Math.round(value * 60)"
+      "max": 168,
+      "step": 0.25
     },
     "departure": {
       "label": "Departure",
-      "type": "time",
-      "default": "08:00",
-      "encode": "value => value.length === 5 ? value + ':00' : value"
+      "type": "number",
+      "unit": "h",
+      "default": 8,
+      "min": 0,
+      "max": 23.9999997,
+      "step": 0.25
     }
   },
   "onclick": {
-    "url": "http://127.0.0.1:1988/reachable?index={index}&departure={controls.departure}&budget_s={controls.travelTime}&encoding=split",
+    "url": "http://127.0.0.1:1988/reachable?index={index}&departure_h={controls.departure}&budget_h={controls.travelTime}&encoding=split",
     "resolution": 5,
     "focus": false,
     "highlight": true
   },
   "onmove": {
-    "url": "http://127.0.0.1:1988/reachable?index={index}&departure={controls.departure}&budget_s={controls.travelTime}&encoding=split",
+    "url": "http://127.0.0.1:1988/reachable?index={index}&departure_h={controls.departure}&budget_h={controls.travelTime}&encoding=split",
     "resolution": 5,
     "wait": 350
   }
@@ -247,12 +250,21 @@ the **browser's machine**: replace it with your reachable backend hostname or us
 port forward when browsing remotely. HTTPS pages require an HTTPS endpoint or proxy.
 The endpoint must allow CORS when served from another origin.
 
-The routing response must include `value` (elapsed minutes), plus string `index` or
-unsigned split indices; `elapsed_ms` is displayed in the tooltip as an extra column.
+The routing response must include `value` (elapsed hours for `metric=time`), plus string
+`index` or unsigned split indices; `elapsed_h` is displayed in the tooltip as an extra column.
 Keep Arrow IPC uncompressed and string columns non-dictionary-encoded for the installed
-reader. `raw: false` gives quantile colours with minute-valued legend labels; raw mode
+reader. `raw: false` gives quantile colours with hour-valued legend labels; raw mode
 expects values already scaled to 0..1. Res5 routing merges stops within each cell and
 does not imply that every point inside a returned cell is reachable.
+
+The router's breaking hour-based API uses `departure_h`, `budget_h`, `window_h`,
+`step_h` and `max_walk_h`, without clock-string or seconds aliases. Numeric controls
+send hours directly; old saved minute-valued control overrides must be replaced.
+Window responses include only cells reachable from **every** sampled departure,
+filtered before distance/time ranks. `reachable_elapsed_h` is also hours;
+`distance_km` remains kilometres, and quantiles and coverage fractions are dimensionless.
+For `metric=distance_time_quantile`, `value` and its legend are rank differences,
+not travel hours. Set the title accordingly when selecting that metric.
 
 ## Request controls and shared links
 

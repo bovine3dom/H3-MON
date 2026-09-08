@@ -1,5 +1,5 @@
 {
-  "t": "Rail travel time from {TOWN_NAME} (minutes)",
+  "t": "Rail travel time from {TOWN_NAME} (hours)",
   "raw": false,
   "trimFactor": 0,
   "quantileSource": "map",
@@ -11,32 +11,34 @@
     "travelTime": {
       "label": "Travel time",
       "type": "number",
-      "unit": "min",
-      "default": 10080,
+      "unit": "h",
+      "default": 168,
       "min": 0,
-      "max": 10080,
-      "step": 15,
-      "encode": "value => Math.round(value * 60)"
+      "max": 168,
+      "step": 0.25
     },
     "departure": {
       "label": "Departure",
-      "type": "time",
-      "default": "00:00",
-      "encode": "value => value.length === 5 ? value + ':00' : value"
+      "type": "number",
+      "unit": "h",
+      "default": 0,
+      "min": 0,
+      "max": 23.9999997,
+      "step": 0.25
     }
   },
   "onclick": {
-    "_old_url": "http://127.0.0.1:1988/reachable?index={index}&departure={controls.departure}&budget_s={controls.travelTime}&encoding=split&max_walk_s=3600",
-    "url": "http://127.0.0.1:1988/reachable?index={index}&departure={controls.departure}&budget_s={controls.travelTime}&window_s=86400&step_s=900&encoding=split&metric=distance_time_quantile&max_walk_s=3600&distance_mode=straight_line",
-    "_no_walk_url": "http://127.0.0.1:1988/reachable?index={index}&departure={controls.departure}&budget_s={controls.travelTime}&window_s=86400&step_s=900&encoding=split&metric=distance_time_quantile&max_walk_s=0",
-    "resolution": 5,
+    "_old_url": "http://127.0.0.1:1988/reachable?index={index}&departure_h={controls.departure}&budget_h={controls.travelTime}&encoding=split&max_walk_h=1",
+    "url": "http://127.0.0.1:1988/reachable?index={index}&departure_h={controls.departure}&budget_h={controls.travelTime}&window_h=24&step_h=0.25&encoding=split&metric=distance_time_quantile&max_walk_h=1&distance_mode=straight_line",
+    "_no_walk_url": "http://127.0.0.1:1988/reachable?index={index}&departure_h={controls.departure}&budget_h={controls.travelTime}&window_h=24&step_h=0.25&encoding=split&metric=distance_time_quantile&max_walk_h=0",
+    "resolution": 7,
     "focus": false,
     "highlight": true
   },
   "onmove": {
     "socket": "ws://127.0.0.1:1988/query",
-    "url": "/reachable?index={index}&departure={controls.departure}&window_s=86400&step_s=900&budget_s=10800&encoding=split&max_walk_s=3600&distance_mode=straight_line",
-    "resolution": 5,
+    "url": "/reachable?index={index}&departure_h=8&window_h=16&step_h=0.25&budget_h=6&encoding=split&max_walk_h=1&distance_mode=straight_line",
+    "resolution": 7,
     "wait": 0,
     "_comment": "documented in docs/query-websocket.md"
   }

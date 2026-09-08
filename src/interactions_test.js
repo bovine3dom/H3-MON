@@ -40,11 +40,11 @@ Deno.test('focus and highlight default independently and leave requests and repl
 
 Deno.test('explicit replay uses metadata, carries context, and can deduplicate parameter edits', async () => {
     const calls = []
-    const metadata = {onmove: {url: '/reachable?index={index}&budget_s={controls.time}'}}
-    let minutes = 180
+    const metadata = {onmove: {url: '/reachable?index={index}&budget_h={controls.time}'}}
+    let hours = 3
     const interactions = createInteractions({
         getSettings: () => ({onmove: false}), getReplaySettings: () => metadata,
-        getValues: (_config, point) => ({index: point.index, 'controls.time': String(minutes * 60)}),
+        getValues: (_config, point) => ({index: point.index, 'controls.time': String(hours)}),
         request: async (url, context) => { calls.push({url, context}); return true },
         baseURL: 'https://example.test',
     })
@@ -57,9 +57,9 @@ Deno.test('explicit replay uses metadata, carries context, and can deduplicate p
     assert(calls[0].context.point.lat === 48.8)
     await interactions.replay('onmove', point, {force: false})
     assert(calls.length === 1)
-    minutes = 360
+    hours = 6.25
     await interactions.replay('onmove', point, {force: false})
-    assert(calls.length === 2 && new URL(calls[1].url).searchParams.get('budget_s') === '21600')
+    assert(calls.length === 2 && new URL(calls[1].url).searchParams.get('budget_h') === '6.25')
     await interactions.retry()
     assert(calls.length === 3)
     interactions.cancel()

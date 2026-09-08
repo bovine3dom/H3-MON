@@ -1,5 +1,6 @@
 import {createRequestControls} from './request-controls.js'
 import {readSettingLayers} from './settings.js'
+import reachable from '../www/data/reachable.json' with {type: 'json'}
 
 function assert(condition, message = 'Assertion failed') {
     if (!condition) throw new Error(message)
@@ -19,6 +20,29 @@ const definitions = {
     travelTime: {label: 'Travel time', type: 'number', default: 180, unit: 'min', min: 0, max: 10080, step: 15, encode: 'value => value * 60'},
     departure: {label: 'Departure', type: 'time', default: '08:00', encode: 'value => value.length === 5 ? value + ":00" : value'},
 }
+
+Deno.test('reachable metadata sends floating hours in every active and inactive URL', () => {
+    const controls = createRequestControls(reachable.controls)
+    assert(controls.values().travelTime === 168 && controls.values().departure === 0)
+    assert(controls.schema.every(field => field.type === 'number' && field.name.endsWith('(h)')))
+    const layers = readSettingLayers({}, new URLSearchParams('p.travelTime=0.25&p.departure=23.5'))
+    const tokens = {...controls.encode(layers.settings), index: '871fb4662ffffff'}
+    for (const hook of [reachable.onclick, reachable.onmove]) {
+        for (const [name, template] of Object.entries(hook)) {
+            if (!name.endsWith('url')) continue
+            const url = new URL(template.replace(/\{([^}]+)\}/g, (_, key) => tokens[key]), 'http://127.0.0.1:1988')
+            const params = url.searchParams
+            assert(!url.href.includes('undefined') && !url.href.includes('{'))
+            assert(params.get('departure_h') === '23.5')
+            assert(params.get('budget_h') === (hook === reachable.onmove ? '3' : '0.25'))
+            assert(!['departure', 'budget_s', 'window_s', 'step_s', 'max_walk_s'].some(key => params.has(key)))
+            assert(['0', '1'].includes(params.get('max_walk_h')))
+            if (params.has('window_h')) assert(params.get('window_h') === '24' && params.get('step_h') === '0.25')
+        }
+    }
+    for (const value of ['08:00', 24, -1, NaN, Infinity]) assertThrows(() => controls.encode({'p.departure': value}), 'departure')
+    assert(controls.encode({'p.travelTime': '2.5e-1'})['controls.travelTime'] === '0.25')
+})
 
 Deno.test('trusted metadata produces panel schema and raw defaults separately from encoded tokens', () => {
     const controls = createRequestControls(definitions)
