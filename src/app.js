@@ -21,8 +21,10 @@ import {createQuerySocket} from './query-socket'
 import {readQueryState, writeQueryState} from './query-state'
 import {rankitScale} from './rankit'
 import {queryTitle} from './query-title'
+import {createURLState} from './url-state'
 
 const params = new URLSearchParams(window.location.search)
+const urlState = createURLState(window)
 const DEFAULT_DOCUMENT_TITLE = document.title
 
 function flagEnabled(name) {
@@ -2788,11 +2790,11 @@ function bootstrap(meta = {}){
         request: (url, {event, point, values, socket, manual}) => {
             const query = {event, index: values.index, lat: values.lat, lng: values.lng, zoom: values.zoom}
             if (point.cartogram) query.cartogram = point.cartogram
-            const pageURL = writeQueryState(new URL(window.location.href), query)
+            const pageURL = writeQueryState(urlState.read(), query)
             for (const setting of requestControls.schema) {
                 pageURL.searchParams.set(setting.key, serializeSettingValue(setting, values._inputs[setting.key.slice(2)]))
             }
-            history.replaceState(history.state, '', pageURL)
+            urlState.replace(pageURL)
             lastQuery = query
             const source = {url, ext: 'arrow', format: FORMATS.arrow, cacheBust: false, socket,
                 query: {...query, index_lower: values.index_lower, index_upper: values.index_upper, _inputs: values._inputs}}
@@ -3350,7 +3352,7 @@ function bootstrap(meta = {}){
     let settingsApplication = Promise.resolve()
     function applySettingOverrides(nextOverrides, changedSettings) {
         if (changedSettings.every(setting => setting.refresh === 'request')) {
-            const url = updateUrlSettingOverrides(new URL(window.location.href), nextOverrides, changedSettings)
+            const url = updateUrlSettingOverrides(urlState.read(), nextOverrides, changedSettings)
             const nextLayers = readSettingLayers(metadataSettings, url.searchParams, settingSchema)
             const inputs = requestControls.values(nextLayers.settings)
             // Preserve default inputs even when Reset produces a deduplicated request.
@@ -3358,7 +3360,7 @@ function bootstrap(meta = {}){
                 url.searchParams.set(setting.key, serializeSettingValue(setting, inputs[setting.key.slice(2)]))
             }
             settingOverrides = nextLayers.overrides
-            history.replaceState(history.state, '', url)
+            urlState.replace(url)
             activateSettings(nextLayers.settings, new Set(changedSettings.map(setting => setting.key)))
             return repeatQuery({force: false}).then(success => {
                 if (!success) throw requestError || new Error('Request failed')
@@ -3366,11 +3368,11 @@ function bootstrap(meta = {}){
         }
         const apply = async () => {
             if (updatePromise) await updatePromise
-            const url = updateUrlSettingOverrides(new URL(window.location.href), nextOverrides, changedSettings)
+            const url = updateUrlSettingOverrides(urlState.read(), nextOverrides, changedSettings)
             const nextLayers = readSettingLayers(metadataSettings, url.searchParams, settingSchema)
             const changedKeys = new Set(changedSettings.map(setting => setting.key))
             settingOverrides = nextLayers.overrides
-            history.replaceState(history.state, '', url)
+            urlState.replace(url)
             activateSettings(nextLayers.settings, changedKeys)
 
             const refreshes = new Set(changedSettings.map(setting => setting.refresh))
@@ -3511,7 +3513,9 @@ function bootstrap(meta = {}){
         if (event.keyboardMoving) return
         const pos = map.getCenter()
         const z = map.getZoom()
-        history.replaceState(null, '', `#x=${pos.lng.toFixed(4)}&y=${pos.lat.toFixed(4)}&z=${z.toFixed(4)}&b=${map.getBearing().toFixed(4)}&p=${map.getPitch().toFixed(4)}`)
+        const url = urlState.read()
+        url.hash = `x=${pos.lng.toFixed(4)}&y=${pos.lat.toFixed(4)}&z=${z.toFixed(4)}&b=${map.getBearing().toFixed(4)}&p=${map.getPitch().toFixed(4)}`
+        urlState.replace(url)
         syncLog('map.moveend', {
             originalEventType: original ? original.type : null,
             originalInMap,

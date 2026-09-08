@@ -1,6 +1,7 @@
 import {readQueryState, writeQueryState} from './query-state.js'
 import {queryTitle} from './query-title.js'
 import {createRequestControls} from './request-controls.js'
+import {createURLState} from './url-state.js'
 
 function assert(condition, message = 'Assertion failed') {
     if (!condition) throw new Error(message)
@@ -28,6 +29,52 @@ Deno.test('titles use raw inputs and select labels, preserving unknown tokens an
 })
 
 const query = {event: 'onclick', index: '851fb467fffffff', lat: 48.8, lng: 2.4, zoom: 6, cartogram: [3, 7]}
+
+Deno.test('URL writes throttle without starvation, merge pending edits and cancel on navigation', () => {
+    let now = 0, id = 0
+    const timers = new Map(), events = {}, writes = []
+    const browser = {location: {href: 'https://example.test/?data=sample.csv#x=1'}, performance: {now: () => now},
+        setTimeout: (fn, delay) => { timers.set(++id, {fn, at: now + delay}); return id },
+        clearTimeout: id => timers.delete(id), addEventListener: (name, fn) => { events[name] = fn },
+        history: {state: {}, replaceState: (value, title, href) => {
+            assert(value === browser.history.state, 'Preserve history.state identity')
+            writes.push([now, href]); browser.location.href = href
+        }}}
+    const tick = end => {
+        while ([...timers.values()].some(timer => timer.at <= end)) {
+            const [id, timer] = [...timers].sort((a, b) => a[1].at - b[1].at)[0]
+            now = timer.at; timers.delete(id); timer.fn()
+        }
+        now = end
+    }
+    const urls = createURLState(browser, 150)
+    const edit = fn => { const url = urls.read(); fn(url); urls.replace(url) }
+    for (let i = 0; i < 35; i++) {
+        tick(i * 10)
+        edit(url => writeQueryState(url, {...query, lat: i}))
+        edit(url => url.searchParams.set('p.time', String(i)))
+        edit(url => url.searchParams.set('colourScale', 'rankit'))
+        edit(url => { url.hash = `x=${i}` })
+        assert(readQueryState(urls.read().searchParams).lat === i, 'Read latest pending snapshot')
+    }
+    assert(JSON.stringify(writes.map(([time]) => time)) === '[0,150,300]', 'Immediate and intermediate writes')
+    tick(449); assert(writes.length === 3, 'Trailing write waits for 450ms'); tick(450)
+    assert(JSON.stringify(writes.map(([, href]) => readQueryState(new URL(href).searchParams).lat)) === '[0,14,29,34]')
+    const final = urls.read()
+    assert(final.searchParams.get('p.time') === '34' && final.searchParams.get('colourScale') === 'rankit')
+    assert(final.searchParams.get('data') === 'sample.csv' && final.hash === '#x=34')
+    urls.replace(final); tick(600); assert(writes.length === 4, 'Skip unchanged URLs')
+    for (const event of ['read', 'timer', 'popstate', 'hashchange', 'pagehide']) {
+        edit(url => url.searchParams.set('prime', event))
+        edit(url => url.searchParams.set('stale', '1'))
+        browser.history.state = {event}
+        if (event !== 'pagehide') browser.location.href = `https://example.test/?navigation=${event}#new`
+        const destination = browser.location.href, count = writes.length
+        if (event === 'read') assert(urls.read().href === destination); else events[event]?.()
+        tick(now + 150)
+        assert(writes.length === count && browser.location.href === destination && timers.size === 0, event)
+    }
+})
 
 Deno.test('saved queries round-trip without replacing controls, data or camera', () => {
     const url = new URL('https://example.test/?data=sample.csv&p.time=360&onmove=false#x=1')

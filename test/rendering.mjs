@@ -423,6 +423,15 @@ try {
             await displayed(page, 50);
             await page.locator('#settingsBtn').click();
             streaming = true;
+            const trafficStart = queries.length;
+            await page.evaluate(() => {
+                window.historyWrites = [];
+                const replace = history.replaceState;
+                history.replaceState = function (...args) {
+                    window.historyWrites.push(performance.now());
+                    return replace.apply(this, args);
+                };
+            });
             await page.evaluate(move, true);
             try {
                 await page.getByRole('spinbutton', {name: 'Travel time', exact: true}).fill('3');
@@ -433,10 +442,20 @@ try {
                 await page.waitForFunction(() => new URL(location.href).searchParams.get('colourScale') === 'rankit'
                     && Math.abs(window._columnData?.quantile?.[0] - 0.5) < 1e-6);
                 assert(queries.length > 9, 'Settings finish while multiple results arrive');
+                await page.waitForFunction(() => window.historyWrites.length >= 3);
             } finally {
                 await page.evaluate(() => clearInterval(window.traffic));
                 streaming = false;
             }
+            await page.waitForFunction(lng => {
+                const url = new URL(location.href), query = JSON.parse(url.searchParams.get('query'));
+                return query?.lng === Number(lng) && url.searchParams.get('p.time') === '3'
+                    && url.searchParams.get('colourScale') === 'rankit'
+                    && Math.abs(Number(new URLSearchParams(url.hash.slice(1)).get('x')) - Number(lng)) < 0.000051;
+            }, new URL(queries.at(-1).url, origin).searchParams.get('lng'));
+            const historyWrites = await page.evaluate(() => window.historyWrites);
+            assert(historyWrites.every((time, i) => !i || time - historyWrites[i - 1] >= 149), 'Shared history throttle');
+            assert(queries.length - trafficStart > historyWrites.length, 'Queries outpace history writes');
             console.log('Desktop settings, Arrow coverage, HTTP selection and persistent socket passed');
         } catch (error) {
             failures.push(`${device}: ${error.stack}`);
