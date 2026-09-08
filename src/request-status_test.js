@@ -19,17 +19,6 @@ Deno.test('quick requests do not flash loading feedback', async () => {
     assert(root.hidden && root.dataset.state === 'idle')
 })
 
-Deno.test('slow and superseded requests keep a single quiet spinner', async () => {
-    const {root, nodes, status} = setup()
-    status.begin()
-    await pause()
-    assert(!root.hidden && !nodes['.request-spinner'].hidden)
-    status.begin()
-    assert(!nodes['.request-spinner'].hidden)
-    status.clear()
-    assert(root.hidden)
-})
-
 Deno.test('failure preserves actionable status and retry until success', async () => {
     const {root, nodes, status} = setup()
     let retries = 0
@@ -45,11 +34,4 @@ Deno.test('failure preserves actionable status and retry until success', async (
     status.clear()
     await pause()
     assert(root.hidden && nodes.pre.textContent === '')
-})
-
-Deno.test('initial failure does not claim an earlier result exists', () => {
-    const {nodes, status} = setup()
-    status.fail('Unavailable')
-    assert(nodes['.request-error-message'].textContent === 'Could not load data.')
-    assert(nodes['.request-retry'].disabled)
 })

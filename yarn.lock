@@ -293,7 +293,7 @@
     lz4js "^0.2.0"
     zstd-codec "^0.1"
 
-"@loaders.gl/core@^4.2.0":
+"@loaders.gl/core@4.2.1", "@loaders.gl/core@^4.2.0":
   version "4.2.1"
   resolved "https://registry.yarnpkg.com/@loaders.gl/core/-/core-4.2.1.tgz#6fc74a3326ec12c580ff240d24aabf577ea7eaf4"
   integrity sha512-VadjNJaH3oixqhUgu4SbmEALar7ELinXbIh6gxYPhFNdEicPXmFT3qrZG49p9x6KG/iP3vWR2jOHgebyFMeXPg==
@@ -940,7 +940,7 @@ ansi-styles@^4.1.0:
   dependencies:
     color-convert "^2.0.1"
 
-"apache-arrow@>= 15.0.0":
+apache-arrow@19.0.1, "apache-arrow@>= 15.0.0":
   version "19.0.1"
   resolved "https://registry.yarnpkg.com/apache-arrow/-/apache-arrow-19.0.1.tgz#aeac6922102e3274f57d97ec72da69d20e55b15c"
   integrity sha512-APmMLzS4qbTivLrPdQXexGM4JRr+0g62QDaobzEvip/FdQIrv2qLy0mD5Qdmw4buydtVJgbFeKR8f59I6PPGDg==

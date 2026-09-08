@@ -769,10 +769,6 @@ function addH3MapCell(map, split, lower, upper, h3, cellIndex, x, y) {
     return entry
 }
 
-function h3EntryCellCount(entry) {
-    return entry?.cellIndices ? entry.cellIndices.length : (entry?.cells?.length ?? 0)
-}
-
 const HTML_ESCAPES = {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}
 function escapeHtml(value) {
     return String(value).replace(/[&<>"']/g, c => HTML_ESCAPES[c])
@@ -952,11 +948,6 @@ function hex(hexes, options = {}) {
         renderLayers && renderLayers()
         return
     }
-    // const indices = hexes.map(h => {
-    //     if (typeof h === 'bigint') return h.toString(16)
-    //     if (typeof h === 'number') return BigInt(h).toString(16)
-    //     return String(h)
-    // })
     if (highlight) {
         highlightLayer = new H3HexagonLayer({
             id: 'hex-highlight',
@@ -1029,17 +1020,7 @@ function findClosestHex(targetLat, targetLng, h3map = h3toXY) {
 }
 
 function getH3Bounds(entry) {
-    if (entry && entry.xMin != null) {
-        return {xMin: entry.xMin, xMax: entry.xMax, yMin: entry.yMin, yMax: entry.yMax}
-    }
-    let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity
-    for (const [x, y] of entry.cells) {
-        if (x < xMin) xMin = x
-        if (x > xMax) xMax = x
-        if (y < yMin) yMin = y
-        if (y > yMax) yMax = y
-    }
-    return {xMin, xMax, yMin, yMax}
+    return {xMin: entry.xMin, xMax: entry.xMax, yMin: entry.yMin, yMax: entry.yMax}
 }
 
 function cartoH3sForDataH3(h3Index) {
@@ -1113,36 +1094,10 @@ function loadCartogramWeights(cartogramWeightsFile, signal) {
         doneInit({rows: h3RowCount(rawCols), cells: cartogramAgg.x.length, cartoRes, file: cartogramWeightsFile, h3Index: hasSplitH3Index(rawCols) ? 'split' : 'string'})
 
         return {}
-        // next steps:
-        // 0) debug why on earth labels are showing up in multiple places even though they are unique in mapping.arrow. ditto for country borders?
-        // 1) draw the cartogram in a new pane with borders
-        // 3) link cartogram <-> map
-        // (e.g. click on cartogram -> draw h3 that contribute to that cell * weight;
-        // zoom/move cartogram -> zoom/move map based on bbox of cartogram ... might be worth pre-computing lat/lon?)
-        // 2) aggregate actual data into the cartogram. your current spec is index: string, which is incompatible with the cartogram spec of h3: uint64. so fix that first. then join and profit
-        // high-resolution H3 data is rolled up into cartogram-resolution parents before aggregation.
-        // 4) reduce duplication of effort: reuse quantiles and data.
-        // 5) investigate aggregation of non-h3 5 data. sum/mean/median? exercise for reader
-        // 7) try to work out why legend has flipped between the two
-        // 8) add tooltip to cartogram cells
-        // done ^
-        //
-        // 6) change opacity of cells with bad 'wp' (london etc seems totally wrong useless)
-        // 9) make legend respect flip, etc.
-        // 10) make tooltip look up quantiles in legend so they're pretty printed?
-        // 11) investigate random extra stuff in the legend. stop dividing code by 1000?
-        // 12) reinstate 'wp' from cartogram.arrow
     })()
 }
 
 const STYLE = "./toner_ofm_moderatlist.json"
-//const STYLE = {version: 8, sources: {
-//    basemap: {type: 'geojson', data: 'ne_basemap/basemap.geojson'}
-//}, layers: [
-//    {id: 'background', type: 'background', paint: {'background-color': '#e8f4f8'}},
-//    //{id: 'basemap-fill', type: 'fill', source: 'basemap', paint: {'fill-color': '#f5f5f5'}},
-//    {id: 'basemap-outline', type: 'line', source: 'basemap', paint: {'line-color': '#000', 'line-width': 2}},
-//], glyphs: 'https://fonts.openmaptiles.org/{fontstack}/{range}.pbf'}
 
 const start_pos = {...{x: 0.45, y: 51.47, z: 4}, ...Object.fromEntries(new URLSearchParams(window.location.hash.slice(1)))}
 const map = new maplibregl.Map({
@@ -2268,7 +2223,6 @@ function bootstrap(meta = {}){
             let cartoValueCol = null
 
             window._columnData = dataCols
-            window.raw_data = dataCols
 
             if (doQuantiles) {
                 setLoadStage('Calculating quantiles')
@@ -2470,7 +2424,6 @@ function bootstrap(meta = {}){
             loaded = await current(measurePerf('data.load', {file: file_path, reload}, () => load(requestURL.href, format.loader, format.loadOptions)))
         }
         let raw = loaded.data
-        window.raw_data = raw
         setLoadStage('Data loaded')
 
         if (raw && raw.batches && raw.schema) {
@@ -2776,7 +2729,6 @@ function bootstrap(meta = {}){
         if (!h3map || !cartogramApi || !cartoAggCols) return
 
         const rowSet = new Set()
-        const cells = []
         let xMin = Infinity, yMin = Infinity, xMax = -Infinity, yMax = -Infinity
         for (const cartoH3 of cartoH3s) {
             const entry = h3map.get(cartoH3)
@@ -2786,19 +2738,9 @@ function bootstrap(meta = {}){
             if (bounds.yMin < yMin) yMin = bounds.yMin
             if (bounds.xMax > xMax) xMax = bounds.xMax
             if (bounds.yMax > yMax) yMax = bounds.yMax
-            if (entry.cellIndices) {
-                for (const cellIndex of entry.cellIndices) rowSet.add(cellIndex)
-            } else if (entry.cells) {
-                cells.push(...entry.cells)
-            }
+            for (const cellIndex of entry.cellIndices) rowSet.add(cellIndex)
         }
 
-        if (!rowSet.size && cells.length) {
-            const cellSet = new Set(cells.map(([x, y]) => `${x},${y}`))
-            for (let i = 0; i < cartoAggCols.x.length; i++) {
-                if (cellSet.has(`${cartoAggCols.x[i]},${cartoAggCols.y[i]}`)) rowSet.add(i)
-            }
-        }
         if (highlight) cartogramApi.highlightCells(Array.from(rowSet))
         if (!rowSet.size || xMin === Infinity) return
         const padding = 20
@@ -2808,8 +2750,6 @@ function bootstrap(meta = {}){
     const mapOverlay = new MapboxOverlay({
         interleaved: false,
         _pickable: false,
-        // // experimental stuff to improve perf on mobile
-        // _typedArrayManagerProps: {overAlloc: 1, poolSize: 0},
     })
 
     map.addControl(mapOverlay)
@@ -3138,7 +3078,6 @@ function bootstrap(meta = {}){
             cartogramApi,
             activeCartogramDataCol,
             columnData: window._columnData,
-            rawData: window.raw_data,
             layers: mainLayers,
             legend: legendDiv.lastElementChild,
             legendFormatter,
@@ -3207,12 +3146,10 @@ function bootstrap(meta = {}){
             await restoreSelection(previousState.selection)
             document.body.classList.toggle('cartogram-ready', previousState.cartogramReady)
             window._columnData = previousState.columnData
-            window.raw_data = previousState.rawData
             deferLegend = false
             pendingLegend = null
             legendFormatter = previousState.legendFormatter
             displayedLegendBounds = previousState.displayedLegendBounds
-            legendVersion++
             legendDiv.replaceChildren(...(previousState.legend ? [previousState.legend] : []))
             if (mainLayers !== previousState.layers) {
                 mainLayers = previousState.layers
@@ -3265,7 +3202,6 @@ function bootstrap(meta = {}){
     }
 
     window.d3 = d3
-    window.observablehq = observablehq
 
     const l = document.getElementById("attribution")
     const legendDiv = document.createElement('div')
@@ -3278,12 +3214,10 @@ function bootstrap(meta = {}){
         attributionText.innerText = "©\u00a0" + [...extra, "OpenFreeMap", "Natural Earth", "openwaters.io et al.", "Mapterhorn", "OpenStreetMap contributors", "Our World in Data", "GeoNames"].filter(x => x !== null).join(" ©\u00a0")
     }
     updateAttribution()
-    let legendVersion = 0
     let deferLegend = false
     let pendingLegend = null
     let legendFormatter
     let displayedLegendBounds = null
-    // todo: read impressum from metadata too
     function replaceLegend(legend) {
         if (deferLegend) {
             pendingLegend = legend
@@ -3292,23 +3226,7 @@ function bootstrap(meta = {}){
         // Freeze captures the published legend, not a scale still being calculated.
         const bounds = legendFormatter ? [legendFormatter(0), legendFormatter(1)] : [0, 1]
         displayedLegendBounds = fixedLegendScale(bounds) ? bounds : null
-        const previous = legendDiv.lastElementChild
-        const version = ++legendVersion
-        if (!previous || !COLOUR_TRANSITION_DURATION) {
-            legendDiv.replaceChildren(legend)
-            return
-        }
-
-        legend.style.opacity = 0
-        legendDiv.append(legend)
-        d3.select(legend).transition()
-            .duration(0) // dumb fix
-            //.duration(COLOUR_TRANSITION_DURATION)
-            .ease(d3.easeCubicInOut)
-            .style('opacity', 1)
-            .on('end', () => {
-                if (version === legendVersion) legendDiv.replaceChildren(legend)
-            })
+        legendDiv.replaceChildren(legend)
     }
 
     function commitPendingLegend() {
@@ -3334,7 +3252,6 @@ function bootstrap(meta = {}){
             } else {
                 if (settings.scale) {
                     const fmt = v => settings['scale'][Object.keys(settings['scale']).map(x => [x, Math.abs(x - v)]).sort((l,r)=>l[1] - r[1])[0][0]]
-                    window.fmt = fmt
                     options.tickFormat = fmt
                 }
                 legend = observablehq.legend(options)
@@ -3551,7 +3468,7 @@ function bootstrap(meta = {}){
             }
             if (!pt) continue
             const b = getH3Bounds(pt)
-            cornerMatches.push({lat: c.lat, lng: c.lng, h, fallback, cells: h3EntryCellCount(pt), bounds: b})
+            cornerMatches.push({lat: c.lat, lng: c.lng, h, fallback, cells: pt.cellIndices.length, bounds: b})
             if (b.xMin < xMin) xMin = b.xMin
             if (b.yMin < yMin) yMin = b.yMin
             if (b.xMax > xMax) xMax = b.xMax

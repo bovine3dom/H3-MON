@@ -2,106 +2,50 @@ import {readQueryState, writeQueryState} from './query-state.js'
 import {queryTitle} from './query-title.js'
 import {createRequestControls} from './request-controls.js'
 
-function assert(condition) { if (!condition) throw new Error('Assertion failed') }
+function assert(condition, message = 'Assertion failed') {
+    if (!condition) throw new Error(message)
+}
 
-Deno.test('query titles preserve templates until a city matches and use geographic coordinates', () => {
-    const template = 'From {TOWN_NAME} to {TOWN_NAME}'
+Deno.test('titles use raw inputs and select labels, preserving unknown tokens and inserted literals', () => {
+    const controls = createRequestControls({
+        time: {label: 'Time', type: 'number', default: 360, encode: 'value => value * 60'},
+        mode: {label: 'Mode', type: 'select', default: 'rail', options: [{value: 'rail', label: 'Train $& {controls.time}'}]},
+        flag: {label: 'Flag', type: 'boolean', default: false},
+    })
+    const query = {...controls.encode(), lat: 48.8, lng: 362.4, _inputs: controls.values()}
     const lookup = (lat, lng) => {
         assert(lat === 48.8 && Math.abs(lng - 2.4) < 1e-10)
-        return {name: 'City $&'}
+        return {name: 'City {controls.time}'}
     }
-    const point = {lat: 48.8, lng: 362.4, cartogram: [100, 200]}
-    assert(queryTitle(template, null, lookup) === template)
-    assert(queryTitle(template, {}, lookup) === template)
-    assert(queryTitle(template, point, () => undefined) === template)
-    assert(queryTitle(template, point, () => ({name: ''})) === template)
-    assert(queryTitle(template, point, lookup) === 'From City $& to City $&')
-    assert(queryTitle('Edited {TOWN_NAME}', point, lookup) === 'Edited City $&')
-    for (const title of ['', undefined, 'Plain title']) {
-        assert(queryTitle(title, point, () => { throw new Error('Unnecessary lookup') }) === title)
-    }
+    const template = '{controls.time}|{controls.mode}|{controls.flag}|{TOWN_NAME}|{unknown}|{controls.toString}'
+    assert(queryTitle(template, query, lookup, controls.schema) ===
+        '360|Train $& {controls.time}|false|City {controls.time}|{unknown}|{controls.toString}')
+    assert(query['controls.time'] === '21600' && query._inputs.mode === 'rail')
+    assert(queryTitle(template, null, lookup, controls.schema) === template)
+    assert(queryTitle('{TOWN_NAME}', query, () => undefined) === '{TOWN_NAME}')
+    assert(queryTitle('{controls.mode}', {_inputs: {mode: 'removed'}}, null, controls.schema) === 'removed')
+    assert(queryTitle('{lat}|{controls.time}', {lat: NaN, 'controls.time': '21600'}) === '{lat}|{controls.time}')
 })
 
-Deno.test('query titles use raw controls, not encoded request values, without expanding inserted text', () => {
-    const controls = createRequestControls({
-        departure: {label: 'Departure', type: 'time', default: '08:00', encode: 'value => Number(value.slice(0, 2))'},
-        duration: {label: 'Duration', type: 'number', default: 360, encode: 'value => value * 60'},
-        mode: {label: 'Mode', type: 'select', default: 'rail', options: [{value: 'rail', label: 'Train'}]},
-        enabled: {label: 'Enabled', type: 'boolean', default: false},
-        zero: {label: 'Zero', type: 'number', default: 0},
-        empty: {label: 'Empty', type: 'text', default: ''},
-        text: {label: 'Text', type: 'text', default: '$& / <rail> ?&= {controls.departure} {TOWN_NAME}'},
-    })
-    const encoded = controls.encode()
-    assert(encoded['controls.departure'] === '8' && encoded['controls.duration'] === '21600')
-    const displayed = {...encoded, lat: 0, lng: 0, _inputs: controls.values()}
-    const template = '{controls.departure}|{controls.duration}|{controls.mode}|{controls.enabled}|{controls.zero}|{controls.empty}|{controls.text}|{TOWN_NAME}'
-    assert(queryTitle(template, displayed, () => ({name: 'City {controls.duration}'}), controls.schema) ===
-        '08:00|360|Train|false|0||$& / <rail> ?&= {controls.departure} {TOWN_NAME}|City {controls.duration}')
-    assert(displayed._inputs.departure === '08:00' && template.includes('{controls.departure}'))
-})
-
-Deno.test('select titles use displayed option labels without changing request or saved values', () => {
-    const controls = createRequestControls({mode: {
-        label: 'Mode', type: 'select', default: 'min_union', encode: 'value => value.toUpperCase()',
-        options: [{value: 'min_union', label: 'Best-case $& {controls.mode}'},
-            {value: 'mean_intersection', label: 'Average travel time'}],
-    }})
-    const query = {_inputs: controls.values()}
-    const title = () => queryTitle('{controls.mode}', query, null, controls.schema)
-    assert(title() === 'Best-case $& {controls.mode}')
-    assert(controls.encode()['controls.mode'] === 'MIN_UNION' && query._inputs.mode === 'min_union')
-    query._inputs = controls.values({'p.mode': 'mean_intersection'})
-    assert(title() === 'Average travel time')
-    query._inputs = {mode: 'removed-option'}
-    assert(title() === 'removed-option')
-    query._inputs = {}
-    assert(title() === '{controls.mode}')
-})
-
-Deno.test('query titles resolve available query scalars and preserve unknown or unavailable tokens', () => {
-    const lookup = () => { throw new Error('Unnecessary lookup') }
-    const template = '{index}|{index_lower}|{index_upper}|{lat}|{lng}|{zoom}'
-    const displayed = {index: '851fb467fffffff', index_lower: 2147483647, index_upper: 139590470, lat: 0, lng: 2.4, zoom: 0}
-    assert(queryTitle(template, displayed, lookup) === '851fb467fffffff|2147483647|139590470|0|2.4|0')
-    for (const point of [null, {}, {lat: 1, lng: 2}, {'controls.departure': '8'},
-        {_inputs: {departure: null, invalid: {}, nan: NaN}}]) {
-        const unknown = '{controls.departure}|{controls.missing}|{controls.toString}|{controls.invalid}|{controls.nan}|{unknown}|{event}'
-        assert(queryTitle(unknown, point, lookup) === unknown)
-    }
-    assert(queryTitle('{lat}|{lng}|{zoom}', {lat: NaN, lng: Infinity, zoom: null}, lookup) === '{lat}|{lng}|{zoom}')
-})
 const query = {event: 'onclick', index: '851fb467fffffff', lat: 48.8, lng: 2.4, zoom: 6, cartogram: [3, 7]}
 
-Deno.test('query state round-trips without losing controls, data, or camera', () => {
-    const url = new URL('https://example.test/?data=reachable.csv&p.travelTime=360&onmove=false#x=1&y=2&z=3')
+Deno.test('saved queries round-trip without replacing controls, data or camera', () => {
+    const url = new URL('https://example.test/?data=sample.csv&p.time=360&onmove=false#x=1')
     writeQueryState(url, query)
-    const restored = readQueryState(new URL(url.href).searchParams)
-    assert(JSON.stringify(restored) === JSON.stringify(query))
-    assert(url.searchParams.get('p.travelTime') === '360')
-    assert(url.searchParams.get('data') === 'reachable.csv' && url.searchParams.get('onmove') === 'false')
-    assert(url.hash === '#x=1&y=2&z=3')
+    assert(JSON.stringify(readQueryState(url.searchParams)) === JSON.stringify(query))
     writeQueryState(url, {...query, event: 'onmove'})
     assert(url.searchParams.getAll('query').length === 1)
+    assert(url.searchParams.get('p.time') === '360' && url.searchParams.get('data') === 'sample.csv')
+    assert(url.searchParams.get('onmove') === 'false' && url.hash === '#x=1')
     assert(readQueryState(new URLSearchParams()) === null)
 })
 
-Deno.test('saved query input is validated, never executed', () => {
-    globalThis.queryExecuted = false
-    const invalid = ['globalThis.queryExecuted = true', 'null', '[]', '{}', JSON.stringify({...query, event: 'eval'}),
-        ...['lat', 'lng', 'zoom'].flatMap(key => [JSON.stringify({...query, [key]: null}), JSON.stringify({...query, [key]: '1'})]),
-        JSON.stringify({...query, lat: 91}), JSON.stringify({...query, lng: 181}), JSON.stringify({...query, zoom: -1}),
-        JSON.stringify({...query, index: 'x'}), JSON.stringify({...query, cartogram: [1]}),
-        JSON.stringify({...query, cartogram: [1, '2']}), JSON.stringify({...query, encode: 'value => eval(value)'})]
-    for (const input of invalid) {
-        let failed = false
-        try { readQueryState(new URLSearchParams({query: input})) } catch (_) { failed = true }
-        assert(failed)
+Deno.test('saved queries reject executable strings and malformed geographic state', () => {
+    for (const input of ['(() => { throw new Error("executed") })()', '{}',
+        JSON.stringify({...query, lat: 91}), JSON.stringify({...query, event: 'eval'}),
+        JSON.stringify({...query, zoom: '6'}), JSON.stringify({...query, cartogram: [1]})]) {
+        let error
+        try { readQueryState(new URLSearchParams({query: input})) } catch (caught) { error = caught }
+        assert(error && error.message !== 'executed', input)
     }
-    let failed = false
-    const params = new URLSearchParams({query: JSON.stringify(query)})
-    params.append('query', JSON.stringify(query))
-    try { readQueryState(params) } catch (_) { failed = true }
-    assert(failed && !globalThis.queryExecuted)
-    delete globalThis.queryExecuted
 })

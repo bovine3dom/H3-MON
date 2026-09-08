@@ -1,427 +1,206 @@
-# H3-MON: THE MOST POWERFUL MON(itor) IN THE UNIVERSE
+# H3-MON
 
-A simple data vis tool using MapLibre GL and deck.gl to display and refresh data from CSV/Arrow/Parquet files. GeoJSON supported experimentally.
+A MapLibre GL and deck.gl viewer for H3 data in CSV, Arrow and Parquet, with linked
+geographic and cartogram views. GeoJSON support is experimental.
 
-<p align="center">
-<img src="promo/demo.png" alt="An astonishingly beautiful map of the UK">
-</p>
+## Run Locally
 
+Prerequisites: Node.js, Yarn, Git and a WebGL-capable browser. Dependencies include
+Deno for the local server. Installation and the server's first run need network access.
 
-# How to run
+1. Clone this repository and run `yarn install` in its root.
+2. Put your dataset at `www/data/example.csv` (or `.arrow` / `.parquet`).
+3. Run `yarn build`, then `yarn serve`.
+4. Open `http://localhost:1983/?data=example.csv&cartogram=none`.
 
-Prerequisites: yarn. A web browser. A CSV file of index, value for [H3 Hexagon indices](https://h3geo.org/).
+Run `yarn watch` in another terminal to rebuild source changes; the server watches data files.
+HTTP uses port 1983; the development file-watcher WebSocket uses port 1990.
+For static deployment, serve the built `www/` directory, including the Parquet
+WASM asset copied there during installation.
 
-0. `git clone`
-1. `yarn install`
-2. bung data in `./www/data/h3_data.{csv, arrow, parquet}` with index (hex strings), values and optionally weights
-3. `yarn serve&; yarn watch`, open localhost:1983/?data=h3_data{,.csv, .arrow, .parquet}
-4. data will be refreshed with a file watcher
+## Data Format
 
-# Metadata and view settings
+CSV needs a header row. Arrow and Parquet use named columns with the same schema:
 
-Initial loads show detailed progress. Reloads keep the current map usable and show
-only a delayed corner spinner. Failed requests retain the previous result, with
-Retry and expandable error details beside the spinner.
+| Column | Type | Purpose |
+|--------|------|---------|
+| `index` | string | Hexadecimal H3 cell ID. |
+| `index_lower`, `index_upper` | uint32 | Alternative to `index`: low and high 32-bit words of the H3 ID. |
+| `value` | number | Value to colour and display. |
+| `weight` | number, optional | Weights for value scaling and aggregation. |
+| Other columns | optional | Additional tooltip data. |
 
-For a data file named `example.arrow`, H3-MON loads metadata from `www/data/example.json`. Query-string values override metadata values, so existing links such as `?data=example.arrow&flip&raw=false` continue to work and views configured in the settings panel can be shared directly.
+Use either string H3 IDs or both unsigned split columns, not floating-point H3
+IDs. CSV, Arrow and Parquet data can feed both views; cartogram mappings are Arrow.
+For Arrow reader compatibility, use uncompressed IPC and non-dictionary-encoded
+string columns. Query endpoints return complete Arrow IPC files or streams.
 
-The cog opens compact groups of labelled controls. Optional explanations are behind
-`?`; the header and footer stay pinned while the fields scroll. Valid typed edits
-apply after a 350 ms trailing debounce, including data and cartogram rebuild settings.
-Selects and toggles apply immediately, except request controls, which debounce the
-whole valid request together for 350 ms. There is no Apply button or per-field reset.
-**Restore dataset defaults** clears all settings and request-control overrides,
-restoring metadata values (or built-in defaults where absent).
+The `data` parameter selects a file under `www/data/`; omitting its extension
+selects CSV. For `example.arrow`, optional metadata lives at `www/data/example.json`.
 
-Use the **Colour scale** selector in Values, `colourScale=quantile` in the URL, or
-`"colourScale": "quantile"` in metadata. The choices are `quantile` (default),
-`rankit`, `linear` and `raw`; raw expects values already scaled to 0..1.
+## Metadata And Settings
 
-**Freeze legend** in Values captures the current legend's numeric minimum and maximum
-and switches both panes to a fixed **linear** scale, not a frozen quantile distribution.
-Bounds keep their full precision and persist through movement, data requests and shared
-URLs. Values outside the bounds use the endpoint colours; equal bounds put that value
-at the midpoint. Frozen bounds override the selected colour scale, trim and
-quantile-source settings until **Unfreeze legend** restores the selected mode.
-Freeze captures the currently published legend whenever it has valid numeric bounds,
-even while a new result is loading or rendering; it does not capture a scale still being
-calculated. New results rescale to the current viewport without requiring an extra map movement.
+URL settings override metadata, which overrides built-in defaults. The cog opens
+Settings; valid edits apply automatically. **Reset** restores metadata defaults.
+Shared URLs store nondefault settings,
+raw request-control inputs and the map-position hash, preserving unrelated parameters.
 
-**Linear** (`colourScale=linear`, or `"colourScale": "linear"` in metadata) uses
-empirical percentile endpoints from the selected visible **Quantile source** in both
-panes. The existing **Trim fraction** selects the endpoints: `trimFactor=0.01`
-means the 1st and 99th percentiles; zero uses the minimum and maximum. Colours are
-linear between these values, the legend stays in original units, and outliers clamp
-to the endpoint colours. It uses the existing finite-row sample and weighted
-quantiles (all-zero weights fall back to unweighted quantiles), without trimming
-twice. Singleton/constant endpoints use the midpoint and missing values stay missing.
-Bounds refresh after loads, viewport movement and query replay; Freeze legend captures
-the displayed percentile endpoints as fixed numeric bounds.
-
-Legacy `raw`, `linear` and `rankit` booleans remain supported in URLs and metadata,
-but are hidden from the panel. Invalid `colourScale` values are ignored. A valid URL
-`colourScale` wins. Otherwise, any legacy
-URL flag (even `raw=false`) selects the legacy rules: merge metadata flags with URL
-overrides, then use **raw > linear > rankit > quantile**. Without legacy URL flags,
-a valid metadata `colourScale` wins; otherwise the metadata flags use the legacy rules.
-Changing the selector writes `colourScale` and removes legacy URL flags; unrelated
-edits preserve their spellings and meaning. Metadata is not rewritten.
-
-**Rankit** (`colourScale=rankit`) replaces uniform quantiles with normal
-scores in both panes, using the selected visible quantile source.
-The existing finite-row sample is retained; ties use average ranks. With
-weights, positive weights determine midpoint cumulative mass `m`, and the effective
-rank is `r = n*m + 1/2`, where `n` is the number of positive-weight sampled rows.
-This is invariant to weight units; zero-weight rows do not determine the scale,
-and all-zero weights fall back to unweighted ranks.
-Blom probabilities `(r - 3/8)/(n + 1/4)` are transformed by the standard-normal
-probit. Symmetric finite endpoints at `p = 0.625/(n + 0.25)` (or the trim fraction,
-whichever is larger) normalize and clamp scores to 0..1. Singleton/constant data
-uses the midpoint. Between sampled values colours interpolate linearly; the legend
-inverts these knots to original units, not z-scores. Tails get more colour space,
-so colours are less evenly distributed than the default quantiles.
-
-| Key | Name | Type | Description |
-|-----|------|------|-------------|
-| `t` | Title | string | Browser and legend title; `{TOWN_NAME}` resolves to the nearest city for the displayed query. |
-| `c` | Additional attribution | comma-separated string | Attribution names prepended to the standard credits. |
-| `colourScheme` | Colour scheme | D3 interpolator name | Continuous D3 colour interpolator, such as `interpolateViridis`. |
-| `cyclical` | Cyclical colours | boolean | Uses Rainbow instead of Spectral when no explicit colour scheme is set. |
-| `flip` | Reverse colours | boolean | Reverses the colour scale. |
-| `colourScale` | Colour scale | `quantile`, `rankit`, `linear` or `raw` | Selects the colour mapping; default `quantile`. |
-| `raw`, `linear`, `rankit` | Legacy colour modes | boolean, default false | URL/metadata compatibility only; prefer `colourScale`. See precedence above. |
-| `legendBounds` | Frozen legend bounds | JSON `[min,max]` or `null` | Fixed linear numeric bounds override the selected mode; `null` restores it. |
-| `trimFactor` | Legend trim factor | number from 0 to less than 0.5 | Trims quantile legends and selects linear percentile endpoints; default 0.01. |
-| `quantileSource` | Quantile source | `map` or `cartogram` | Chooses which visible values determine quantiles. |
-| `scale` | Scale labels | object or null | Maps numeric breakpoints to raw legend labels. |
-| `trains` | Railway speeds | boolean | Shows OpenRailwayMap maximum-speed tiles. |
-| `cartogram` | Cartogram weights | filename, default-like value, or `none` | Selects a weights file or disables the cartogram. |
-| `defaultValue` | Missing value | number or null | Fallback used for missing contributors during cartogram aggregation. |
-| `infill` | Infill empty cells | boolean | Allows the missing value to fill wholly unobserved cartogram cells. |
-| `requireCompleteCoverage` | Require complete coverage | boolean, default false | Leaves a cartogram cell null if any finite positive-weight contributor is missing; overrides `defaultValue` and `infill`. |
-
-Boolean URL values retain the existing accepted forms: bare parameters and most values enable a setting, while `0`, `false`, `off`, and `no` disable it (case-insensitive, ignoring surrounding whitespace). The settings panel writes changed booleans as explicit `1` or `0` values and preserves unrelated query parameters and the map-position hash.
-
-**Require complete coverage** applies immediately from Settings, or can be enabled with
-`requireCompleteCoverage=1` in the URL or `"requireCompleteCoverage": true` in global
-metadata. Absent rows, nulls and non-finite values count as missing. A missing contributor
-with zero weight does not invalidate an otherwise valid cell. When fine-resolution data
-is rolled up, every expected H3 child (as enumerated by `cellToChildren`) must have a
-finite value, including children entirely absent from the input. An incomplete parent
-remains missing in the cartogram, even with a Missing value configured. When coarse data
-is projected down, a missing parent leaves its projected children missing. Disabling
-the setting restores the existing partial-mean and missing-value/infill behavior.
-
-Example metadata:
+Initial loads show detailed progress. Reloads keep the current map usable with a
+delayed corner spinner. Failed requests retain the previous result and offer
+**Retry** and expandable error details.
 
 ```json
 {
-  "t": "Population change",
+  "t": "Example measurements",
   "c": "Example data provider",
+  "cartogram": "none",
   "colourScheme": "interpolateViridis",
-  "flip": false,
-  "trimFactor": 0.01,
-  "quantileSource": "cartogram",
-  "defaultValue": 0,
-  "infill": true,
-  "scale": {
-    "0": "No change",
-    "1": "Largest increase"
-  }
+  "colourScale": "quantile"
 }
 ```
 
-# Interaction endpoints
+| Key | Values / Meaning |
+|-----|------------------|
+| `t` | Browser and legend title. |
+| `c` | Comma-separated additional attribution names. |
+| `colourScheme` | D3 interpolator name, such as `interpolateViridis`. |
+| `cyclical` | Use Rainbow rather than Spectral when no explicit scheme is set. |
+| `flip` | Reverse colours. |
+| `colourScale` | `quantile` (default), `rankit`, `linear` or `raw`. |
+| `trimFactor` | Fraction from 0 to less than 0.5; default 0.01. |
+| `quantileSource` | Visible `map` (default) or `cartogram` values used for scaling. |
+| `legendBounds` | Fixed linear bounds as JSON `[min,max]`; `null` unfreezes. |
+| `scale` | JSON object mapping numeric breakpoints to legend labels, or `null`. |
+| `trains` | Show OpenRailwayMap maximum-speed tiles. |
+| `crosshair` | Show the centre crosshair when `onmove` is enabled; default true. |
+| `cartogram` | Mapping filename, blank/default for `cartogram_weights.arrow`, or `none`. |
+| `defaultValue` | Numeric fallback for missing cartogram contributors, or `null`. |
+| `infill` | Allow the fallback to fill wholly unobserved cartogram cells. |
+| `requireCompleteCoverage` | Leave cells missing if any positive-weight contributor is missing. |
 
-Titles may contain `{TOWN_NAME}` (see the reachable example). The legend and browser
-tab substitute the nearest city from the bundled `tiny-geocoder` dataset, not an
-administrative boundary lookup. They use the last successfully displayed query's
-geographic coordinates: the map click, central linked H3 origin for cartogram clicks,
-or map centre for `onmove`. Pending, failed and superseded requests retain the displayed
-city and selection; a successful `onmove` updates the city and clears the click marker.
-Before the first result, or if no city matches, the placeholder stays unchanged.
-Static map/cartogram clicks also resolve the title when no endpoint query is needed.
-Settings, metadata and shared URLs retain the template, never the substituted city;
-replay resolves it only after a successful result, and title edits use the displayed origin.
+`quantile` distributes colours by rank; `rankit` gives tails more colour space.
+`linear` uses percentile endpoints selected by `trimFactor` (0 uses min/max).
+`raw` expects values already in 0..1. Legends retain original units.
+**Freeze legend** captures the displayed numeric endpoints as a fixed linear scale
+for both panes, overriding the selected mode, trim and quantile source until
+unfrozen. Out-of-range values use endpoint colours; equal bounds use the midpoint.
 
-Titles also support `{index}`, `{index_lower}`, `{index_upper}`, `{lat}`, `{lng}`,
-`{zoom}` and `{controls.<id>}` from the successfully displayed request. For example,
-`"t": "From {TOWN_NAME} at {controls.departure}"` displays `08:00` for a time input,
-even if its `encode` converter sends `8`. Controls use raw typed values before
-conversion or URL encoding; selects use the selected option's label instead of its value. Pending or failed
-requests and later control edits do not change the displayed values. Unknown or
-unavailable placeholders stay unchanged, including controls before a query result
-or on static datasets. Substituted text is not expanded again. Shared URLs retain
-the title template and raw `p.<id>` inputs; successful replay resolves them again.
+Scale labels use a raw JSON textarea: `{"0":"Low","1":"High"}`, or `null` for automatic labels.
 
-JSON metadata can optionally define `onclick` and `onmove` objects. By default these
-issue **GET requests returning Arrow IPC files or streams**; an optional `socket`
-selects the [query WebSocket protocol](docs/query-websocket.md) instead. Both replace
-the current dataset using the existing map, legend, tooltip and cartogram rendering
-pipeline. Hook URLs are templates; optional input converters described below are
-trusted JavaScript. No query WebSocket backend implementation is included.
+### Legacy Flags
 
-- `onclick` uses the geographic cell under a map click/tap, including cells absent
-  from the current result. Cartogram clicks use a central cell from the linked H3
-  set, with deterministic ties; the configured request resolution is then applied.
-- `onmove` uses the geographic map centre during user pan/zoom, including keyboard
-  navigation. It is not pointer hover. Programmatic camera changes, including search,
-  hash navigation and cartogram synchronization, do not request data.
-- With positive `wait`, movement uses leading throttle-debounce, including the latest
-  position after a quiet period. `wait` is milliseconds, default `350` for HTTP and
-  `0` for WebSocket; `0` bypasses this scheduling. Unchanged automatic query contexts
-  are deduplicated. A configured click cancels pending movement delivery and always
-  requests a fresh result.
-- `onmove` applies to the geographic map only. Cartogram panning keeps its existing
-  navigation behavior without issuing requests through programmatic map synchronization.
-- Enabled `onmove` shows a thin grey crosshair at the geographic map centre, matching
-  the movement query origin. Set global metadata `"crosshair": false` to hide it
-  (`true` is the default), or use **Centre crosshair** in Settings. URL overrides
-  `crosshair=0` and `crosshair=1` are shareable. The crosshair remains hidden when
-  `onmove` is disabled or absent and never intercepts map gestures.
-- New HTTP requests cancel obsolete fetches. WebSocket movement can display a trailing
-  result while newer work is pending; explicit query-context changes invalidate old
-  results without sending cancellation to the server. Failed requests retain the last good dataset
-  and show an error in the loading status. Settings refreshes use the last successful
-  endpoint, rather than reverting to the seed file. Seed-file watcher events are ignored
-  once an endpoint result is active. Browser cancellation does not cancel server work.
+Legacy `raw`, `linear` and `rankit` booleans remain supported in metadata and URLs:
 
-Each object requires `url`. Optional `resolution` is an integer from 0 to 15; otherwise
-the current dataset's H3 resolution is used. `wait` must be between 0 and 60000.
-`onclick.focus` and `onclick.highlight` are independent booleans, both defaulting to
-`true`. Set `focus: false` to keep the camera in place while still marking the origin;
-set `highlight: false` to hide selection in both panes without disabling camera focus
-or requests. Geographic clicks mark the resolved query H3 cell, even if absent from
-the response; cartogram clicks mark the selected square and its linked geographic cells.
-The marker tracks the last successfully displayed result, not pending, failed or
-superseded clicks. A successful movement result clears the click marker. Shared-query
-replay and settings refreshes restore selection without focusing the camera, including
-when automatic requests are disabled. Static datasets still select immediately.
+| Priority | Colour mode selection |
+|----------|-----------------------|
+| 1 | A valid URL `colourScale` wins. |
+| 2 | Any legacy URL flag, even `raw=false`, selects merged metadata/URL flags with priority `raw > linear > rankit > quantile`. |
+| 3 | Otherwise, a valid metadata `colourScale` wins. |
+| 4 | Otherwise, metadata flags use the same legacy priority. |
 
-URL templates support these placeholders, with substituted values URL-encoded:
+Invalid `colourScale` values are ignored. Changing the selector writes
+`colourScale` and removes legacy URL flags; unrelated edits preserve them.
+Boolean URL parameters are enabled when bare or with most values; `0`, `false`,
+`off` and `no` disable them, ignoring case and surrounding whitespace. Settings
+writes changed booleans as `1` or `0`; metadata is not rewritten.
 
-| Placeholder | Value |
-|-------------|-------|
-| `{index}` | Canonical hexadecimal H3 cell at the selected resolution. |
-| `{index_lower}`, `{index_upper}` | Unsigned low/high 32-bit words of that cell. |
-| `{lat}`, `{lng}` | Click location or current map-centre coordinates. |
-| `{zoom}` | Current geographic map zoom. |
+## Interaction Endpoints
 
-URLs must use HTTP(S), without embedded credentials. Relative URLs resolve against
-the page URL. Existing query parameters are preserved; no cache-busting `v` parameter
-is added to endpoint URLs. Missing, null or false hooks are disabled; `?onmove=false`
-also disables a metadata hook. Structured hooks are metadata-only, not settings-panel
-controls or JavaScript/JSON strings in query parameters.
-
-For WebSocket queries, add an absolute `socket` such as `wss://api.example.com/query`
-to either hook. Keep `url` as an HTTP(S)-style template: only its resolved path and
-query string are sent to the socket server, not its origin. Matching `onclick` and
-`onmove` socket endpoints reuse one connection. See the [protocol specification](docs/query-websocket.md)
-for binary framing, server scheduling, retry/lifetime behavior, sharing and security.
-
-## Rail-routing example
-
-[`www/data/reachable.json`](www/data/reachable.json) configures request controls for the
-res5 router in the sibling `gtfs_ffs` project. It currently uses click-only queries and
-a seven-day default budget. [`reachable.csv`](www/data/reachable.csv)
-is only a one-cell seed near Paris, not a precomputed reachability result. With that
-backend listening on port 1988, run `yarn build` and `yarn serve`, then open:
-
-```text
-http://localhost:1983/?data=reachable.csv#x=2.3962&y=48.8241&z=6
-```
-
-Click/tap a cell or edit a request control to fetch the first result. If `onmove` is
-configured, panning also requests data; `&onmove=false` disables that automatic delivery.
-An initial link without a saved query loads the seed. A shared query link replays the
-query instead. The essential metadata shape is:
+Metadata can define `onclick` and `onmove` hooks. Each requires an HTTP(S) `url`
+template; relative URLs resolve against the page. By default the viewer makes GET
+requests returning Arrow. An optional absolute `socket` selects the
+[query WebSocket protocol](docs/query-websocket.md). No query backend is bundled.
 
 ```json
 {
-  "t": "Rail travel time (hours)",
-  "colourScale": "quantile",
+  "t": "Measurements near {TOWN_NAME}",
   "cartogram": "none",
   "controls": {
-    "travelTime": {
-      "label": "Travel time",
-      "type": "number",
-      "unit": "h",
-      "default": 3,
-      "min": 0,
-      "max": 168,
-      "step": 0.25
-    },
-    "departure": {
-      "label": "Departure",
-      "type": "number",
-      "unit": "h",
-      "default": 8,
-      "min": 0,
-      "max": 23.9999997,
-      "step": 0.25
+    "threshold": {
+      "label": "Threshold", "type": "number", "default": 10,
+      "min": 0, "max": 100, "step": 1
     }
   },
   "onclick": {
-    "url": "http://127.0.0.1:1988/reachable?index={index}&departure_h={controls.departure}&budget_h={controls.travelTime}&encoding=split",
-    "resolution": 5,
-    "focus": false,
-    "highlight": true
+    "url": "https://example.org/data?index={index}&threshold={controls.threshold}",
+    "resolution": 5, "focus": false, "highlight": true
   },
   "onmove": {
-    "url": "http://127.0.0.1:1988/reachable?index={index}&departure_h={controls.departure}&budget_h={controls.travelTime}&encoding=split",
-    "resolution": 5,
-    "wait": 350
+    "url": "https://example.org/data?index={index}&threshold={controls.threshold}",
+    "resolution": 5
   }
 }
 ```
 
-Edit departure time and budget in Settings; valid edits automatically rerun the last
-origin after a short pause. Before any query, the map centre is used. `127.0.0.1` means
-the **browser's machine**: replace it with your reachable backend hostname or use a
-port forward when browsing remotely. HTTPS pages require an HTTPS endpoint or proxy.
-The endpoint must allow CORS when served from another origin.
+`onclick` uses the clicked geographic cell, including cells absent from the result;
+cartogram clicks use a central linked H3 cell. `focus` and `highlight` independently
+control camera focus and selection, both defaulting to true. `onmove` uses the
+geographic map centre during user pan/zoom, not pointer hover or programmatic moves.
+Optional `resolution` is 0..15, defaulting to the dataset's H3 resolution.
+Optional `wait` is 0..60000 milliseconds (HTTP default 350, WebSocket default 0);
+positive values schedule movement requests with a trailing latest position.
 
-The routing response must include `value` (elapsed hours for `metric=time`), plus string
-`index` or unsigned split indices; `elapsed_h` is displayed in the tooltip as an extra column.
-Keep Arrow IPC uncompressed and string columns non-dictionary-encoded for the installed
-reader. `"colourScale": "quantile"` gives quantile colours with hour-valued legend labels; raw mode
-expects values already scaled to 0..1. Res5 routing merges stops within each cell and
-does not imply that every point inside a returned cell is reachable.
+Templates accept `{index}`, `{index_lower}`, `{index_upper}`, `{lat}`, `{lng}`,
+`{zoom}` and `{controls.<id>}`; substituted URL values are URL-encoded.
+Titles accept the same tokens plus `{TOWN_NAME}`, the nearest city from
+tiny-geocoder, not an administrative boundary. Titles and selection follow the
+successfully displayed result; pending or failed queries retain the previous state.
+Unknown or unavailable title tokens stay unchanged.
 
-The router's breaking hour-based API uses `departure_h`, `budget_h`, `window_h`,
-`step_h` and `max_walk_h`, without clock-string or seconds aliases. Numeric controls
-send hours directly; old saved minute-valued control overrides must be replaced.
-Window responses include only cells reachable from **every** sampled departure,
-filtered before distance/time ranks. `reachable_elapsed_h` is also hours;
-`distance_km` remains kilometres, and quantiles and coverage fractions are dimensionless.
-For `metric=distance_time_quantile`, `value` and its legend are rank differences,
-not travel hours. Set the title accordingly when selecting that metric.
+Missing, null or false hooks are disabled; `onclick=false` / `onmove=false` in the
+URL disables automatic delivery without preventing saved-query replay.
+Use HTTPS endpoints on HTTPS pages and configure CORS for cross-origin HTTP requests.
 
-## Request controls and shared links
+## Request Controls And Shared Links
 
-`controls` is an object keyed by field IDs (letters, digits and underscores, starting
-with a letter). Each field requires `label`, `type` and `default`. Supported types are
-`number`, `time`, `text`, `select` and `boolean`. Optional `unit` appears in the label;
-`help` supplies contextual help. Numbers and times accept `min`, `max` and a native
-input `step`. Selects require `options: [{"value": "rail", "label": "Rail"}]`.
+`controls` is keyed by IDs starting with a letter and containing letters, digits
+or underscores. Each field requires `label`, `type` and `default`. Types are
+`number`, `time`, `text`, `select` and `boolean`; optional `unit` and `help` describe
+the field. Numbers and times accept `min`, `max` and native input `step`.
+Selects require `options`, for example `[{"value":"mean","label":"Mean"}]`.
 
-An optional `encode` function expression receives `(value, values)`: the field's
-typed input and a frozen map of all raw control values. It must return a string,
-finite number or boolean synchronously. `{controls.<id>}` in either hook URL uses
-that converted value, URL-encoded. Invalid inputs and failed conversions do not send
-a request. Request controls share a 350 ms trailing debounce and have no Apply button.
+An optional `encode` is a JavaScript function expression string, for example
+`"(value, values) => value * 1000"`, receiving the typed input and all raw values;
+it returns a string, finite number or boolean synchronously. Metadata is trusted
+JavaScript. Invalid inputs or failed conversions do not send requests.
+Valid control edits rerun the last origin, or the map centre before the first query.
 
-**Trust boundary:** converter expressions are compiled from the fetched metadata and
-run with the page's JavaScript privileges. They are not sandboxed. Only publish metadata
-you trust as application code; hosting CSP must permit this compilation. URL parameters
-and user-entered values are always data, never code, and cannot supply converter definitions.
+Shared links keep raw inputs as `p.<id>` and the query origin/event/zoom as `query`
+JSON, not response data. Replay uses the metadata endpoint and preserves the saved
+camera. Recipients need access to the dataset metadata and endpoint. Titles use raw
+control values (select labels), not encoded values; shared links retain the template.
 
-The URL stores raw input values as `p.<id>`, independently of built-in view settings.
-It also records a validated `query` JSON object containing the hook event, resolved H3,
-coordinates and query zoom (plus cartogram click coordinates when applicable). Copy the
-URL to restore the same query in a fresh browser without local storage or earlier clicks.
-The dataset metadata and endpoint must still be accessible to that browser.
+## Cartogram Mapping
 
-Replay and parameter edits use the declared endpoint even if its automatic hook is
-disabled by `onclick=false` or `onmove=false`. They preserve the saved geographic camera
-(`x`, `y`, `z`, `b` bearing and `p` pitch in the hash), rather than replaying click-focusing
-animations. Explicit clicks always refresh; unchanged automatic requests are deduplicated.
+A mapping joins H3 cells to square grid cells using weighted means. Select its Arrow filename with `cartogram`.
 
-# Tests
+| Column | Type / Purpose |
+|--------|----------------|
+| `x`, `y` | Integer grid coordinates; x increases right, y downward. |
+| `index` or `index_lower` + `index_upper` | String H3 ID or unsigned 32-bit halves. |
+| `weight_mean` | Preferred numeric aggregation weight when present. |
+| `weight` | Fallback when `weight_mean` is absent; unit weights if both are absent. |
+| `code` | Optional numeric subdivision code for borders. |
+| `label` | Optional cell label. |
 
-H3-MON intentionally uses its own controls and styles, not MapLibre's stylesheet.
-The rendering test guards that setup as well as overlay alignment and blending.
+Mappings allow many-to-many contributions; normalize weights per `(x,y)` cell.
+Split-index datasets select the mapping's `_hilo.arrow` variant.
+Fine H3 data is rolled up; coarse data is projected to mapping resolution.
+`requireCompleteCoverage` also requires every expected fine-resolution child,
+including absent rows, and overrides `defaultValue` and `infill`; zero-weight
+missing contributors do not invalidate a cell.
 
-`yarn test` runs the unit tests. For the headless rendering regression tests:
+## Tests
 
-```sh
-yarn playwright install chromium
-yarn test:rendering
-```
+Run `yarn test` for unit tests and `yarn test:rendering` for the headless browser
+suite. The latter needs Playwright Chromium installed (`yarn playwright install chromium`),
+or `CHROMIUM_PATH` pointing to a Chromium executable. Tests use generated fixtures,
+not local datasets or live query endpoints.
 
-The rendering tests check multiply-blended pixels, polygon edges, and Deck/MapLibre
-alignment against an in-memory basemap on desktop and mobile, including rotated,
-pitched and resized views. Separate fixtures cover rankit/frozen scaling and independent
-focus/highlight controls, including selection pixels in both panes, pending/failed and
-superseded requests, Retry, settings refreshes and shared-query replay.
-They need no backend or external tiles. `CHROMIUM_PATH`
-can select an existing Chromium executable; `ARTIFACT_DIR` optionally retains
-diagnostic screenshots.
+## License And Attribution
 
-# Cartogram mapping spec
-
-Cartograms are maps with complex projections, most commonly used for visualising data with uniform populations rather than geographic projections which attempt to preserve land area.
-
-Creating such a projection is a non-trivial task. Our approach can be found in https://github.com/bovine3dom/population-cartogram-projection but generally the workflow is:
-
-1) find some data that you want to represent uniformly (e.g. population) split by some spatial unit (e.g. country)
-2) by hand(!), create a pixel grid layout of the data where each cell is assigned to a spatial unit and the total number of cells is equal to the 'population' of that spatial unit
-3) create an H3 representation of the spatial units and join it with a high resolution representation of the 'population'
-4) use an algorithm to find the optimal fuzzy matching from H3 to the pixel grid. the best algorithm to use is an open question - we are currently using optimal transport with soft constraints.
-
-Here, we support the following representation of such a mapping of many H3 -> many cells:
-
-
-| Column | Type   | Description |
-|--------|--------|-------------|
-| `x`    | int    | column position, origin at top-left of screen |
-| `y`    | int    | row position, origin at top-left of screen |
-| `index_lower` | uint32 | H3 index, lower 32 bits|
-| `index_upper` | uint32 | H3 index, upper 32 bits |
-| `index`| string | H3 index, optional instead of split ints |
-| `code` | int | country / subdivision code for border rendering |
-| `label`| string | optional label text displayed on the cartogram cell |
-| `weight`| float | weight for aggregation — `groupby(x, y)` weights should sum to 1 |
-
-`x` increases to the right, `y` increases downward.
-
-An excerpt of a possible `cartogram.arrow` follows:
-
-```
-    ┏━━━━━┳━━━━━┳━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━┳━━━━━━━━━━━━━━━━━┓
-    ┃   x ┃   y ┃               weight ┃ label     ┃ code ┃ index           ┃
-    ┡━━━━━╇━━━━━╇━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━╇━━━━━━━━━━━━━━━━━┩
- 1. │ 354 │ 114 │                    1 │ Reykjavík │  352 │ 85075dd7fffffff │
-    ├─────┼─────┼──────────────────────┼───────────┼──────┼─────────────────┤
- 2. │ 388 │ 278 │   0.1995755129563892 │ ᴺᵁᴸᴸ      │  620 │ 85393363fffffff │
-    ├─────┼─────┼──────────────────────┼───────────┼──────┼─────────────────┤
- 3. │ 388 │ 278 │   0.1995755129563892 │ ᴺᵁᴸᴸ      │  620 │ 85393363fffffff │
-    ├─────┼─────┼──────────────────────┼───────────┼──────┼─────────────────┤
- 4. │ 386 │ 284 │   0.1995755129563892 │ ᴺᵁᴸᴸ      │  620 │ 85393363fffffff │
-    ├─────┼─────┼──────────────────────┼───────────┼──────┼─────────────────┤
-```
-
-Then, provided you have data in `csv` or `arrow` format (not parquet), the client will automatically load the data into both the standard map and cartogram. At the time of writing, H3 is aggregated into cells using weighted means, but weighted sums could be supported with a few lines of code.
-
-# Example query
-
-```sql
--- clickhouse
-select substring(lower(hex(h3)),2) index, count()::Int32 value, weight::Int32 weight from (
- select geoToH3(stop_lat, stop_lon, 5) h3, * from transitous_everything_20260218_stop_times_one_day_even_saner2 t
- left join (
-  select h3ToParent(h3, 5) h3_t, sum(population) weight from public_kontur_population_20231101
-  group by h3_t
- ) k on k.h3_t = h3
-)
-group by all
-into outfile 'total_stops_weighted.parquet' truncate
-```
-
-```sql
--- clickhouse
-select * except (index, h3) from (
-    select *, reinterpretAsUInt64(reverse(unhex(index))) h3,
-    toUInt32(bitAnd(h3, toUInt64(4294967295))) as index_lower,
-    toUInt32(bitShiftRight(h3, 32)) as index_upper
-    -- bitOr(toUInt64(index_lower), bitShiftLeft(toUInt64(index_upper),32)) -- validation
-    from 'cartogram_weights.arrow'
-)
-into outfile 'cartogram_weights_hilo.arrow' settings output_format_arrow_compression_method = 'none'
-```
-
-```julia
-#/bin/julia
-loweruint64(x) = x % UInt32
-upperuint64(x) = (x >> 32) % UInt32
-```
+Code is [BSD-2-Clause](LICENSE), copyright Oliver Blanthorn. Data and tiles retain
+their own licenses. Keep provider attribution when publishing a view; metadata `c`
+adds credits rather than replacing the standard ones. The viewer credits OpenFreeMap,
+Natural Earth, openwaters.io et al., Mapterhorn, OpenStreetMap contributors,
+Our World in Data and GeoNames.

@@ -35,7 +35,6 @@ export const SETTINGS_SCHEMA = [
         group: 'General',
         type: 'text',
         defaultValue: '',
-        apply: 'debounce',
         refresh: 'render',
     },
     {
@@ -44,7 +43,6 @@ export const SETTINGS_SCHEMA = [
         group: 'General',
         type: 'text',
         defaultValue: '',
-        apply: 'debounce',
         refresh: 'render',
     },
     {
@@ -54,7 +52,6 @@ export const SETTINGS_SCHEMA = [
         group: 'Colour',
         type: 'colourScheme',
         defaultValue: '',
-        apply: 'immediate',
         refresh: 'render',
     },
     {
@@ -64,7 +61,6 @@ export const SETTINGS_SCHEMA = [
         group: 'Colour',
         type: 'boolean',
         defaultValue: false,
-        apply: 'immediate',
         refresh: 'render',
     },
     {
@@ -73,7 +69,6 @@ export const SETTINGS_SCHEMA = [
         group: 'Colour',
         type: 'boolean',
         defaultValue: false,
-        apply: 'immediate',
         refresh: 'render',
     },
     {
@@ -89,37 +84,27 @@ export const SETTINGS_SCHEMA = [
             {value: 'linear', name: 'Linear'},
             {value: 'raw', name: 'Raw'},
         ],
-        apply: 'immediate',
         refresh: 'data',
     },
     {
         key: 'raw',
         hidden: true,
-        name: 'Raw values',
-        group: 'Values',
         type: 'boolean',
         defaultValue: false,
-        apply: 'immediate',
         refresh: 'data',
     },
     {
         key: 'linear',
         hidden: true,
-        name: 'Linear colours',
-        group: 'Values',
         type: 'boolean',
         defaultValue: false,
-        apply: 'immediate',
         refresh: 'data',
     },
     {
         key: 'rankit',
         hidden: true,
-        name: 'Rankit colours',
-        group: 'Values',
         type: 'boolean',
         defaultValue: false,
-        apply: 'immediate',
         refresh: 'data',
     },
     {
@@ -129,7 +114,6 @@ export const SETTINGS_SCHEMA = [
         group: 'Values',
         type: 'legendBounds',
         defaultValue: null,
-        apply: 'immediate',
         refresh: 'data',
     },
     {
@@ -142,7 +126,6 @@ export const SETTINGS_SCHEMA = [
         min: 0,
         max: 0.499999,
         step: 0.001,
-        apply: 'debounce',
         refresh: 'data',
     },
     {
@@ -156,7 +139,6 @@ export const SETTINGS_SCHEMA = [
             {value: 'map', name: 'Geographic map'},
             {value: 'cartogram', name: 'Cartogram'},
         ],
-        apply: 'immediate',
         refresh: 'data',
     },
     {
@@ -166,7 +148,6 @@ export const SETTINGS_SCHEMA = [
         group: 'Values',
         type: 'scale',
         defaultValue: null,
-        apply: 'debounce',
         refresh: 'render',
     },
     {
@@ -176,7 +157,6 @@ export const SETTINGS_SCHEMA = [
         group: 'Map and cartogram',
         type: 'boolean',
         defaultValue: true,
-        apply: 'immediate',
         refresh: 'render',
     },
     {
@@ -185,7 +165,6 @@ export const SETTINGS_SCHEMA = [
         group: 'Map and cartogram',
         type: 'boolean',
         defaultValue: false,
-        apply: 'immediate',
         refresh: 'render',
     },
     {
@@ -196,7 +175,6 @@ export const SETTINGS_SCHEMA = [
         type: 'text',
         defaultValue: '',
         placeholder: 'cartogram_weights.arrow',
-        apply: 'debounce',
         refresh: 'cartogram',
     },
     {
@@ -206,7 +184,6 @@ export const SETTINGS_SCHEMA = [
         group: 'Map and cartogram',
         type: 'nullableNumber',
         defaultValue: null,
-        apply: 'debounce',
         refresh: 'data',
     },
     {
@@ -216,7 +193,6 @@ export const SETTINGS_SCHEMA = [
         group: 'Map and cartogram',
         type: 'boolean',
         defaultValue: false,
-        apply: 'immediate',
         refresh: 'data',
     },
     {
@@ -226,7 +202,6 @@ export const SETTINGS_SCHEMA = [
         group: 'Map and cartogram',
         type: 'boolean',
         defaultValue: false,
-        apply: 'immediate',
         refresh: 'data',
     },
 ]

@@ -21,7 +21,6 @@ export function createRequestControls(definitions = {}) {
             name: definition.label + (definition.unit ? ` (${definition.unit})` : ''),
             group: 'Request',
             type: definition.type,
-            apply: 'debounce',
             refresh: 'request',
         }
         if (Object.hasOwn(definition, 'help')) setting.description = definition.help

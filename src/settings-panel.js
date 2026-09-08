@@ -15,76 +15,22 @@ function element(tag, className, text) {
 }
 
 function makeScaleControl(value) {
-    const root = element('div', 'scale-editor')
-    const enabledLabel = element('label', 'setting-checkbox')
-    const enabled = document.createElement('input')
-    enabled.type = 'checkbox'
-    enabledLabel.append(enabled)
-    const rows = element('div', 'scale-rows')
-    const add = element('button', 'scale-add', 'Add breakpoint')
-    add.type = 'button'
-    root.append(enabledLabel, rows, add)
-
-    function addRow(key = '', label = '') {
-        const row = element('div', 'scale-row')
-        const breakpoint = document.createElement('input')
-        breakpoint.type = 'number'
-        breakpoint.step = 'any'
-        breakpoint.placeholder = 'Value'
-        breakpoint.setAttribute('aria-label', 'Scale breakpoint')
-        breakpoint.value = key
-        const display = document.createElement('input')
-        display.type = 'text'
-        display.placeholder = 'Label'
-        display.setAttribute('aria-label', 'Scale label')
-        display.value = label
-        const remove = element('button', '', '×')
-        remove.type = 'button'
-        remove.setAttribute('aria-label', 'Remove breakpoint')
-        remove.addEventListener('click', () => {
-            row.remove()
-            root.dispatchEvent(new Event('settingchange', {bubbles: true}))
-        })
-        row.append(breakpoint, display, remove)
-        rows.append(row)
+    const input = document.createElement('textarea')
+    input.placeholder = '{"0":"Low","1":"High"}'
+    input.rows = 3
+    const write = nextValue => {
+        input.value = nextValue == null ? '' : typeof nextValue === 'string' ? nextValue : JSON.stringify(nextValue)
     }
-
-    function write(nextValue) {
-        rows.replaceChildren()
-        enabled.checked = nextValue != null
-        rows.hidden = !enabled.checked
-        add.hidden = !enabled.checked
-        if (nextValue && typeof nextValue === 'object' && !Array.isArray(nextValue)) {
-            for (const [key, label] of Object.entries(nextValue)) addRow(key, label)
-        } else if (nextValue != null) {
-            addRow('', String(nextValue))
-        }
-    }
-
-    function read() {
-        if (!enabled.checked) return null
-        const scale = {}
-        for (const row of rows.children) {
-            const [breakpoint, display] = row.querySelectorAll('input')
-            scale[breakpoint.value] = display.value
-        }
-        return scale
-    }
-
-    enabled.addEventListener('change', () => {
-        rows.hidden = !enabled.checked
-        add.hidden = !enabled.checked
-        if (enabled.checked && !rows.children.length) addRow()
-        root.dispatchEvent(new Event('settingchange', {bubbles: true}))
-    })
-    rows.addEventListener('input', () => root.dispatchEvent(new CustomEvent('settingchange', {bubbles: true, detail: {typed: true}})))
-    add.addEventListener('click', () => {
-        addRow()
-        rows.lastElementChild.querySelector('input').focus()
-        root.dispatchEvent(new Event('settingchange', {bubbles: true}))
-    })
     write(value)
-    return {node: root, read, write}
+    return {
+        node: input,
+        event: 'input',
+        read: () => {
+            if (!input.value.trim()) return null
+            try { return JSON.parse(input.value) } catch (_) { return input.value }
+        },
+        write,
+    }
 }
 
 function makeControl(setting, value, colourSchemes, getLegendBounds) {

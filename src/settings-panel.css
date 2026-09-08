@@ -94,13 +94,15 @@
 
 .settings-panel input,
 .settings-panel select,
+.settings-panel textarea,
 .settings-panel form button {
     font: inherit;
     color: inherit;
 }
 
 .settings-panel input:not([type="checkbox"]),
-.settings-panel select {
+.settings-panel select,
+.settings-panel textarea {
     width: 100%;
     min-width: 0;
     max-width: 100%;
@@ -181,37 +183,17 @@
 }
 
 .settings-panel .setting-field-wide > .setting-control-row,
-.settings-panel .setting-field-wide .scale-editor {
-    display: contents;
-}
-
-.settings-panel .setting-field-wide .setting-checkbox {
-    grid-column: 2;
-    grid-row: 1;
-}
-
-.settings-panel .setting-field-wide .scale-rows,
 .settings-panel .setting-field-wide > .setting-error {
     grid-column: 1 / -1;
 }
 
-.settings-panel .setting-field-wide .scale-add { grid-column: 2; }
-
-.settings-panel .scale-editor {
-    width: 100%;
-    min-width: 0;
+.settings-panel textarea {
+    resize: vertical;
 }
 
-.settings-panel .scale-row {
-    display: grid;
-    grid-template-columns: minmax(0, 0.7fr) minmax(0, 1fr) auto;
-    gap: 5px;
-    margin: 4px 0;
-}
-
-.settings-panel .scale-row button {
-    width: 26px;
-    padding: 0;
+.settings-panel textarea::placeholder {
+    color: #777;
+    opacity: 1;
 }
 
 .settings-panel .settings-actions {
@@ -232,7 +214,7 @@
     font-size: 12px;
 }
 
-.settings-panel :is(input, select, button, summary):focus-visible {
+.settings-panel :is(input, select, textarea, button, summary):focus-visible {
     outline: 2px solid #245d9c;
     outline-offset: 2px;
 }

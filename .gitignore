@@ -1,7 +1,5 @@
 node_modules/
 www/data/*
-!www/data/reachable.csv
-!www/data/reachable.json
 www/*.js
 www/*.css
 www/*.wasm
