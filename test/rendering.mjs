@@ -8,6 +8,7 @@ import {cellToBoundary, cellToChildren, cellToParent, cellToLatLng, gridDisk, h3
 import {tableFromArrays, tableToIPC} from 'apache-arrow';
 import {findClosestCity} from 'tiny-geocoder';
 import {colourScale} from '../src/settings.js';
+import {interpolateSpectral, rgb as d3Rgb} from 'd3';
 
 // Test the built application, never local user data or a replacement Deck layer.
 const www = new URL('../www/', import.meta.url);
@@ -540,6 +541,64 @@ try {
             await scaleSelector.selectOption('quantile');
             await page.waitForFunction(() => new URL(location.href).searchParams.get('colourScale') === 'quantile'
                 && Math.abs(window._columnData.quantile[0] - 1 / 3) < 1e-6);
+
+            const legendSnapshot = async () => {
+                await settle(page);
+                return page.locator('#observable_legend > :last-child').evaluate(async legend => {
+                    const image = new Image();
+                    image.src = legend.querySelector('image').href.baseVal;
+                    await image.decode();
+                    const canvas = document.createElement('canvas');
+                    canvas.width = image.width; canvas.height = image.height;
+                    const ctx = canvas.getContext('2d', {willReadFrequently: true});
+                    ctx.drawImage(image, 0, 0);
+                    const overlay = m._controls.find(control => control.getCanvas?.()?.id === 'deckgl-overlay');
+                    const layer = overlay._deck.props.layers.find(layer => layer.id === 'H3HexagonLayer');
+                    return {
+                        ticks: [...legend.querySelectorAll('.tick')].map(tick => [tick.textContent, tick.getAttribute('transform')]),
+                        samples: [0, 51, 204, 255].map(x => Array.from(ctx.getImageData(x, 0, 1, 1).data)),
+                        bounds: new URL(location.href).searchParams.get('legendBounds'),
+                        value: window._columnData.quantile?.[0] ?? window._columnData.value[0],
+                        colour: layer.props.getFillColor(null, {index: 0, data: layer.props.data, target: []}).slice(0, 3),
+                    };
+                });
+            };
+            for (const mode of ['quantile', 'rankit', 'linear', 'raw']) {
+                await scaleSelector.selectOption(mode);
+                await page.waitForFunction(mode => new URL(location.href).searchParams.get('colourScale') === mode
+                    && document.body.classList.contains('load-complete'), mode);
+                for (const frozen of [false, true]) {
+                    if (frozen) await page.getByRole('button', {name: 'Freeze legend', exact: true}).click();
+                    await page.waitForFunction(frozen => {
+                        const bounds = new URL(location.href).searchParams.get('legendBounds');
+                        return (frozen ? bounds && bounds !== 'null' : bounds === 'null') && document.body.classList.contains('load-complete');
+                    }, frozen);
+                    const before = await legendSnapshot();
+                    const numbers = before.ticks.map(([label]) => Number(label.replaceAll(',', '')));
+                    const positions = before.ticks.map(([, transform]) => Number(transform.match(/translate\(([^,)]+)/)[1]));
+                    assert(numbers.length > 1 && numbers[0] < numbers.at(-1)
+                        && numbers.every((n, i) => !i || n >= numbers[i - 1])
+                        && positions.every((x, i) => !i || x > positions[i - 1]), `${mode}: numeric legend ascends left to right`);
+                    for (const flip of [true, false]) {
+                        await page.locator('#setting-flip').setChecked(flip);
+                        await page.waitForFunction(flip => new URL(location.href).searchParams.get('flip') === (flip ? '1' : '0')
+                            && document.body.classList.contains('load-complete'), flip);
+                        const after = await legendSnapshot();
+                        assert.deepEqual(after.ticks, before.ticks, `${mode}: flip keeps tick labels and positions fixed`);
+                        assert.deepEqual(after.samples, flip ? [...before.samples].reverse() : before.samples, `${mode}: flip reverses gradient`);
+                        assert.equal(after.bounds, before.bounds, `${mode}: flip preserves frozen bounds`);
+                        const expected = d3Rgb(interpolateSpectral(flip ? 1 - after.value : after.value));
+                        assert(difference(after.colour, [expected.r, expected.g, expected.b]) <= 2, `${mode}: map respects flip=${flip}`);
+                        await page.locator('#settingsClose').click();
+                        await checkScaleColour();
+                        await page.locator('#settingsBtn').click();
+                    }
+                    if (frozen) await page.getByRole('button', {name: 'Unfreeze legend', exact: true}).click();
+                    await page.waitForFunction(() => new URL(location.href).searchParams.get('legendBounds') === 'null'
+                        && document.body.classList.contains('load-complete'));
+                }
+            }
+            console.log(`${device}: legend flip preserves ascending ticks and bounds, reverses gradients and map colours in all modes`);
 
             // Three visible rows: trim 0.34 selects the middle value at both ends, not min/max.
             const linearURL = new URL(page.url());

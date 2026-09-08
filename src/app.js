@@ -3322,7 +3322,8 @@ function bootstrap(meta = {}){
     async function renderLegend(fmt) {
         const title = queryTitle(settings.t, displayedSelection, findClosestCity, requestControls.schema)
         document.title = title || DEFAULT_DOCUMENT_TITLE
-        const options = {color: colourRamp, marginTop: 0, height: 32}
+        // Keep ticks ascending while sampling the ramp's complete (possibly flipped) mapping.
+        const options = {color: d3.scaleSequential(colourRamp), marginTop: 0, height: 32}
         let legend
         try {
             if (fmt !== undefined) {

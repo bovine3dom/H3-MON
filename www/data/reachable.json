@@ -1,14 +1,16 @@
 {
-  "t": "{controls.window_mode} by public transport from {TOWN_NAME} (hours), first departure {controls.departure}",
+  "t": "{controls.window_mode} {controls.metric} by public transport from {TOWN_NAME}, first departure {controls.departure}, departures sampled every {controls.step_size} hours until {controls.window_size} hours later",
+  "c": "bovine3dom, Transitous et al.",
   "raw": false,
   "trimFactor": 0,
   "quantileSource": "map",
   "defaultValue": null,
   "infill": false,
   "flip": true,
-  "_cartogram": "cartogram_weights_europe_hilo",
-  "cartogram": "none",
+  "cartogram": "cartogram_weights_europe_hilo",
+  "_cartogram": "none",
   "colourScale": "linear",
+  "requireCompleteCoverage": true,
   "controls": {
     "departure": {
       "label": "First departure",
@@ -17,7 +19,7 @@
       "default": "08:00",
       "encode": "t => t.split(':').reduce((h, m) => +h + m / 60)"
     },
-    "travelTime": {
+    "travel_time": {
       "label": "Travel time",
       "type": "number",
       "unit": "h",
@@ -56,28 +58,38 @@
     "window_mode": {
       "label": "Window mode",
       "type": "select",
-      "default": "min_union",
+      "default": "mean_intersection",
       "options": [
-        {"value": "min_union", "label": "Best-case travel time"},
-        {"value": "mean_intersection", "label": "Average travel time (unreachable dropped)"},
-        {"value": "max_intersection", "label": "Worst-case travel time"},
-        {"value": "diff_union", "label": "Difference between best and worst case travel time"},
+        {"value": "mean_intersection", "label": "Average"},
+        {"value": "min_union", "label": "Best-case"},
+        {"value": "max_intersection", "label": "Worst-case"},
+        {"value": "diff_union", "label": "Difference between best and worst case"},
+        {"value": "diff_intersection", "label": "Difference between best and worst case (always reachable)"},
         {"value": "reachable_union", "label": "Fraction of departures for which the destination is reachable within the travel budget"}
+      ]
+    },
+    "metric": {
+      "label": "Metric",
+      "type": "select",
+      "default": "distance_time_quantile",
+      "options": [
+        {"value": "distance_time_quantile", "label": "distance quantile - time quantile"},
+        {"value": "time", "label": "travel time (h)"}
       ]
     }
   },
   "onclick": {
-    "_old_url": "https://proto.olie.science/router/reachable?index={index}&departure_h={controls.departure}&budget_h={controls.travelTime}&encoding=split&max_walk_h={controls.walk_time}",
-    "_url": "https://proto.olie.science/router/reachable?index={index}&departure_h={controls.departure}&budget_h={controls.travelTime}&window_h={controls.window_size}&step_h={controls.step_size}&encoding=split&metric=distance_time_quantile&max_walk_h={controls.walk_time}&distance_mode=straight_line",
-    "_no_walk_url": "https://proto.olie.science/router/reachable?index={index}&departure_h={controls.departure}&budget_h={controls.travelTime}&window_h={controls.window_size}&step_h={controls.step_size}&encoding=split&metric=distance_time_quantile&max_walk_h={controls.walk_time}",
-    "url": "https://proto.olie.science/router/reachable?index={index}&departure_h={controls.departure}&window_h={controls.window_size}&step_h={controls.step_size}&budget_h=24&encoding=split&max_walk_h={controls.walk_time}&distance_mode=straight_line&window_mode={controls.window_mode}",
+    "_old_url": "https://proto.olie.science/router/reachable?index={index}&departure_h={controls.departure}&budget_h={controls.travel_time}&encoding=split&max_walk_h={controls.walk_time}",
+    "_url": "https://proto.olie.science/router/reachable?index={index}&departure_h={controls.departure}&budget_h={controls.travel_time}&window_h={controls.window_size}&step_h={controls.step_size}&encoding=split&metric={controls.metric}&max_walk_h={controls.walk_time}&distance_mode=straight_line",
+    "_no_walk_url": "https://proto.olie.science/router/reachable?index={index}&departure_h={controls.departure}&budget_h={controls.travel_time}&window_h={controls.window_size}&step_h={controls.step_size}&encoding=split&metric={controls.metric}&max_walk_h={controls.walk_time}",
+    "url": "https://proto.olie.science/router/reachable?index={index}&departure_h={controls.departure}&window_h={controls.window_size}&step_h={controls.step_size}&budget_h={controls.travel_time}&encoding=split&max_walk_h={controls.walk_time}&distance_mode=straight_line&window_mode={controls.window_mode}&metric={controls.metric}",
     "resolution": 6,
     "focus": false,
     "highlight": true
   },
-  "onmove": {
+  "_onmove": {
     "socket": "wss://proto.olie.science/router/query",
-    "url": "/reachable?index={index}&departure_h={controls.departure}&window_h={controls.window_size}&step_h={controls.step_size}&budget_h=3&encoding=split&max_walk_h={controls.walk_time}&distance_mode=straight_line&window_mode={controls.window_mode}",
+    "url": "/reachable?index={index}&departure_h={controls.departure}&window_h={controls.window_size}&step_h={controls.step_size}&budget_h=3&encoding=split&max_walk_h={controls.walk_time}&distance_mode=straight_line&window_mode={controls.window_mode}&metric={controls.metric}",
     "resolution": 8,
     "wait": 0,
     "_comment": "documented in docs/query-websocket.md"
