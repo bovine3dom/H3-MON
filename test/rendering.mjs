@@ -4,7 +4,7 @@ import {createServer} from 'node:http';
 import {join} from 'node:path';
 import {chromium} from 'playwright';
 import {PNG} from 'pngjs';
-import {cellToBoundary, cellToLatLng, gridDisk, h3IndexToSplitLong, latLngToCell} from 'h3-js';
+import {cellToBoundary, cellToChildren, cellToParent, cellToLatLng, gridDisk, h3IndexToSplitLong, splitLongToH3Index, latLngToCell} from 'h3-js';
 import {tableFromArrays, tableToIPC} from 'apache-arrow';
 import {findClosestCity} from 'tiny-geocoder';
 
@@ -36,6 +36,81 @@ const routes = new Map([
     ['/favicon.ico', ['image/x-icon', '']],
 ]);
 const scaleCells = [cell, ...gridDisk(cell, 1).filter(index => index !== cell).slice(0, 2), latLngToCell(0, 0, 5)];
+// Exercise production math without importing the application's DOM/bootstrap side effects.
+const appSource = await readFile(new URL('../src/app.js', import.meta.url), 'utf8');
+const mathNames = ['columnValue', 'columnLength', 'toNumber', 'toFiniteNumber', 'toStringValue',
+    'hasSplitH3Index', 'h3RowCount', 'h3IndexStringAt', 'ensureH3StringColumn', 'splitMapGet', 'splitMapHas', 'splitMapSet',
+    'getDefaultValue', 'indexValuesByH3', 'indexFiniteSplitValuesByH3', 'projectedH3Columns', 'cartoProjectionConfig',
+    'aggregateTargetMeans', 'aggregateSameResolutionSplitCartogram', 'groupCartogramWithMap', 'projectH3ToCartoResolution'];
+const mathSource = mathNames.map(name => {
+    const match = appSource.match(new RegExp(`^( *)(?:async )?function ${name}\\(`, 'm'));
+    assert(match, `Production function ${name} exists`);
+    const end = appSource.indexOf(`\n${match[1]}}`, match.index);
+    assert(end > match.index, `Production function ${name} has a closing brace`);
+    return appSource.slice(match.index, end + match[1].length + 2);
+}).join('\n');
+const h3Columns = indexes => ({
+    index_lower: Uint32Array.from(indexes, index => h3IndexToSplitLong(index)[0]),
+    index_upper: Uint32Array.from(indexes, index => h3IndexToSplitLong(index)[1]),
+});
+const coverageMath = new Function('settings', 'cartogramAgg', 'cellToChildren', 'cellToParent', 'splitLongToH3Index', `
+    const H3_INDEX_LOWER = 'index_lower', H3_INDEX_UPPER = 'index_upper', cartoRes = 5;
+    const requireCompleteCoverage = settings.requireCompleteCoverage, infill = settings.infill;
+    const perfTimer = () => () => {};
+    const cartoProjectionBuffers = async () => ({cartoH3s: cartogramAgg.h3Cols.index,
+        indexes: new Array(cartogramAgg.h3Cols.index.length)});
+    ${mathSource}
+    return {groupCartogramWithMap, projectH3ToCartoResolution};
+`);
+const aggregateFixture = (indexes, rowCell = indexes.map(() => 0), weights = null) => ({
+    h3Cols: {index: indexes, ...h3Columns(indexes)}, rowCell, weightValues: weights,
+    x: [...new Set(rowCell)], y: [...new Set(rowCell)],
+});
+const mathFor = (settings, fixture) => coverageMath(settings, fixture, cellToChildren, cellToParent, splitLongToH3Index);
+for (const split of [false, true]) {
+    for (const missing of [undefined, null, NaN]) {
+        for (const weight of [1, 0]) {
+            for (const strict of [false, true]) {
+                for (const defaultValue of [null, 12]) {
+                    const indexes = missing === undefined ? [cell] : scaleCells.slice(0, 2);
+                    const source = {...(split ? h3Columns(indexes) : {index: indexes}), value: indexes.map((_, i) => i ? missing : 6)};
+                    const math = mathFor({requireCompleteCoverage: strict, defaultValue, infill: true},
+                        aggregateFixture(scaleCells.slice(0, 2), [0, 0], [1, weight]));
+                    assert.deepEqual(math.groupCartogramWithMap(source, 'value').aggCols.value_mean,
+                        [strict && weight ? null : defaultValue != null && weight ? 9 : 6],
+                        `split=${split}, missing=${missing}, weight=${weight}, strict=${strict}, default=${defaultValue}`);
+                }
+            }
+        }
+    }
+    for (const values of [[0, 0], [0, 8], [null, null]]) {
+        const indexes = scaleCells.slice(0, 2);
+        for (const weights of [null, [1, 3]]) {
+            for (const defaultValue of [null, 12]) {
+                const math = mathFor({requireCompleteCoverage: true, defaultValue, infill: true}, aggregateFixture(indexes, [0, 0], weights));
+                assert.deepEqual(math.groupCartogramWithMap({...(split ? h3Columns(indexes) : {index: indexes}), value: values}, 'value').aggCols.value_mean,
+                    [values[1] === null ? null : values[1] * (weights ? 3 / 4 : 1 / 2)],
+                    'Complete data including zero stays numeric; wholly missing targets cannot be infilled');
+            }
+        }
+    }
+}
+for (const strict of [false, true]) {
+    const math = mathFor({requireCompleteCoverage: strict, defaultValue: 12, infill: true}, aggregateFixture([cell]));
+    const children = cellToChildren(cell, 6);
+    for (const [index, value, resolution, expected] of [
+        [children.slice(1), children.slice(1).map(() => 0), 6, strict ? null : 12 / children.length],
+        [children, children.map(() => 0), 6, 0],
+        [[cellToParent(scaleCells[3], 4)], [8], 4, null],
+        [[cellToParent(cell, 4)], [0], 4, 0],
+    ]) {
+        const {grouped} = await math.projectH3ToCartoResolution({index, value}, 'value', resolution);
+        assert.deepEqual(grouped.value, [expected], `Projected resolution ${resolution}, strict=${strict}`);
+        assert.deepEqual(math.groupCartogramWithMap(grouped, 'value').aggCols.value_mean,
+            [expected === null && !strict ? 12 : expected], 'Final aggregation cannot refill a strict missing parent');
+    }
+}
+console.log('Complete coverage: general/split aggregation, defaults, zero weights and resolution projection passed');
 const scaleResponse = (values, weights) => Buffer.from(tableToIPC(tableFromArrays({
     index_lower: Uint32Array.from(scaleCells, index => h3IndexToSplitLong(index)[0]),
     index_upper: Uint32Array.from(scaleCells, index => h3IndexToSplitLong(index)[1]),
@@ -51,6 +126,14 @@ routes.set('/data/selection_hilo.arrow', ['application/octet-stream', Buffer.fro
     x: Int32Array.from([0, 2, 4]), y: Int32Array.from([0, 2, 0]), code: Int32Array.from([100, 100, 100]),
     index_lower: Uint32Array.from(scaleCells.slice(0, 3), index => h3IndexToSplitLong(index)[0]),
     index_upper: Uint32Array.from(scaleCells.slice(0, 3), index => h3IndexToSplitLong(index)[1]),
+})))]);
+routes.set('/data/coverage.json', ['application/json', JSON.stringify({
+    cartogram: 'coverage-cartogram_hilo.arrow', requireCompleteCoverage: false, trimFactor: 0,
+})]);
+routes.set('/data/coverage.arrow', ['application/octet-stream', scaleResponse([0.6, NaN, 0, 0.8])]);
+routes.set('/data/coverage-cartogram_hilo.arrow', ['application/octet-stream', Buffer.from(tableToIPC(tableFromArrays({
+    ...h3Columns(scaleCells), x: Int32Array.from([0, 0, 2, 4]), y: Int32Array.from([0, 0, 2, 0]),
+    code: Int32Array.from([100, 100, 100, 100]), weight: Float64Array.from([1, 1, 1, 1]),
 })))]);
 for (const [name, type] of [['index.html', 'text/html'], ['app.js', 'text/javascript'], ['app.css', 'text/css']]) {
     routes.set(`/${name}`, [type, await readFile(new URL(name, www))]);
@@ -447,6 +530,60 @@ try {
             await page.waitForFunction(() => document.body.classList.contains('load-complete')
                 && document.body.classList.contains('cartogram-ready') && window._columnData?.quantile?.[1] === 0.1);
             assert.deepEqual(await page.evaluate(() => Array.from(window._columnData.quantile)), [0, 0.1, 1, 1], 'Cartogram source overrides the distant visible map distribution');
+
+            // Real Arrow aggregation: settings recompute, persist in shared URLs, and reset to metadata.
+            await page.goto(`${origin}/?data=coverage.arrow#x=${center[0]}&y=${center[1]}&z=7`);
+            const coverage = page.getByRole('checkbox', {name: 'Require complete coverage', exact: true});
+            const coverageTooltip = async (row, expected) => {
+                await page.waitForFunction(() => document.body.classList.contains('load-complete')
+                    && document.body.classList.contains('cartogram-ready'));
+                await settle(page);
+                // Use the existing canvas hit test and tooltip, not a production test hook.
+                await page.locator('#cartogram canvas').evaluate((canvas, row) => {
+                    const rect = canvas.getBoundingClientRect(), scale = Math.min(rect.width / 45, rect.height / 35);
+                    const [x, y] = canvas.__zoom.apply([
+                        (rect.width - 45 * scale) / 2 + (12.5 + row * 10) * scale,
+                        (rect.height - 35 * scale) / 2 + (row === 1 ? 22.5 : 12.5) * scale,
+                    ]);
+                    canvas.dispatchEvent(new MouseEvent('mouseleave'));
+                    canvas.dispatchEvent(new MouseEvent('mousemove', {clientX: rect.x + x, clientY: rect.y + y, bubbles: true}));
+                }, row);
+                const tooltip = page.locator('.cartogram-tooltip');
+                await tooltip.waitFor({state: 'visible'});
+                const rows = await tooltip.locator('div').allTextContents();
+                assert(rows.includes(`x: ${row * 2}`), `Tooltip must hit coverage row ${row}: ${rows}`);
+                assert.equal(rows.find(text => text.startsWith('value_mean:')), expected === null ? undefined : `value_mean: ${expected}`);
+                if (expected === null) assert(!rows.some(text => text.startsWith('carto_quantile:')), `Missing cell must stay missing: ${rows}`);
+            };
+            await coverageTooltip(0, 0.6);
+            await page.locator('#settingsBtn').click();
+            assert.equal(await coverage.isChecked(), false, 'Metadata defaults complete coverage off');
+            await coverage.check();
+            await page.waitForFunction(() => new URL(location.href).searchParams.get('requireCompleteCoverage') === '1');
+            await coverageTooltip(0, null);
+            await coverageTooltip(1, 0);
+            for (const name of ['Raw values', 'Linear colours']) {
+                if (name === 'Linear colours') await page.getByRole('checkbox', {name: 'Raw values', exact: true}).uncheck();
+                await page.getByRole('checkbox', {name, exact: true}).check();
+                await page.waitForFunction(raw => document.body.classList.contains('load-complete')
+                    && (raw ? !window._columnData.quantile : new URL(location.href).searchParams.get('linear') === '1'
+                        && window._columnData.quantile?.[0] === 1), name === 'Raw values');
+                await coverageTooltip(0, null);
+                await coverageTooltip(1, 0);
+            }
+            const coverageURL = page.url();
+            await page.goto('about:blank');
+            await page.goto(coverageURL);
+            await coverageTooltip(0, null);
+            await page.reload();
+            await coverageTooltip(0, null);
+            await page.locator('#settingsBtn').click();
+            assert.equal(await coverage.isChecked(), true, 'Shared URL and reload restore strict coverage');
+            await page.getByRole('button', {name: 'Reset Require complete coverage', exact: true}).click();
+            await page.waitForFunction(() => !new URL(location.href).searchParams.has('requireCompleteCoverage'));
+            assert.equal(await coverage.isChecked(), false, 'Reset restores metadata default');
+            await coverageTooltip(0, 0.6);
+            console.log(`${device}: complete coverage recomputation, colour modes, shared URL/reload and reset passed`);
 
             // Selection is independent of scaling and camera focus, in both panes.
             for (const [focus, highlight] of [[false, true], [true, false]]) {

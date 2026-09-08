@@ -88,8 +88,19 @@ so colours are less evenly distributed than the default quantiles.
 | `cartogram` | Cartogram weights | filename, default-like value, or `none` | Selects a weights file or disables the cartogram. |
 | `defaultValue` | Missing value | number or null | Fallback used for missing contributors during cartogram aggregation. |
 | `infill` | Infill empty cells | boolean | Allows the missing value to fill wholly unobserved cartogram cells. |
+| `requireCompleteCoverage` | Require complete coverage | boolean, default false | Leaves a cartogram cell null if any finite positive-weight contributor is missing; overrides `defaultValue` and `infill`. |
 
 Boolean URL values retain the existing accepted forms: bare parameters and most values enable a setting, while `0`, `false`, `off`, and `no` disable it. The settings panel writes explicit `1` or `0` values and preserves unrelated query parameters and the map-position hash.
+
+**Require complete coverage** applies immediately from Settings, or can be enabled with
+`requireCompleteCoverage=1` in the URL or `"requireCompleteCoverage": true` in global
+metadata. Absent rows, nulls and non-finite values count as missing. A missing contributor
+with zero weight does not invalidate an otherwise valid cell. When fine-resolution data
+is rolled up, every expected H3 child (as enumerated by `cellToChildren`) must have a
+finite value, including children entirely absent from the input. An incomplete parent
+remains missing in the cartogram, even with a Missing value configured. When coarse data
+is projected down, a missing parent leaves its projected children missing. Disabling
+the setting restores the existing partial-mean and missing-value/infill behavior.
 
 Example metadata:
 

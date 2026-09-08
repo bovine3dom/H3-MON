@@ -1462,6 +1462,7 @@ function bootstrap(meta = {}){
         document.body.classList.remove('cartogram-ready')
     }
     let infill = settingEnabled(settings.infill, false)
+    let requireCompleteCoverage = settingEnabled(settings.requireCompleteCoverage, false)
     let showTrains = settingEnabled(settings.trains, false)
     let colourRamp
     const fileSource = {url: `data/${file_name}`, ext, format, cacheBust: true}
@@ -1883,7 +1884,8 @@ function bootstrap(meta = {}){
         const numerator = new Float64Array(targetCount)
         const denominator = new Float64Array(targetCount)
         const observedByTarget = new Uint8Array(targetCount)
-        const missingWeightByTarget = fillMissingContributors && defaultNumber != null ? new Float64Array(targetCount) : null
+        const incompleteByTarget = requireCompleteCoverage ? new Uint8Array(targetCount) : null
+        const missingWeightByTarget = !requireCompleteCoverage && fillMissingContributors && defaultNumber != null ? new Float64Array(targetCount) : null
         const missingCountByTarget = missingWeightByTarget ? new Uint32Array(targetCount) : null
         const missingValidCountByTarget = missingWeightByTarget ? new Uint32Array(targetCount) : null
         const invalidMissingWeightByTarget = missingWeightByTarget ? new Uint32Array(targetCount) : null
@@ -1908,6 +1910,10 @@ function bootstrap(meta = {}){
                 if (coveredSourceH3s) coveredSourceH3s.add(splitSource ? splitLongToH3Index(sourceH3, sourceH3Upper) : sourceH3)
             }
             if (value == null) {
+                if (incompleteByTarget) {
+                    const weight = getWeight(contributor, targetIndex, sourceH3)
+                    if (Number.isFinite(weight) && weight > 0) incompleteByTarget[targetIndex] = 1
+                }
                 if (missingWeightByTarget) {
                     missingCountByTarget[targetIndex]++
                     const weight = getWeight(contributor, targetIndex, sourceH3)
@@ -1953,7 +1959,7 @@ function bootstrap(meta = {}){
         let targetsWithData = 0
         let targetsMissing = 0
         for (let i = 0; i < targetCount; i++) {
-            if (denominator[i]) {
+            if (denominator[i] && !incompleteByTarget?.[i]) {
                 values[i] = numerator[i] / denominator[i]
                 targetsWithData++
             } else {
@@ -1983,6 +1989,7 @@ function bootstrap(meta = {}){
         const numerator = new Float64Array(cellCount)
         const denominator = new Float64Array(cellCount)
         const observedByTarget = new Uint8Array(cellCount)
+        const incompleteByTarget = requireCompleteCoverage ? new Uint8Array(cellCount) : null
         const values = new Array(cellCount)
         const rowCell = cartogramAgg.rowCell
         const lowerCol = cartogramAgg.h3Cols[H3_INDEX_LOWER]
@@ -1998,7 +2005,13 @@ function bootstrap(meta = {}){
         for (let i = 0; i < cartogramRows; i++) {
             const targetIndex = rowCell[i]
             const value = splitMapGet(valuesRoot, toNumber(lowerCol[i]), toNumber(upperCol[i]))
-            if (value == null) continue
+            if (value == null) {
+                if (incompleteByTarget) {
+                    const weight = weightValues ? weightValues[i] : 1
+                    if (Number.isFinite(weight) && weight > 0) incompleteByTarget[targetIndex] = 1
+                }
+                continue
+            }
 
             contributorValuesObserved++
             if (!observedByTarget[targetIndex]) {
@@ -2019,7 +2032,7 @@ function bootstrap(meta = {}){
         let targetsWithData = 0
         let targetsMissing = 0
         for (let i = 0; i < cellCount; i++) {
-            if (denominator[i]) {
+            if (denominator[i] && !incompleteByTarget?.[i]) {
                 values[i] = numerator[i] / denominator[i]
                 targetsWithData++
             } else {
@@ -3375,6 +3388,7 @@ function bootstrap(meta = {}){
         settings = nextSettings
         refreshCrosshair()
         infill = settingEnabled(settings.infill, false)
+        requireCompleteCoverage = settingEnabled(settings.requireCompleteCoverage, false)
         showTrains = settingEnabled(settings.trains, false)
         document.title = queryTitle(settings.t, displayedSelection, findClosestCity) || DEFAULT_DOCUMENT_TITLE
         if (changedKeys.has('colourScheme') || changedKeys.has('cyclical') || changedKeys.has('flip')) rebuildColourRamp()

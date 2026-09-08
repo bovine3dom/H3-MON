@@ -66,7 +66,7 @@ Deno.test('removing an override reveals metadata again', () => {
     assert(effectiveSettingValue(metadata, overrides, SETTINGS_BY_KEY.get('flip')) === true)
 })
 
-for (const key of ['rankit', 'linear']) Deno.test(`${key} defaults off and URL overrides metadata in both directions`, () => {
+for (const key of ['rankit', 'linear', 'requireCompleteCoverage']) Deno.test(`${key} defaults off and URL overrides metadata in both directions`, () => {
     const setting = SETTINGS_BY_KEY.get(key)
     assert(effectiveSettingValue({}, {}, setting) === false)
     assert(effectiveSettingValue({[key]: true}, {}, setting) === true)
@@ -77,6 +77,21 @@ for (const key of ['rankit', 'linear']) Deno.test(`${key} defaults off and URL o
         assert(url.searchParams.get(key) === (value ? '1' : '0'))
     }
     assert(url.searchParams.get('data') === 'test.csv' && url.hash === '#x=1')
+})
+
+Deno.test('complete coverage applies immediately and preserves missing-value settings', () => {
+    const setting = SETTINGS_BY_KEY.get('requireCompleteCoverage')
+    assert(setting.name === 'Require complete coverage')
+    assert(setting.type === 'boolean' && setting.apply === 'immediate' && setting.refresh === 'data')
+    for (const value of ['', '1', 'true', '0', 'false', 'off', 'no']) {
+        const layers = readSettingLayers({defaultValue: 0, infill: true}, new URLSearchParams(`requireCompleteCoverage=${value}`))
+        assert(layers.settings.requireCompleteCoverage === ['', '1', 'true'].includes(value))
+        assert(layers.settings.defaultValue === 0 && layers.settings.infill === true)
+    }
+    const url = new URL('https://example.test/?requireCompleteCoverage=1&data=test.csv')
+    updateUrlSettingOverrides(url, {})
+    assert(!url.searchParams.has(setting.key) && url.searchParams.get('data') === 'test.csv')
+    assert(effectiveSettingValue({requireCompleteCoverage: true}, {}, setting) === true)
 })
 
 Deno.test('crosshair defaults on and metadata can be overridden through shared URLs', () => {

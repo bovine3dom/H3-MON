@@ -204,6 +204,16 @@ export const SETTINGS_SCHEMA = [
         apply: 'immediate',
         refresh: 'data',
     },
+    {
+        key: 'requireCompleteCoverage',
+        name: 'Require complete coverage',
+        description: 'Leave a cartogram cell empty if any positive-weight contributor is missing, including expected children. Overrides Missing value and Fill empty cells.',
+        group: 'Map and cartogram',
+        type: 'boolean',
+        defaultValue: false,
+        apply: 'immediate',
+        refresh: 'data',
+    },
 ]
 
 export const SETTINGS_BY_KEY = new Map(SETTINGS_SCHEMA.map(setting => [setting.key, setting]))
