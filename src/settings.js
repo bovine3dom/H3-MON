@@ -41,7 +41,6 @@ export const SETTINGS_SCHEMA = [
     {
         key: 'c',
         name: 'Attribution',
-        description: 'Separate additional attribution names with commas.',
         group: 'General',
         type: 'text',
         defaultValue: '',
@@ -80,7 +79,7 @@ export const SETTINGS_SCHEMA = [
     {
         key: 'colourScale',
         name: 'Colour scale',
-        description: 'Choose how values map to colours. Frozen legend bounds take precedence.',
+        description: 'Mapping of values to colours: quantile makes the scale linear in ranking; rankit applies a normal transform to the quantile scale, compressing the median and stretching the outliers; linear is, er, linear; raw is a linear scale between 0 and 1.',
         group: 'Values',
         type: 'select',
         defaultValue: 'quantile',
@@ -149,7 +148,7 @@ export const SETTINGS_SCHEMA = [
     {
         key: 'quantileSource',
         name: 'Quantile source',
-        description: 'Base colours on values visible in the map or cartogram.',
+        description: 'Get ranks from the map or cartogram for quantile/rankit scales.',
         group: 'Values',
         type: 'select',
         defaultValue: 'map',
@@ -173,7 +172,7 @@ export const SETTINGS_SCHEMA = [
     {
         key: 'crosshair',
         name: 'Centre crosshair',
-        description: 'Mark the geographic query centre when movement requests are enabled.',
+        description: 'Mark the centre of the map with a cross.',
         group: 'Map and cartogram',
         type: 'boolean',
         defaultValue: true,
@@ -203,7 +202,7 @@ export const SETTINGS_SCHEMA = [
     {
         key: 'defaultValue',
         name: 'Missing value',
-        description: 'Value used for missing contributors when aggregating the cartogram.',
+        description: 'Value used for missing contributors of nearby cells when aggregating the cartogram.',
         group: 'Map and cartogram',
         type: 'nullableNumber',
         defaultValue: null,
@@ -213,7 +212,7 @@ export const SETTINGS_SCHEMA = [
     {
         key: 'infill',
         name: 'Fill empty cells',
-        description: 'Apply Missing value even where no observations exist.',
+        description: 'Use the "Missing value" even where no neighbouring cells exist.',
         group: 'Map and cartogram',
         type: 'boolean',
         defaultValue: false,
