@@ -31,6 +31,41 @@ Arrow files can be stream (IPC) or random access (...file. yeah they really do
 call them arrow file files.) but they must be uncompressed and have no
 dictionary encoded strings.
 
+### example query
+
+some languages make getting split ints easy. clickhouse does not
+
+```sql
+-- clickhouse
+select * except (index, h3) from (
+    select *, reinterpretAsUInt64(reverse(unhex(index))) h3,
+    toUInt32(bitAnd(h3, toUInt64(4294967295))) as index_lower,
+    toUInt32(bitShiftRight(h3, 32)) as index_upper
+    -- bitOr(toUInt64(index_lower), bitShiftLeft(toUInt64(index_upper),32)) -- validation
+    from 'cartogram_weights.arrow'
+)
+into outfile 'cartogram_weights_hilo.arrow' settings output_format_arrow_compression_method = 'none'
+```
+
+julia makes it marginally easier
+
+```julia
+#!/usr/bin/env julia
+using Arrow, DataFrames
+
+df = # exercise for the reader
+loweruint64(x) = x % UInt32
+upperuint64(x) = (x >> 32) % UInt32
+
+output = DataFrame(
+    index_lower = loweruint64.(df.h3),
+    index_upper = upperuint64.(df.h3),
+    value = df.value,
+)
+
+Arrow.write("www/data/example.arrow", output; compress = nothing, dictencode = false)
+```
+
 ## Metadata and settings
 
 Put metadata alongside the data: `www/data/example.json` for `example.arrow`,
