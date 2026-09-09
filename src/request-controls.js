@@ -64,14 +64,29 @@ export function createRequestControls(definitions = {}) {
             return value
         }
         setting.defaultValue = parse(definition.default)
-        let convert = value => value
-        if (Object.hasOwn(definition, 'encode')) {
-            if (typeof definition.encode !== 'string') fail('encode must be a JavaScript function expression string')
+        function compile(name) {
+            if (typeof definition[name] !== 'string') fail(`${name} must be a JavaScript function expression string`)
             try {
-                convert = new Function('"use strict"; return (' + definition.encode + ')')()
-                if (typeof convert !== 'function') throw new Error('encode must evaluate to a function')
+                const fn = new Function('"use strict"; return (' + definition[name] + ')')()
+                if (typeof fn !== 'function') throw new Error(`${name} must evaluate to a function`)
+                return fn
             } catch (error) {
-                fail(`invalid encode converter: ${error?.message ?? String(error)}`)
+                fail(`invalid ${name} ${name === 'encode' ? 'converter' : 'predicate'}: ${error?.message ?? String(error)}`)
+            }
+        }
+        const convert = Object.hasOwn(definition, 'encode') ? compile('encode') : value => value
+        if (Object.hasOwn(definition, 'showIf')) {
+            const showIf = compile('showIf')
+            setting.showIf = values => {
+                let visible
+                try {
+                    visible = showIf(values)
+                } catch (error) {
+                    fail(`showIf failed: ${error?.message ?? String(error)}`)
+                }
+                if (visible instanceof Promise) visible.catch(() => {})
+                if (typeof visible !== 'boolean') fail('showIf must return a boolean')
+                return visible
             }
         }
         return {id, setting, parse, convert, fail}

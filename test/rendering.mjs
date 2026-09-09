@@ -218,6 +218,91 @@ try {
             await frame(page, `${device}-restored`);
 
             await page.setViewportSize({width, height});
+            // Visibility changes must not remove request values or hide validation errors.
+            const conditional = {cartogram: 'none', trimFactor: 0, t: '{controls.metric}: {controls.origin_radius}',
+                controls: {
+                    metric: {label: 'Metric', type: 'select', default: 'time_distance_quantile', options: [
+                        {value: 'time_distance_quantile', label: 'Distance quantile'},
+                        {value: 'total_population', label: 'Total population'}, {value: 'time', label: 'Time'}]},
+                    distance_mode: {label: 'Distance mode', type: 'select', default: 'walk', options: [
+                        {value: 'walk', label: 'Walking'}, {value: 'cycle', label: 'Cycling'}],
+                        showIf: 'values => values.metric === "time_distance_quantile"'},
+                    origin_radius: {label: 'Origin radius', type: 'number', default: 2, min: 0, encode: 'value => value * 1000',
+                        showIf: 'values => Object.isFrozen(values) && values.metric === "total_population" && typeof values.origin_radius === "number" && values.origin_radius >= 0'},
+                }, onclick: {url: '/visibility-result?metric={controls.metric}&mode={controls.distance_mode}&radius={controls.origin_radius}', focus: false}};
+            json('/data/visibility.json', conditional);
+            routes.set('/data/visibility.csv', routes.get('/data/query.csv'));
+            const visibilityRequests = [];
+            await page.route('**/visibility-result?*', route => {
+                visibilityRequests.push(new URL(route.request().url()).searchParams);
+                return route.fulfill({contentType: 'application/octet-stream', body: values(17)});
+            });
+            await page.goto(url('visibility.csv&p.metric=total_population&p.origin_radius=3'));
+            await displayed(page, 0.65);
+            const metric = page.getByRole('combobox', {name: 'Metric', exact: true});
+            const mode = page.locator('[id="setting-p.distance_mode"]'), radius = page.locator('[id="setting-p.origin_radius"]');
+            assert(await mode.evaluate(input => input.closest('.setting-field').hidden), 'URL visibility is set before opening settings');
+            await clickCell(page);
+            await displayed(page, 17);
+            await page.locator('#settingsBtn').click();
+            assert(await radius.isVisible() && await mode.isHidden(), 'Initial total_population URL shows radius and hides distance mode');
+            assert.equal(await page.title(), 'Total population: 3', 'Titles use raw values and select labels');
+            const switchMetric = async value => {
+                const state = await metric.evaluate((input, value) => {
+                    input.value = value;
+                    input.dispatchEvent(new Event('change', {bubbles: true}));
+                    return ['distance_mode', 'origin_radius'].map(id => document.getElementById(`setting-p.${id}`).closest('.setting-field').hidden);
+                }, value);
+                assert.deepEqual(state, [value !== 'time_distance_quantile', value !== 'total_population'], 'Visibility changes before the request debounce');
+                assert.equal(await page.evaluate(() => window._columnData.value[0]), 17, 'Displayed results remain during edits');
+                await setting(page, 'p.metric', value);
+            };
+            await switchMetric('time_distance_quantile');
+            await mode.selectOption('cycle');
+            await setting(page, 'p.distance_mode', 'cycle');
+            await switchMetric('total_population');
+            assert.equal(visibilityRequests.at(-1).get('mode'), 'cycle', 'Hidden select remains in requests');
+            await switchMetric('time_distance_quantile');
+            assert.equal(await mode.inputValue(), 'cycle', 'Switching back preserves the selected value');
+            assert.equal(visibilityRequests.at(-1).get('radius'), '3000', 'Hidden number is still encoded');
+            assert.equal(new URL(page.url()).searchParams.get('p.origin_radius'), '3');
+            await page.reload();
+            await displayed(page, 17);
+            await page.locator('#settingsBtn').click();
+            assert(await radius.isHidden() && await mode.isVisible(), 'URL replay restores visibility');
+            assert.equal(await mode.inputValue(), 'cycle');
+            assert.equal(await radius.inputValue(), '3');
+            await switchMetric('total_population');
+            await radius.fill('-1');
+            await metric.selectOption('time');
+            assert(await radius.isVisible(), 'An invalid field stays visible when its predicate is false');
+            assert.equal(await radius.getAttribute('aria-invalid'), 'true');
+            assert(await page.locator('[id="setting-p.origin_radius-error"]').isVisible());
+            const blockedCount = visibilityRequests.length;
+            await page.locator('#setting-t').fill('Visibility validation barrier');
+            await setting(page, 't', 'Visibility validation barrier');
+            assert.equal(visibilityRequests.length, blockedCount, 'Invalid request fields block requests beyond the debounce');
+            await radius.fill('4');
+            assert(await radius.isHidden(), 'A corrected field can be hidden');
+            await setting(page, 'p.metric', 'time');
+            assert.equal(visibilityRequests.at(-1).get('radius'), '4000');
+            await page.locator('#settingsResetAll').click();
+            assert(await mode.isVisible() && await radius.isHidden(), 'Reset restores default visibility immediately');
+            assert.equal(await mode.inputValue(), 'walk');
+            assert.equal(await radius.inputValue(), '2');
+            await setting(page, 'p.metric', 'time_distance_quantile');
+            assert.equal(visibilityRequests.at(-1).get('radius'), '2000');
+            conditional.controls.origin_radius.showIf = 'values => { throw new Error("visibility-test-failure") }';
+            json('/data/visibility.json', conditional);
+            await page.goto(url('visibility.csv'));
+            await displayed(page, 0.65);
+            await page.locator('#settingsBtn').click();
+            assert(await radius.isVisible(), 'A predicate error leaves the field visible');
+            const predicateError = page.locator('[id="setting-p.origin_radius-error"]');
+            assert(await predicateError.isVisible());
+            assert.match(await predicateError.textContent(), /visibility-test-failure/);
+            console.log(`${device}: conditional request controls passed`);
+
             await page.goto(url('settings.arrow&raw=true&linear=true'));
             await displayed(page, 10);
             await page.locator('#settingsBtn').click();

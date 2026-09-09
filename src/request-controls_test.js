@@ -26,10 +26,50 @@ Deno.test('controls expose typed panel labels and encode only namespaced raw inp
     const settings = readSettingLayers({}, new URLSearchParams('time=999&p.time=30&p.flag=false&p.unknown=x')).settings
     assert(controls.schema[0].name === 'Travel time (min)' && controls.schema[0].type === 'number')
     assert(controls.schema[4].options[0].name === 'Train')
+    assert(controls.schema.every(setting => !Object.hasOwn(setting, 'showIf')))
     assert(controls.values(settings).time === 30 && controls.values(settings).flag === false)
     assert(!Object.hasOwn(controls.values(settings), 'unknown'))
     assert(controls.encode(settings)['controls.time'] === '1800' && settings['p.time'] === '30')
     assert(controls.values().time === 180 && controls.encode()['controls.text'] === '')
+})
+
+Deno.test('showIf uses typed raw values and option values without encoding', () => {
+    const controls = createRequestControls({
+        text: {...definitions.text, showIf: 'values => (values.mode === "rail" || values.mode === "bus") && values.time >= 30 && !values.flag && ["", "note"].includes(values.text)'},
+        time: {...definitions.time, encode: '() => { throw new Error("encoding must not run") }'},
+        flag: definitions.flag,
+        mode: {...definitions.mode, options: [...definitions.mode.options, {value: 'bus', label: 'Bus'}], encode: '() => "Train"'},
+    })
+    const showIf = controls.schema[0].showIf
+    const raw = controls.values({'p.time': '30', 'p.flag': 'false'})
+    assert(Object.isFrozen(raw) && raw.mode === 'rail' && raw.time === 30 && raw.flag === false)
+    assert(showIf(raw) === true)
+    assert(showIf(controls.values({'p.mode': 'bus', 'p.time': '30', 'p.flag': 'false'})) === true)
+    assert(showIf(controls.values()) === false)
+    assert(showIf(controls.values({'p.time': '29', 'p.flag': 'false'})) === false)
+    assert(showIf(controls.values({'p.time': '30', 'p.flag': 'false', 'p.text': 'other'})) === false)
+})
+
+Deno.test('hidden controls keep their raw values and encoded request fields', () => {
+    const controls = createRequestControls({time: {...definitions.time, showIf: 'values => values.time < 0'}})
+    const settings = {'p.time': '30'}
+    assert(controls.schema[0].showIf(controls.values(settings)) === false)
+    assert(controls.values(settings).time === 30)
+    assert(controls.encode(settings)['controls.time'] === '1800')
+    assert(settings['p.time'] === '30')
+})
+
+Deno.test('showIf rejects malformed metadata, runtime errors and nonboolean results', async () => {
+    for (const showIf of [undefined, null, true, () => true, 'values =>', 'true', '{}']) {
+        assertThrows(() => createRequestControls({text: {...definitions.text, showIf}}), '"text":')
+        assertThrows(() => createRequestControls({text: {...definitions.text, showIf}}), 'showIf')
+    }
+    for (const showIf of ['() => 1', '() => "false"', '() => null', '() => ({})', '() => { throw new Error("broken") }', 'async () => true', 'async () => { throw new Error("rejected") }']) {
+        const controls = createRequestControls({text: {...definitions.text, showIf}})
+        const evaluate = () => controls.schema[0].showIf(controls.values())
+        assertThrows(evaluate, '"text": showIf')
+    }
+    await new Promise(resolve => setTimeout(resolve, 0))
 })
 
 Deno.test('typed validation rejects invalid inputs and malformed select definitions', () => {

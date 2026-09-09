@@ -174,7 +174,7 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
             (input.validity.badInput || input.validity.rangeUnderflow || input.validity.rangeOverflow ||
                 input.validity.valueMissing || input.type === 'time' && !input.validity.valid))
         const error = invalidInput?.validationMessage ||
-            validateSettingValue(setting, field.control.read())
+            validateSettingValue(setting, field.control.read()) || field.visibilityError
         field.error.textContent = error || ''
         field.error.hidden = !error
         for (const target of targets) {
@@ -182,6 +182,26 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
             target.setAttribute('aria-invalid', String(!!error))
         }
         return !error
+    }
+
+    function refreshVisibility() {
+        const values = Object.freeze(Object.fromEntries(requestSettings.map(setting => [setting.key.slice(2), fieldValue(setting)])))
+        for (const setting of schema) {
+            if (setting.hidden) continue
+            const field = fields.get(setting.key)
+            let visible = true
+            field.visibilityError = ''
+            try {
+                if (setting.showIf) visible = setting.showIf(values)
+            } catch (error) {
+                field.visibilityError = error?.message || `Visibility rule failed for ${setting.name}`
+            }
+            const valid = refreshField(setting)
+            field.root.hidden = !visible && valid
+        }
+        for (const group of groups.values()) {
+            group.hidden = ![...group.querySelectorAll('.setting-field')].some(root => !root.hidden)
+        }
     }
 
     function refreshActions() {
@@ -245,6 +265,7 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
     }
 
     function schedule(setting, typed = false) {
+        if (setting.refresh === 'request') refreshVisibility()
         const valid = refreshField(setting)
         refreshActions()
         if (setting.refresh === 'request') {
@@ -305,10 +326,10 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
             root.append(help)
         }
         group.append(root)
-        Object.assign(fields.get(setting.key), {control, focusTarget, error})
+        Object.assign(fields.get(setting.key), {root, control, focusTarget, error})
         control.node.addEventListener(control.event || 'settingchange', event => changed(setting, event))
-        refreshField(setting)
     }
+    refreshVisibility()
 
     form.addEventListener('submit', event => event.preventDefault())
     resetAllButton.addEventListener('click', () => {
@@ -322,8 +343,8 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
         for (const setting of schema) {
             edited(setting)
             fields.get(setting.key).control?.write(fieldValue(setting))
-            refreshField(setting)
         }
+        refreshVisibility()
         refreshActions()
         commit(snapshot(changedSettings.filter(setting => setting.refresh !== 'request')))
         if (changedSettings.some(setting => setting.refresh === 'request')) schedule(requestSettings[0])
@@ -339,7 +360,7 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
     }
 
     return {
-        focusFirst: () => fields.get(schema.find(setting => !setting.hidden)?.key)?.focusTarget?.focus(),
+        focusFirst: () => fields.get(schema.find(setting => !setting.hidden && !fields.get(setting.key).root.hidden)?.key)?.focusTarget?.focus(),
         getOverrides: () => ({...draftOverrides}),
         refreshCompleted,
     }

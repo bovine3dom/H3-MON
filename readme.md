@@ -140,6 +140,36 @@ Add `unit` and `help` if required.
 For numbers and times, use `min`, `max` and `step` to configure the input.
 For selects, supply `options`, for example `[{"value":"mean","label":"Mean"}]`.
 
+To show a control only when a condition is true, add `showIf` to its definition:
+
+```json
+{
+  "label": "Distance mode",
+  "type": "select",
+  "default": "straight_line",
+  "options": [
+    {"value": "straight_line", "label": "Straight line"},
+    {"value": "network", "label": "Network"}
+  ],
+  "showIf": "values => values.metric === 'time_distance_quantile'"
+}
+```
+
+`values` contains control inputs before conversion, keyed by ID. For selects, use option values, not labels.
+Return `true` to show the control or `false` to hide it. Without `showIf`, the control is visible.
+Use JavaScript conditions to combine comparisons:
+
+```json
+{
+  "showIf": "values => ['time_distance_quantile', 'distance_time_quantile'].includes(values.metric) && values.window_size > 0"
+}
+```
+
+Visibility updates when inputs change, including after Reset or loading a shared link.
+Hidden controls keep their values in requests and shared links.
+Invalid controls remain visible so you can correct them.
+If a condition cannot be evaluated, its control remains visible with an error message.
+
 To convert an input before sending it, supply `encode` as a JavaScript function string:
 
 ```json
