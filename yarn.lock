@@ -1734,12 +1734,7 @@ jszip@^3.1.5:
     readable-stream "~2.3.6"
     setimmediate "^1.0.5"
 
-kdbush@^4.0.2:
-  version "4.0.2"
-  resolved "https://registry.yarnpkg.com/kdbush/-/kdbush-4.0.2.tgz#2f7b7246328b4657dd122b6c7f025fbc2c868e39"
-  integrity sha512-WbCVYJ27Sz8zi9Q7Q0xHC+05iwkm3Znipc2XTlrnJbsHMYktW4hPhXUE8Ys1engBrvffoSCqbil1JQAa7clRpA==
-
-kdbush@^4.1.0:
+kdbush@^4.0.2, kdbush@^4.1.0:
   version "4.1.0"
   resolved "https://registry.yarnpkg.com/kdbush/-/kdbush-4.1.0.tgz#d504bc0447a59be4fb75533a5c25e316b3ed8859"
   integrity sha512-e9vurzrXJQrFX6ckpHP3bvj5l+9CnYzkxDNnNQ1h2QTqdWsUAJgXiKdGNcOa1EY85dU8KbQ+z/FdQdB7P+9yfQ==
@@ -2051,10 +2046,10 @@ thrift@^0.19.0:
     q "^1.5.0"
     ws "^5.2.3"
 
-tiny-geocoder@^0.0.1:
-  version "0.0.1"
-  resolved "https://registry.yarnpkg.com/tiny-geocoder/-/tiny-geocoder-0.0.1.tgz#56eb5bc9e047cf9dd80336e88fdf47bb49cf54b3"
-  integrity sha512-vn8oEW2oPqga67KcxG5hx1YfI/VX3waot555gNtGwPxjriu2s1YExitNJ86ZLsNDs5NeCBWHc556iVECV4Vgbw==
+tiny-geocoder@^0.0.2:
+  version "0.0.2"
+  resolved "https://registry.yarnpkg.com/tiny-geocoder/-/tiny-geocoder-0.0.2.tgz#b7563e541b9fdcaa31e9c0997c14bd45ff89a401"
+  integrity sha512-0ReP3mvQdSeYODk5Q1P71XBjfIdJfiW22DM6MGjA9DhYOzlbIR1kIpbuA5ZXORBpbjd3YKBtEo3rJy8F08ilMg==
   dependencies:
     geokdbush "^2.1.0"
     kdbush "^4.0.2"

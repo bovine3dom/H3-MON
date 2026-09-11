@@ -26,7 +26,7 @@
         "faster-h3-for-deckgl": "https://github.com/bovine3dom/faster-h3-for-deckgl",
         "h3-js": "^4.4.0",
         "maplibre-gl": "^5.24.0",
-        "tiny-geocoder": "^0.0.1"
+        "tiny-geocoder": "^0.0.2"
     },
     "devDependencies": {
         "apache-arrow": "19.0.1",
