@@ -17,12 +17,38 @@ export function centralLinkedH3(indices, latLngForIndex) {
     return best
 }
 
-export function createInteractions({getSettings, getReplaySettings = getSettings, getValues, request, onError = () => {}, baseURL}) {
+export function createInteractions({getSettings, getReplaySettings = getSettings, metadata = {}, getValues, request, onError = () => {}, baseURL}) {
     let moveConfig = null
     let moveTask = null
     let lastKey = null
     let lastAction = null
     let lastDelivery = Promise.resolve(false)
+    const estimators = new Map(['onclick', 'onmove'].map(key => {
+        const definition = metadata[key]?.estimator
+        try {
+            const estimate = typeof definition === 'string' ? new Function(`return (${definition})`)() : definition
+            if (definition !== undefined && typeof estimate !== 'function') throw new Error('Estimator must be a function')
+            return [key, estimate]
+        } catch (error) { return [key, () => { throw error }] }
+    }))
+
+    function assess(key, url) {
+        const estimate = estimators.get(key)
+        const budget = metadata[key]?.budget
+        if (!estimate && budget === undefined) return undefined
+        if (budget !== undefined && (!Number.isFinite(budget) || budget < 0)) throw new Error('Budget must be finite, nonnegative CPU milliseconds')
+        if (!estimate) throw new Error('Budget requires an estimator')
+        if (url == null) throw new Error('Waiting for request resolution')
+        const cost = estimate(url)
+        if (cost instanceof Promise) cost.catch(() => {})
+        if (!Number.isFinite(cost) || cost < 0) throw new Error('Estimator must return finite, nonnegative CPU milliseconds')
+        return {cost, budget, over: budget !== undefined && cost > budget}
+    }
+
+    function check(key, url) {
+        if (assess(key, url)?.over && !settingEnabled(getSettings()[`${key}BudgetOverride`]))
+            throw new Error(`${key} CPU estimate exceeds budget. Enable ${key}BudgetOverride in Settings.`)
+    }
 
     function readConfig(key, settings = getSettings()) {
         const config = settings?.[key]
@@ -49,6 +75,7 @@ export function createInteractions({getSettings, getReplaySettings = getSettings
 
     function deliver({url, context}, config, force = false) {
         if (config && JSON.stringify(readConfig('onmove')) !== JSON.stringify(config)) return Promise.resolve(false)
+        check(context.event, url)
         // Ignore untemplated pan/zoom changes, but retain transport and query-state identity.
         const key = JSON.stringify([url, context.socket, context.event, context.manual,
             context.values.index, context.values._inputs, context.point?.cartogram])
@@ -75,6 +102,30 @@ export function createInteractions({getSettings, getReplaySettings = getSettings
         lastKey = null
     }
 
+    function prepare(key, point, config, {manual = false, overrides} = {}) {
+        if (!config) return null
+        const values = getValues(config, point, overrides)
+        if (values == null) return null
+        const template = config.url.replace(/\{([^{}]*)\}/g, (_, token) => {
+            if ((!['index', 'index_lower', 'index_upper', 'lat', 'lng', 'zoom'].includes(token) && !/^controls\.[A-Za-z][A-Za-z0-9_]*$/.test(token)) || !Object.hasOwn(values, token)) {
+                throw new Error(`Unknown or missing interaction token: ${token}`)
+            }
+            const value = values[token]
+            if (typeof value !== 'string' && typeof value !== 'number' || typeof value === 'number' && !Number.isFinite(value)) {
+                throw new Error(`Invalid interaction value: ${token}`)
+            }
+            return encodeURIComponent(value)
+        })
+        if (/[{}]/.test(template)) throw new Error('Unresolved interaction token')
+        const resolved = new URL(template, baseURL)
+        if (!['http:', 'https:'].includes(resolved.protocol) || resolved.username || resolved.password) {
+            throw new Error('Interaction URLs must use HTTP(S) without credentials')
+        }
+        if (config.socket && resolved.href.includes('#')) throw new Error('Socket query URLs must not contain fragments')
+        const url = config.socket ? resolved.pathname + resolved.search : resolved.href
+        return {url, context: {event: key, point, values, socket: config.socket, manual}}
+    }
+
     function run(key, point, {manual = false, force = true} = {}) {
         const action = {key, point: point && typeof point === 'object' ? {...point} : point}
         try {
@@ -94,26 +145,8 @@ export function createInteractions({getSettings, getReplaySettings = getSettings
                 moveTask = null
                 moveConfig = null
             }
-            const values = getValues(config, point)
-            if (values == null) return Promise.resolve(false)
-            const template = config.url.replace(/\{([^{}]*)\}/g, (_, token) => {
-                if ((!['index', 'index_lower', 'index_upper', 'lat', 'lng', 'zoom'].includes(token) && !/^controls\.[A-Za-z][A-Za-z0-9_]*$/.test(token)) || !Object.hasOwn(values, token)) {
-                    throw new Error(`Unknown or missing interaction token: ${token}`)
-                }
-                const value = values[token]
-                if (typeof value !== 'string' && typeof value !== 'number' || typeof value === 'number' && !Number.isFinite(value)) {
-                    throw new Error(`Invalid interaction value: ${token}`)
-                }
-                return encodeURIComponent(value)
-            })
-            if (/[{}]/.test(template)) throw new Error('Unresolved interaction token')
-            const url = new URL(template, baseURL)
-            if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
-                throw new Error('Interaction URLs must use HTTP(S) without credentials')
-            }
-            if (config.socket && url.href.includes('#')) throw new Error('Socket query URLs must not contain fragments')
-            const packet = {url: config.socket ? url.pathname + url.search : url.href,
-                context: {event: key, point: lastAction.point, values, socket: config.socket, manual}}
+            const packet = prepare(key, action.point, config, {manual})
+            if (!packet?.context) return Promise.resolve(false)
             if (moving && moveTask) moveTask(packet)
             else if (moving) return deliver(packet, config)
             else return deliver(packet, null, force)
@@ -126,8 +159,14 @@ export function createInteractions({getSettings, getReplaySettings = getSettings
     }
 
     return {
+        check,
+        preview: (key, point, overrides) => {
+            if (!estimators.get(key) && metadata[key]?.budget === undefined) return undefined
+            try { return assess(key, prepare(key, point, readConfig(key, getReplaySettings()), {overrides})?.url) }
+            catch (error) { return {error: error?.message || String(error)} }
+        },
         click: point => run('onclick', point), move: point => run('onmove', point), cancel,
-        retry: () => lastAction && run(lastAction.key, lastAction.point, {manual: true}),
+        retry: (key = lastAction?.key) => lastAction && key === lastAction.key && run(key, lastAction.point, {manual: true}),
         replay: (key, point, options) => run(key, point, {...options, manual: true}),
     }
 }

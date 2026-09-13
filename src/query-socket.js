@@ -4,6 +4,7 @@
 export function createQuerySocket({
     onResult,
     onError = () => {},
+    beforeSend = () => {},
     WebSocketImpl = globalThis.WebSocket,
     setTimeout: schedule = globalThis.setTimeout,
     clearTimeout: cancel = globalThis.clearTimeout,
@@ -143,6 +144,8 @@ export function createQuerySocket({
         }
         const id = nextId++
         const request = queued
+        try { beforeSend(request.url, request.context) }
+        catch (error) { invalidate(); onError(error, request.context); return }
         try {
             socket.send(JSON.stringify({type: 'query', id, url: request.url}))
         } catch (error) {

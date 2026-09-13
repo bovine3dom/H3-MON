@@ -375,6 +375,28 @@ try {
             await scale.fill('');
             await setting(page, 'scale', 'json:null');
 
+            json('/data/budget.json', {cartogram: 'none', onclick: {url: '/budget-result?cost={controls.cost}', resolution: 5,
+                estimator: 'url => Number(new URL(url).searchParams.get("cost"))', budget: 10, focus: false}, controls: {cost: {label: 'Cost', type: 'number', default: 11}}});
+            routes.set('/data/budget.csv', routes.get('/data/query.csv'));
+            let budgetRequests = 0, heldBudget;
+            await page.route('**/budget-result?*', route => { budgetRequests++; if (budgetRequests === 2) heldBudget = route;
+                else return route.fulfill({contentType: 'application/octet-stream', body: values(10)}); });
+            await page.goto(url('budget.csv')); await displayed(page, 0.65); await clickCell(page);
+            const budgetError = page.locator('#request-status[data-state="error"] .request-error');
+            await budgetError.waitFor(); assert.equal(budgetRequests, 0);
+            await page.locator('#request-status .request-retry').click(); await budgetError.waitFor(); await page.locator('#settingsBtn').click();
+            const approval = page.locator('#setting-onclickBudgetOverride'), estimate = approval.locator('xpath=../..').getByRole('status');
+            assert.match(await estimate.textContent(), /11 CPU ms.*10 CPU ms/);
+            assert(red(await estimate.evaluate(el => getComputedStyle(el).color.match(/\d+/g).map(Number))));
+            await approval.check(); await setting(page, 'onclickBudgetOverride', '1'); await displayed(page, 10);
+            assert.equal(budgetRequests, 1);
+            const restoredRequest = page.waitForRequest('**/budget-result?*'); await page.reload(); await restoredRequest;
+            await page.locator('#settingsBtn').click(); assert(await approval.isChecked());
+            await approval.uncheck(); await page.waitForFunction(() => new URL(location.href).searchParams.get('onclickBudgetOverride') === '0', null, {timeout: 1000});
+            await page.locator('#settingsClose').click(); await clickCell(page); await budgetError.waitFor();
+            assert.equal(budgetRequests, 2, 'Revocation blocks new requests while the approved response is held');
+            await heldBudget.fulfill({contentType: 'application/octet-stream', body: values(10)});
+
             // Real Arrow aggregation and canvas hit testing: a positive-weight missing contributor suppresses its target.
             await page.goto(url('coverage.arrow'));
             await displayed(page, 0.6);

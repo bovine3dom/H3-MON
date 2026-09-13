@@ -1,4 +1,5 @@
 import {centralLinkedH3, createInteractions} from './interactions.js'
+import {readSettingLayers, updateUrlSettingOverrides} from './settings.js'
 
 function assert(condition, message = 'Assertion failed') {
     if (!condition) throw new Error(message)
@@ -16,6 +17,32 @@ function setup(settings, options = {}) {
     })
     return {...interactions, calls, errors}
 }
+
+Deno.test('CPU estimators receive resolved, encoded HTTP and WebSocket URLs', async () => {
+    for (const socket of [undefined, 'wss://example.test/stream']) {
+        let estimated
+        const metadata = {onclick: {url: '../query?cost={controls.cost}&index={index}', socket, estimator: url => { estimated = url; return 10 }}}
+        const f = setup(metadata, {metadata}), point = {index: 'a/b', 'controls.cost': '08:30 + 1'}
+        assert(f.preview('onclick', point).cost === 10 && !f.calls.length && f.preview('onmove', point) === undefined)
+        await f.click(point)
+        assert(estimated === f.calls[0].url && estimated === `${socket ? '' : 'https://example.test'}/query?cost=08%3A30%20%2B%201&index=a%2Fb`)
+    }
+})
+
+Deno.test('CPU budgets allow equality, reject invalid estimates and persist independent overrides', async () => {
+    const hook = {url: '/query?cost={controls.cost}', budget: 10, estimator: 'url => Number(new URL(url).searchParams.get("cost"))'}
+    for (const event of ['onclick', 'onmove']) {
+        const metadata = {onclick: hook, onmove: {...hook, wait: 0}}, state = {...metadata}, f = setup(state, {metadata})
+        assert(JSON.stringify(f.preview(event, {'controls.cost': 10})) === '{"cost":10,"budget":10,"over":false}')
+        f.check(event, 'https://example.test/query?cost=10')
+        assert(await f.replay(event, {'controls.cost': 11}) === false && /exceeds budget/.test(f.errors.at(-1).message))
+        const flag = `${event}BudgetOverride`, url = updateUrlSettingOverrides(new URL('https://example.test'), {[flag]: true})
+        Object.assign(state, readSettingLayers(metadata, url.searchParams).settings)
+        assert(state[flag] && !state[`${event === 'onclick' ? 'onmove' : 'onclick'}BudgetOverride`] && !await f.retry(event === 'onclick' ? 'onmove' : 'onclick'))
+        assert(await f.retry(event) && await f.retry() && state[flag])
+        assert(f.preview(event, {'controls.cost': 'invalid'}).error && await f.replay(event, {'controls.cost': 'invalid'}) === false)
+    }
+})
 
 Deno.test('cartogram origin is central and deterministic, including the dateline', () => {
     const points = {left: [0, -1], middle: [0, 0], right: [0, 1]}

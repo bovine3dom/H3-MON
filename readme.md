@@ -194,6 +194,26 @@ They store the query position in `query` JSON and the camera position after `#`.
 The title keeps its placeholders.
 Opening a link sends the query again; it does not load a saved result.
 
+## Request CPU Budgets
+
+Set `estimator` and an optional `budget` on `onclick` or `onmove` in metadata:
+
+```json
+{
+  "onclick": {
+    "url": "/query?cost=50&index={index}",
+    "estimator": "url => Number(new URL(url, 'https://example.org').searchParams.get('cost'))",
+    "budget": 100
+  }
+}
+```
+
+The function receives the resolved URL, or the path and query for WebSocket requests. Use finite, nonnegative CPU milliseconds for the estimate and budget. Equal values are allowed.
+Settings shows live estimates in red when they exceed the budget. Without a budget, the estimate is information only.
+Invalid estimates cause a request error with Retry, even with an override. Estimator code comes only from the original metadata.
+The independent flags `onclickBudgetOverride` and `onmoveBudgetOverride` default to false. Select a flag in Settings to allow requests above its budget and retry the matching last action.
+Flags persist in the page URL without a time limit, across input and location changes. Clear a flag or use Reset to restore metadata defaults.
+
 # Cartogram mapping spec
 
 Cartograms are maps with complex projections, most commonly used for

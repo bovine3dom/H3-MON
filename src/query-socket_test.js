@@ -10,7 +10,7 @@ function frame(id) {
     return bytes.buffer
 }
 
-function fixture() {
+function fixture(beforeSend) {
     const sockets = [], timers = new Map(), results = [], errors = []
     let timerId = 0
     class Socket {
@@ -28,6 +28,7 @@ function fixture() {
         disconnect() { this.close(); this.onclose?.() }
     }
     const client = createQuerySocket({
+        beforeSend,
         WebSocketImpl: Socket,
         onResult: (bytes, context) => results.push({bytes, context}),
         onError: (error, context) => errors.push({error, context}),
@@ -111,7 +112,8 @@ Deno.test('byte backpressure polls latest work; invalidation and disposal cancel
 })
 
 Deno.test('reconnect sends latest with a fresh ID and rejects old-connection delivery', () => {
-    const f = fixture()
+    let revoked = false
+    const f = fixture(() => { if (revoked) throw new Error('CPU budget') })
     f.submit(1)
     const old = f.sockets[0]
     old.open()
@@ -127,6 +129,10 @@ Deno.test('reconnect sends latest with a fresh ID and rejects old-connection del
     assert(f.results.length === 1 && f.results[0].context.n === 2)
     current.disconnect()
     assert(f.errors.length === 2)
+    revoked = true
+    f.tick()
+    f.sockets[2].open()
+    assert(!f.sockets[2].sent.length && !f.timers.size && f.errors.at(-1).error.message === 'CPU budget' && f.errors.at(-1).context.n === 2)
     f.client.dispose()
     assert(f.timers.size === 0)
 })

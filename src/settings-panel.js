@@ -146,7 +146,7 @@ function makeControl(setting, value, colourSchemes, getLegendBounds) {
     }
 }
 
-export function createSettingsPanel({metadata, overrides, colourSchemes, onApply, getLegendBounds, schema = SETTINGS_SCHEMA}) {
+export function createSettingsPanel({metadata, overrides, colourSchemes, onApply, getLegendBounds, getRequestEstimates = () => ({}), schema = SETTINGS_SCHEMA}) {
     const form = document.getElementById('settingsForm')
     const fieldsRoot = document.getElementById('settingsFields')
     const resetAllButton = document.getElementById('settingsResetAll')
@@ -163,6 +163,28 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
 
     const hasOverride = (values, key) => Object.prototype.hasOwnProperty.call(values, key)
     const fieldValue = setting => effectiveSettingValue(metadata, draftOverrides, setting)
+    function refreshEstimates() {
+        const estimates = getRequestEstimates(draftOverrides)
+        const duration = value => `${Number(value.toPrecision(3))} CPU ms`
+        for (const key of ['onclick', 'onmove']) {
+            const field = fields.get(`${key}BudgetOverride`)
+            if (!field?.root) continue
+            const estimate = estimates[key]
+            field.root.hidden = !estimate
+            field.controlRow.hidden = estimate?.budget === undefined
+            field.name.textContent = estimate?.budget === undefined ? `${key} CPU estimate` : field.setting.name
+            if (!field.estimate) {
+                field.estimate = element('div', 'setting-description')
+                field.estimate.setAttribute('role', 'status')
+                field.root.append(field.estimate)
+            }
+            field.estimate.classList.toggle('setting-error', !!(estimate?.over || estimate?.error))
+            const text = !estimate ? '' : estimate.error || `Estimate: ${duration(estimate.cost)}.${estimate.budget === undefined ? '' : ` Budget: ${duration(estimate.budget)}.`}`
+            if (field.estimate.textContent !== text) field.estimate.textContent = text
+        }
+        const group = groups.get('CPU budgets')
+        if (group) group.hidden = ![...group.querySelectorAll('.setting-field')].some(root => !root.hidden)
+    }
 
     function refreshField(setting) {
         const field = fields.get(setting.key)
@@ -266,6 +288,7 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
 
     function schedule(setting, typed = false) {
         if (setting.refresh === 'request') refreshVisibility()
+        refreshEstimates()
         const valid = refreshField(setting)
         refreshActions()
         if (setting.refresh === 'request') {
@@ -276,7 +299,8 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
             requestTimer = setTimeout(() => performCommit(values), 350)
         } else if (valid) {
             const values = snapshot([setting])
-            if (typed) fields.get(setting.key).timer = setTimeout(() => commit(values), 350)
+            if (setting.refresh === 'budget') performCommit(values)
+            else if (typed) fields.get(setting.key).timer = setTimeout(() => commit(values), 350)
             else commit(values)
         }
     }
@@ -326,10 +350,11 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
             root.append(help)
         }
         group.append(root)
-        Object.assign(fields.get(setting.key), {root, control, focusTarget, error})
+        Object.assign(fields.get(setting.key), {root, name, controlRow, setting, control, focusTarget, error})
         control.node.addEventListener(control.event || 'settingchange', event => changed(setting, event))
     }
     refreshVisibility()
+    refreshEstimates()
 
     form.addEventListener('submit', event => event.preventDefault())
     resetAllButton.addEventListener('click', () => {
@@ -345,8 +370,10 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
             fields.get(setting.key).control?.write(fieldValue(setting))
         }
         refreshVisibility()
+        refreshEstimates()
         refreshActions()
-        commit(snapshot(changedSettings.filter(setting => setting.refresh !== 'request')))
+        performCommit(snapshot(changedSettings.filter(setting => setting.refresh === 'budget')))
+        commit(snapshot(changedSettings.filter(setting => !['request', 'budget'].includes(setting.refresh))))
         if (changedSettings.some(setting => setting.refresh === 'request')) schedule(requestSettings[0])
     })
     refreshActions()
@@ -360,8 +387,9 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
     }
 
     return {
-        focusFirst: () => fields.get(schema.find(setting => !setting.hidden && !fields.get(setting.key).root.hidden)?.key)?.focusTarget?.focus(),
+        focusFirst: () => fields.get(schema.find(setting => !setting.hidden && !fields.get(setting.key).root.hidden && !fields.get(setting.key).controlRow.hidden)?.key)?.focusTarget?.focus(),
         getOverrides: () => ({...draftOverrides}),
         refreshCompleted,
+        refreshEstimates,
     }
 }

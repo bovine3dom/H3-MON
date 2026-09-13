@@ -73,6 +73,10 @@
     padding: 5px 24px 5px 0;
 }
 
+.settings-panel .setting-field > .setting-description {
+    grid-column: 1 / -1;
+}
+
 .settings-panel .setting-name,
 .settings-panel .setting-description,
 .settings-panel .setting-error,

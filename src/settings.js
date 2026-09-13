@@ -29,6 +29,10 @@ export function leadingThrottleDebounce(callback, wait = 350) {
 }
 
 export const SETTINGS_SCHEMA = [
+    ...['onclick', 'onmove'].map(event => ({
+        key: `${event}BudgetOverride`, name: `${event}: allow requests over CPU budget`,
+        group: 'CPU budgets', type: 'boolean', defaultValue: false, refresh: 'budget',
+    })),
     {
         key: 't',
         name: 'Title',

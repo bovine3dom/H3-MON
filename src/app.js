@@ -2348,7 +2348,8 @@ function bootstrap(meta = {}){
                                     if (!updateRunning && !metadataSettings.onclick?.url && !acceptedSource.query) {
                                         restoreSelection({event: 'onclick', ...point}).catch(error => console.warn('Could not highlight linked cells', error))
                                     }
-                                    interactions.click(point)
+                                    interactions.click(lastClickPoint = point)
+                                    settingsPanelApi?.refreshEstimates()
                                 } catch (e) {
                                     console.warn('Cartogram click failed', {row: i, cartoRes, dataH3Res}, e)
                                 }
@@ -2767,11 +2768,13 @@ function bootstrap(meta = {}){
         if (event.target?.closest?.('#search-container, .maplibregl-ctrl, .pane-btn')) hideMapHoverTooltip()
     }, {capture: true})
 
+    let lastClickPoint = restoredQuery?.event === 'onclick' ? restoredQuery : null
     const interactions = createInteractions({
-        getSettings: () => settings,
+        metadata: metadataSettings,
+        getSettings: () => ({...metadataSettings, ...(settingsPanelApi?.getOverrides() ?? settingOverrides), onclick: settings.onclick, onmove: settings.onmove}),
         getReplaySettings: () => metadataSettings,
         baseURL: document.baseURI,
-        getValues: (config, point) => {
+        getValues: (config, point, overrides) => {
             if (point.index && !isValidCell(point.index)) throw new Error('Invalid query H3 cell')
             // Saved queries retain their resolved resolution; fresh clicks follow the data.
             const resolution = config.resolution ?? (point.event && point.index ? getResolution(point.index) : dataH3Res)
@@ -2782,7 +2785,7 @@ function bootstrap(meta = {}){
             if (sourceResolution > resolution) index = cellToParent(index, resolution)
             else if (sourceResolution < resolution) index = latLngToCell(point.lat, lng, resolution)
             const [lower, upper] = h3IndexToSplitLong(index)
-            const inputs = {...metadataSettings, ...(settingsPanelApi?.getOverrides() ?? settingOverrides)}
+            const inputs = {...metadataSettings, ...(overrides ?? settingsPanelApi?.getOverrides() ?? settingOverrides)}
             return {index, index_lower: lower >>> 0, index_upper: upper >>> 0,
                 lat: point.lat, lng, zoom: point.zoom ?? map.getZoom(),
                 ...requestControls.encode(inputs), _inputs: requestControls.values(inputs)}
@@ -2839,6 +2842,10 @@ function bootstrap(meta = {}){
         return failedSource && !failedSource.socket ? update(failedSource) : interactions.retry()
     }
 
+    function guardSource(source) {
+        if (source.query && !source.bytes) interactions.check(source.query.event, source.url)
+    }
+
     let displayedSelection = null
     async function restoreSelection(query) {
         displayedSelection = query
@@ -2872,13 +2879,15 @@ function bootstrap(meta = {}){
                 restoreSelection({event: 'onclick', index, lat: event.lngLat.lat, lng: event.lngLat.lng}).catch(error => console.warn('Could not highlight linked cells', error))
             }
         }
-        interactions.click(event.lngLat)
+        interactions.click(lastClickPoint = event.lngLat)
+        settingsPanelApi?.refreshEstimates()
     })
     let userInteractionMove = false
     map.on('movestart', event => {
         userInteractionMove = !!(event.keyboardMoving || eventStartedInMap(event.originalEvent))
     })
     map.on('move', event => {
+        settingsPanelApi?.refreshEstimates()
         userInteractionMove ||= !!(event.keyboardMoving || eventStartedInMap(event.originalEvent))
         if (userInteractionMove) interactions.move(map.getCenter())
     })
@@ -3037,6 +3046,7 @@ function bootstrap(meta = {}){
     }
 
     const querySocket = createQuerySocket({
+        beforeSend: (_url, source) => guardSource(source),
         onResult: (bytes, source) => {
             if (source.generation !== socketGeneration) return
             pendingSocketResult = {...source, bytes, requestSource: source}
@@ -3102,6 +3112,7 @@ function bootstrap(meta = {}){
         }
 
         try {
+            guardSource(source)
             const layer = await getHexData(publishLayer, source, signal)
             signal.throwIfAborted()
             if (!mapReady) {
@@ -3198,6 +3209,7 @@ function bootstrap(meta = {}){
                 updatePromise = null
                 updateController = null
                 loadingSource = null
+                settingsPanelApi?.refreshEstimates()
             }
         })()
         return updatePromise
@@ -3351,6 +3363,13 @@ function bootstrap(meta = {}){
 
     let settingsApplication = Promise.resolve()
     function applySettingOverrides(nextOverrides, changedSettings) {
+        if (changedSettings.every(setting => setting.refresh === 'budget')) {
+            urlState.replace(updateUrlSettingOverrides(urlState.read(), nextOverrides, changedSettings))
+            for (const {key} of changedSettings) {
+                if (settingEnabled(nextOverrides[key] ?? metadataSettings[key])) void interactions.retry(key.replace('BudgetOverride', ''))
+            }
+            return
+        }
         if (changedSettings.every(setting => setting.refresh === 'request')) {
             const url = updateUrlSettingOverrides(urlState.read(), nextOverrides, changedSettings)
             const nextLayers = readSettingLayers(metadataSettings, url.searchParams, settingSchema)
@@ -3400,6 +3419,8 @@ function bootstrap(meta = {}){
         colourSchemes: availableColourSchemes(),
         onApply: applySettingOverrides,
         getLegendBounds: () => displayedLegendBounds,
+        getRequestEstimates: overrides => Object.fromEntries(['onclick', 'onmove'].map(key => [key,
+            interactions.preview(key, key === 'onclick' ? lastClickPoint || map.getCenter() : map.getCenter(), {...metadataSettings, ...overrides})])),
     })
 
     if (restoredQuery) repeatQuery()
