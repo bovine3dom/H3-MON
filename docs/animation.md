@@ -20,6 +20,10 @@ defaults in Settings. They do not start playback.
 
 Use an `onclick` or `onmove` query URL with the control tokens. In Settings,
 open Animate to change Start, End, Step, or FPS. Time steps are integer seconds.
+Enable the Animation timeline setting to show a labelled, draggable timeline above
+the map. Dragging a marker requests and displays that frame. The timeline Play
+and Pause buttons control the same player as the buttons in Settings. The setting
+is off by default and can be set in metadata or with the `animate` URL parameter.
 FPS (`step_rate`) is frames per second. A number step must point toward the end.
 
 Time endpoints use `HH:MM` or `HH:MM:SS`. An earlier end is on the next day.

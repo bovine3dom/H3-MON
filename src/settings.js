@@ -34,6 +34,15 @@ export const SETTINGS_SCHEMA = [
         group: 'CPU budgets', type: 'boolean', defaultValue: false, refresh: 'budget',
     })),
     {
+        key: 'animate',
+        name: 'Animation timeline',
+        description: 'Show the animation timeline above the map. Playback remains paused until you select Play.',
+        group: 'General',
+        type: 'boolean',
+        defaultValue: false,
+        refresh: 'render',
+    },
+    {
         key: 't',
         name: 'Title',
         group: 'General',

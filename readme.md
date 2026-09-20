@@ -77,7 +77,8 @@ Put metadata alongside the data: `www/data/example.json` for `example.arrow`,
   "c": "Example data provider",
   "cartogram": "none",
   "colourScheme": "interpolateViridis",
-  "colourScale": "quantile"
+  "colourScale": "quantile",
+  "animate": false
 }
 ```
 
@@ -99,6 +100,7 @@ Put metadata alongside the data: `www/data/example.json` for `example.arrow`,
 | `defaultValue` | Substitute for missing h3 contributors to cartogram cells that have other contributors; a number or `null`. |
 | `infill` | Let that substitute fill wholly unobserved cartogram cells too. |
 | `requireCompleteCoverage` | Makes missings infectious for the cartogram |
+| `animate` | Show the paused animation timeline. The default is `false`. |
 
 ## Interaction endpoints
 

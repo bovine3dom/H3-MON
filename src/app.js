@@ -18,6 +18,7 @@ import {centralLinkedH3, createInteractions} from './interactions'
 import {createRequestStatus} from './request-status'
 import {createRequestControls} from './request-controls'
 import {animationSequence, createAnimationPlayer} from './animation'
+import {createAnimationTimeline} from './animation-timeline'
 import {createQuerySocket} from './query-socket'
 import {readQueryState, writeQueryState} from './query-state'
 import {rankitScale} from './rankit'
@@ -3340,7 +3341,9 @@ function bootstrap(meta = {}){
         document.title = queryTitle(settings.t, displayedSelection, findClosestCity, requestControls.schema) || DEFAULT_DOCUMENT_TITLE
         if (changedKeys.has('colourScheme') || changedKeys.has('cyclical') || changedKeys.has('flip')) rebuildColourRamp()
         if (changedKeys.has('cartogram')) resetCartogramState()
+        if (changedKeys.has('animate') && !settingEnabled(settings.animate, false) && playing) setAnimation('')
         updateAttribution()
+        refreshAnimationTimeline()
     }
 
     async function refreshPresentation(changedKeys) {
@@ -3376,6 +3379,7 @@ function bootstrap(meta = {}){
             urlState.replace(updateUrlSettingOverrides(urlState.read(), nextOverrides, changedSettings.filter(setting => setting.refresh === 'animation')))
             if (changedSettings.some(setting => setting.key === 'animation')) setAnimation(nextOverrides.animation || '')
             else if (changedSettings.some(setting => setting.key === `a.${playing}`)) setAnimation(playing)
+            refreshAnimationTimeline()
             changedSettings = changedSettings.filter(setting => setting.refresh !== 'animation')
             if (!changedSettings.length) return
         }
@@ -3429,6 +3433,7 @@ function bootstrap(meta = {}){
     }
 
     let playing = ''
+    let animationTarget = requestControls.animations[0]?.key.slice(2) || ''
     let animationSocket = null
     let animationReject = null
     function invalidateAnimation() {
@@ -3444,7 +3449,8 @@ function bootstrap(meta = {}){
             const event = lastQuery?.event || ['onmove', 'onclick'].find(key => metadataSettings[key]?.url)
             if (!event) throw new Error('Animation requires an onclick or onmove URL.')
             const point = event === 'onmove' ? map.getCenter() : lastClickPoint || lastQuery || map.getCenter()
-            const overrides = {...metadataSettings, ...settingsPanelApi.getOverrides(), [`p.${playing}`]: value}
+            const id = animationTarget || playing
+            const overrides = {...metadataSettings, ...settingsPanelApi.getOverrides(), [`p.${id}`]: value}
             // Hold playback during an incomplete control edit.
             try { requestControls.values(overrides) } catch { return null }
             return interactions.prepare(event, point, overrides)
@@ -3496,19 +3502,21 @@ function bootstrap(meta = {}){
             const {index_lower, index_upper, _inputs, ...query} = source.query
             lastQuery = query
             const url = writeQueryState(urlState.read(), query)
+            const id = animationTarget || playing
             for (const setting of requestControls.schema) {
                 const value = source.query._inputs[setting.key.slice(2)]
-                if (setting.key === `p.${playing}`) {
+                if (setting.key === `p.${id}`) {
                     settingsPanelApi.setQuiet(setting.key, value)
                     settingOverrides[setting.key] = settings[setting.key] = value
                 }
                 url.searchParams.set(setting.key, serializeSettingValue(setting, value))
             }
             urlState.replace(url)
+            refreshAnimationTimeline()
             return true
         },
         onError: error => {
-            const id = playing
+            const id = playing || animationTarget
             setAnimation('')
             settingsPanelApi.animationError(id, error)
             requestStatus.fail(error, {hasResult: mainLayers.length > 0, onRetry: () => setAnimation(id)})
@@ -3526,6 +3534,7 @@ function bootstrap(meta = {}){
                 const overrides = settingsPanelApi.getOverrides()
                 const config = Object.hasOwn(overrides, definition.key) ? overrides[definition.key] : definition.defaultValue
                 const sequence = animationSequence(definition.control, config)
+                animationTarget = id
                 settingsPanelApi.setQuiet(definition.key, config)
                 if (failedSource?.animation) {
                     requestError = failedSource = null
@@ -3544,6 +3553,58 @@ function bootstrap(meta = {}){
         }
         else url.searchParams.delete('animation')
         urlState.replace(url)
+        refreshAnimationTimeline()
+    }
+    let animationTimeline = null
+    function animationDefinition(id) {
+        return requestControls.animations.find(setting => setting.key === `a.${id}`)
+    }
+    function animationTimelineState(id) {
+        const definition = animationDefinition(id)
+        if (!definition) return null
+        const overrides = settingsPanelApi.getOverrides()
+        const config = Object.hasOwn(overrides, definition.key) ? overrides[definition.key] : definition.defaultValue
+        const sequence = animationSequence(definition.control, config)
+        const current = Object.hasOwn(overrides, definition.control.key)
+            ? overrides[definition.control.key]
+            : settings[definition.control.key] ?? definition.control.defaultValue
+        return {sequence, index: sequence.index(current), key: JSON.stringify(config)}
+    }
+    function refreshAnimationTimeline() {
+        if (!animationTimeline) return
+        animationTimeline.update({
+            enabled: settingEnabled(settings.animate, false),
+            animations: requestControls.animations.map(definition => ({
+                id: definition.key.slice(2), name: definition.control.name, type: definition.control.type,
+            })),
+            activeId: animationTarget || playing,
+            playing,
+            getState: animationTimelineState,
+        })
+    }
+    function chooseAnimation(id) {
+        if (!animationDefinition(id)) return
+        animationTarget = id
+        if (playing && playing !== id) setAnimation(id)
+        else refreshAnimationTimeline()
+    }
+    function seekAnimationFrame(id, index) {
+        const definition = animationDefinition(id)
+        if (!definition) return
+        try {
+            const overrides = settingsPanelApi.getOverrides()
+            const config = Object.hasOwn(overrides, definition.key) ? overrides[definition.key] : definition.defaultValue
+            const sequence = animationSequence(definition.control, config)
+            if (playing) setAnimation('')
+            else invalidateAnimation()
+            animationTarget = id
+            const value = sequence.value(index)
+            settingsPanelApi.setQuiet(definition.control.key, value)
+            refreshAnimationTimeline()
+            void animationPlayer.seek(sequence, index)
+        } catch (error) {
+            settingsPanelApi.animationError(id, error)
+        }
     }
     for (const event of ['pagehide', 'popstate', 'hashchange']) window.addEventListener(event, () => {
         settingsPanelApi.cancelPendingAnimation()
@@ -3564,6 +3625,13 @@ function bootstrap(meta = {}){
         getRequestEstimates: overrides => Object.fromEntries(['onclick', 'onmove'].map(key => [key,
             interactions.preview(key, key === 'onclick' ? lastClickPoint || map.getCenter() : map.getCenter(), {...metadataSettings, ...overrides})])),
     })
+    animationTimeline = createAnimationTimeline({
+        root: document.getElementById('animation-timeline'),
+        onPlay: id => id && (playing === id ? setAnimation('') : setAnimation(id)),
+        onSeek: seekAnimationFrame,
+        onSelect: chooseAnimation,
+    })
+    refreshAnimationTimeline()
 
     if (restoredQuery) repeatQuery()
     if (params.get('animation')) setAnimation(params.get('animation'))

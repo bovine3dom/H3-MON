@@ -92,7 +92,28 @@ export function createAnimationPlayer({prepare, fetchFrame, present, onError, la
         }
         if (active && session === run) timer = setTimeout(tick, 16)
     }
-    return {pause, invalidate, start(next, current) {
+    async function seek(next, index = cursor) {
+        pause()
+        if (next) sequence = next
+        if (!sequence) return false
+        index = Number.isFinite(index) ? Math.max(0, Math.min(sequence.count - 1, Math.trunc(index))) : 0
+        const token = generation
+        controller = new AbortController()
+        try {
+            const packet = prepare(sequence.value(index))
+            if (!packet) return false
+            const frame = await fetchFrame(packet, controller.signal)
+            if (token !== generation) return false
+            if (await present(frame) && token === generation) {
+                cursor = (index + 1) % sequence.count
+                return true
+            }
+        } catch (error) {
+            if (token === generation) onError(error)
+        }
+        return false
+    }
+    return {pause, invalidate, seek, start(next, current) {
         pause(); sequence = next; cursor = sequence.index(current); due = 0; active = true; void tick()
     }}
 }

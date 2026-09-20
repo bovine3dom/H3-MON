@@ -1,0 +1,120 @@
+#animation-timeline {
+    position: absolute;
+    top: 0.35rem;
+    left: 4.8rem;
+    right: 4.8rem;
+    z-index: 5;
+    display: grid;
+    grid-template-columns: auto minmax(7rem, 13rem) auto minmax(4rem, auto);
+    align-items: center;
+    gap: 0.35rem 0.55rem;
+    box-sizing: border-box;
+    padding: 0.35rem 0.55rem 0.25rem;
+    border: 1px solid rgba(0, 0, 0, 0.16);
+    border-radius: 0.3rem;
+    background: rgba(255, 255, 255, 0.95);
+    box-shadow: var(--control-shadow);
+    color: #222;
+    font: 12px/1.2 sans-serif;
+}
+
+#animation-timeline[hidden] {
+    display: none;
+}
+
+.animation-timeline-title {
+    font-weight: 600;
+}
+
+.animation-timeline-selector select,
+.animation-timeline-play {
+    box-sizing: border-box;
+    min-width: 0;
+    padding: 0.2rem 0.35rem;
+    border: var(--btn-border);
+    border-radius: var(--btn-radius);
+    background: var(--btn-bg);
+    color: inherit;
+    font: inherit;
+}
+
+.animation-timeline-play {
+    cursor: pointer;
+}
+
+.animation-timeline-play:hover {
+    background: var(--btn-hover);
+}
+
+.animation-timeline-value {
+    min-width: 4rem;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+    white-space: nowrap;
+}
+
+.animation-timeline-track {
+    grid-column: 1 / -1;
+    min-width: 0;
+}
+
+.animation-timeline-track input[type="range"] {
+    display: block;
+    width: 100%;
+    margin: 0;
+    accent-color: #245d9c;
+    cursor: grab;
+}
+
+.animation-timeline-track input[type="range"]:active {
+    cursor: grabbing;
+}
+
+.animation-timeline-labels {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.45rem;
+    min-height: 1.15em;
+    overflow: hidden;
+    color: #555;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.animation-timeline-labels span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.animation-timeline-labels .current {
+    color: #111;
+    font-weight: 600;
+}
+
+.animation-timeline-error {
+    grid-column: 1 / -1;
+    color: #a11;
+}
+
+#animation-timeline :is(select, button, input):focus-visible {
+    outline: 2px solid #245d9c;
+    outline-offset: 2px;
+}
+
+@media (max-width: 620px) {
+    #animation-timeline {
+        left: 3.7rem;
+        right: 3.7rem;
+        grid-template-columns: auto minmax(0, 1fr) auto;
+    }
+
+    .animation-timeline-title,
+    .animation-timeline-selector {
+        display: none;
+    }
+
+    .animation-timeline-value {
+        text-align: left;
+    }
+}
