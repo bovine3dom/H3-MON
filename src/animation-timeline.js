@@ -42,7 +42,12 @@ export function createAnimationTimeline({root, onPlay = () => {}, onSeek = () =>
     const resizeToLegend = () => {
         const parent = root.parentElement?.getBoundingClientRect()
         const legend = attribution?.getBoundingClientRect()
-        if (parent && legend) root.style.setProperty('--animation-timeline-right', `${Math.max(0, parent.right - legend.left + 8)}px`)
+        if (parent && legend) {
+            root.style.setProperty('--animation-timeline-right', `${Math.max(0, parent.right - legend.left + 8)}px`)
+            root.style.setProperty('--animation-timeline-bottom', `${Math.max(0, parent.bottom - legend.top + 8)}px`)
+            root.style.setProperty('--animation-timeline-legend-width', `${Math.max(0, legend.width - 8)}px`)
+            root.style.setProperty('--animation-timeline-legend-right', `${Math.max(0, parent.right - legend.right + 4)}px`)
+        }
         fitLabels()
     }
     const labelResizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(fitLabels)

@@ -3600,6 +3600,8 @@ function bootstrap(meta = {}){
                 animationTimeline?.setFrame(index)
             } else invalidateAnimation()
             animationTarget = id
+            const value = sequence.value(index)
+            settingsPanelApi.setQuiet(definition.control.key, value)
             void animationPlayer.seek(sequence, index)
         } catch (error) {
             settingsPanelApi.animationError(id, error)

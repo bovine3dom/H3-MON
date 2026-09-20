@@ -107,6 +107,11 @@
 
 @media (max-width: 620px) {
     #animation-timeline {
+        left: auto;
+        right: var(--animation-timeline-legend-right, 0.5rem);
+        width: min(var(--animation-timeline-legend-width, 100%), calc(100% - 1rem));
+        bottom: var(--animation-timeline-bottom, 0.5rem);
+        z-index: 2;
         grid-template-columns: auto minmax(0, 1fr);
     }
 
