@@ -3238,6 +3238,8 @@ function bootstrap(meta = {}){
     legendDiv.id = "observable_legend"
     const attributionText = document.createElement('span')
     l.replaceChildren(legendDiv, attributionText)
+    const legendResizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => fitLegendTicks(legendDiv))
+    legendResizeObserver?.observe(legendDiv)
     function updateAttribution() {
         const extra = settings.c ? String(settings.c).split(",") : []
         if (showTrains) extra.push("OpenRailwayMap")
@@ -3248,6 +3250,35 @@ function bootstrap(meta = {}){
     let pendingLegend = null
     let legendFormatter
     let displayedLegendBounds = null
+    function fitLegendTicks(container) {
+        const svg = container?.querySelector?.('svg')
+        const ticks = svg ? [...svg.querySelectorAll('.tick')].map(tick => tick.querySelector('text')).filter(Boolean) : []
+        if (ticks.length < 2) return
+        ticks.forEach(tick => { tick.style.display = '' })
+        const gap = 3
+        const visible = ticks.slice()
+        while (visible.length > 1) {
+            const rects = visible.map(tick => tick.getBoundingClientRect())
+            const overlaps = rects.map(() => 0)
+            for (let i = 0; i < rects.length; i++) for (let j = i + 1; j < rects.length; j++) {
+                if (rects[i].left < rects[j].right + gap && rects[j].left < rects[i].right + gap) {
+                    overlaps[i]++
+                    overlaps[j]++
+                }
+            }
+            const most = Math.max(...overlaps)
+            if (!most) break
+            let remove = overlaps.findIndex(count => count === most)
+            for (let i = 0; i < overlaps.length; i++) {
+                if (overlaps[i] !== most) continue
+                const endpoint = i === 0 || i === overlaps.length - 1
+                const currentEndpoint = remove === 0 || remove === overlaps.length - 1
+                if (!endpoint && currentEndpoint) remove = i
+            }
+            visible[remove].style.display = 'none'
+            visible.splice(remove, 1)
+        }
+    }
     function replaceLegend(legend) {
         if (deferLegend) {
             pendingLegend = legend
@@ -3257,6 +3288,7 @@ function bootstrap(meta = {}){
         const bounds = legendFormatter ? [legendFormatter(0), legendFormatter(1)] : [0, 1]
         displayedLegendBounds = fixedLegendScale(bounds) ? bounds : null
         legendDiv.replaceChildren(legend)
+        fitLegendTicks(legend)
     }
 
     function commitPendingLegend() {
@@ -3291,6 +3323,11 @@ function bootstrap(meta = {}){
             legend = observablehq.legend({...options, tickFormat: undefined})
         }
         legend.querySelector('.title')?.remove()
+        const tickLabels = legend.querySelectorAll('.tick text')
+        if (tickLabels.length > 1) {
+            tickLabels[0].setAttribute('text-anchor', 'start')
+            tickLabels[tickLabels.length - 1].setAttribute('text-anchor', 'end')
+        }
         const entry = document.createElement('div')
         const heading = document.createElement('div')
         heading.className = 'title'
