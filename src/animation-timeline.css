@@ -48,7 +48,12 @@
 }
 
 .animation-timeline-track {
+    grid-column: 3;
     min-width: 0;
+}
+
+.animation-timeline-selector[hidden] + .animation-timeline-track {
+    grid-column: 2 / -1;
 }
 
 .animation-timeline-track input[type="range"] {
@@ -107,5 +112,9 @@
 
     .animation-timeline-selector {
         display: none;
+    }
+
+    .animation-timeline-track {
+        grid-column: 2;
     }
 }
