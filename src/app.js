@@ -3104,12 +3104,17 @@ function bootstrap(meta = {}){
             cartogramReady: document.body.classList.contains('cartogram-ready'),
         }
         let mapReady = false
+        let animationMapPublished = false
         const publishLayer = async layer => {
             signal.throwIfAborted()
             commitPendingLegend()
             mainLayers = [layer]
             await renderLayers()
             signal.throwIfAborted()
+            if (source.animation) {
+                animationMapPublished = true
+                source.onAnimationMapReady?.()
+            }
             if (!mapReady) {
                 const layerData = layer?.props?.data
                 const layerSource = layerData?.src || layerData
@@ -3175,6 +3180,7 @@ function bootstrap(meta = {}){
                 mainLayers = previousState.layers
                 await renderLayers(false)
             }
+            if (animationMapPublished) source.onAnimationMapReverted?.()
             loadProgress.complete = true
             clearInterval(loadProgress.timer)
             loadProgress.timer = null
@@ -3494,6 +3500,17 @@ function bootstrap(meta = {}){
                 if (loadingSource?.fetching) updateController?.abort()
                 return false
             }
+            source.onAnimationMapReady = () => {
+                const id = animationTarget || playing
+                const definition = animationDefinition(id)
+                if (!definition || !Object.hasOwn(source.query._inputs, id)) return
+                try {
+                    const overrides = settingsPanelApi.getOverrides()
+                    const config = Object.hasOwn(overrides, definition.key) ? overrides[definition.key] : definition.defaultValue
+                    animationTimeline?.setFrame(animationSequence(definition.control, config).index(source.query._inputs[id]))
+                } catch (_) {}
+            }
+            source.onAnimationMapReverted = () => refreshAnimationTimeline()
             invalidateSocket()
             delete source.animationError
             await update(source)
