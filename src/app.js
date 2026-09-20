@@ -3595,12 +3595,11 @@ function bootstrap(meta = {}){
             const overrides = settingsPanelApi.getOverrides()
             const config = Object.hasOwn(overrides, definition.key) ? overrides[definition.key] : definition.defaultValue
             const sequence = animationSequence(definition.control, config)
-            if (playing) setAnimation('')
-            else invalidateAnimation()
+            if (playing) {
+                setAnimation('')
+                animationTimeline?.setFrame(index)
+            } else invalidateAnimation()
             animationTarget = id
-            const value = sequence.value(index)
-            settingsPanelApi.setQuiet(definition.control.key, value)
-            refreshAnimationTimeline()
             void animationPlayer.seek(sequence, index)
         } catch (error) {
             settingsPanelApi.animationError(id, error)
