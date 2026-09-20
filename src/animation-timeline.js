@@ -38,16 +38,55 @@ export function createAnimationTimeline({root, onPlay = () => {}, onSeek = () =>
     track.append(range, labels)
     root.replaceChildren(play, selectorLabel, track, error)
 
+    const attribution = document.getElementById('attribution')
+    const resizeToLegend = () => {
+        const parent = root.parentElement?.getBoundingClientRect()
+        const legend = attribution?.getBoundingClientRect()
+        if (parent && legend) root.style.setProperty('--animation-timeline-right', `${Math.max(0, parent.right - legend.left + 8)}px`)
+        fitLabels()
+    }
+    const labelResizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(fitLabels)
+    labelResizeObserver?.observe(labels)
+    window.addEventListener('resize', resizeToLegend)
+    resizeToLegend()
+
     let activeId = ''
     let currentState = null
     let currentType = 'number'
     let renderedAnimationsKey = ''
     let renderedStateKey = ''
 
+    function fitLabels() {
+        const nodes = [...labels.children]
+        if (!nodes.length || !labels.clientWidth) return
+        nodes.forEach(node => { node.style.display = '' })
+        const gap = Number.parseFloat(getComputedStyle(labels).columnGap) || 0
+        const widths = new Map(nodes.map(node => [node, node.scrollWidth]))
+        const fits = selected => selected.reduce((width, node) => width + widths.get(node), 0) + gap * (selected.length - 1) <= labels.clientWidth
+        const current = nodes.findIndex(node => node.classList.contains('current'))
+        const choose = count => {
+            if (count === 1) return [nodes[current < 0 ? 0 : current]]
+            const chosen = new Set([0, nodes.length - 1])
+            if (count > 2 && current > 0 && current < nodes.length - 1) chosen.add(current)
+            for (let i = 1; i < count - 1; i++) chosen.add(Math.round((nodes.length - 1) * i / (count - 1)))
+            for (let index = 1; chosen.size < count && index < nodes.length - 1; index++) chosen.add(index)
+            return [...chosen].sort((a, b) => a - b).map(index => nodes[index])
+        }
+        for (let count = nodes.length; count > 0; count--) {
+            const selected = choose(count)
+            if (!fits(selected)) continue
+            const visible = new Set(selected)
+            nodes.forEach(node => { node.style.display = visible.has(node) ? '' : 'none' })
+            return
+        }
+        nodes.forEach(node => { node.style.display = 'none' })
+    }
+
     function writeValue(index) {
         if (!currentState?.sequence) return
         range.setAttribute('aria-valuetext', humanReadableAnimationValue(currentState.sequence.value(index), currentType))
         labels.querySelectorAll('[data-index]').forEach(node => node.classList.toggle('current', Number(node.dataset.index) === index))
+        fitLabels()
     }
 
     function renderLabels(sequence, index) {
@@ -58,6 +97,7 @@ export function createAnimationTimeline({root, onPlay = () => {}, onSeek = () =>
             node.classList.toggle('current', step === index)
             return node
         }))
+        fitLabels()
     }
 
     range.addEventListener('input', () => {

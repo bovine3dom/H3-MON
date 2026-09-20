@@ -1,8 +1,8 @@
 #animation-timeline {
     position: absolute;
-    top: 2.6rem;
+    bottom: 0.5rem;
     left: 0.5rem;
-    right: 0.5rem;
+    right: var(--animation-timeline-right, 22rem);
     z-index: 1;
     display: grid;
     grid-template-columns: auto minmax(7rem, 13rem) minmax(0, 1fr);
@@ -75,9 +75,8 @@
 }
 
 .animation-timeline-labels span {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    flex: 0 0 auto;
+    overflow: visible;
 }
 
 .animation-timeline-labels .current {
