@@ -1,11 +1,11 @@
 #animation-timeline {
     position: absolute;
-    top: 0.35rem;
-    left: 4.8rem;
-    right: 4.8rem;
-    z-index: 5;
+    top: 2.6rem;
+    left: 0.5rem;
+    right: 0.5rem;
+    z-index: 1;
     display: grid;
-    grid-template-columns: auto minmax(7rem, 13rem) auto minmax(4rem, auto);
+    grid-template-columns: auto minmax(7rem, 13rem) minmax(0, 1fr);
     align-items: center;
     gap: 0.35rem 0.55rem;
     box-sizing: border-box;
@@ -22,10 +22,6 @@
     display: none;
 }
 
-.animation-timeline-title {
-    font-weight: 600;
-}
-
 .animation-timeline-selector select,
 .animation-timeline-play {
     box-sizing: border-box;
@@ -39,22 +35,19 @@
 }
 
 .animation-timeline-play {
+    width: var(--btn-size);
+    height: var(--btn-size);
+    padding: 0;
     cursor: pointer;
+    font-size: 1.1rem;
+    line-height: 1;
 }
 
 .animation-timeline-play:hover {
     background: var(--btn-hover);
 }
 
-.animation-timeline-value {
-    min-width: 4rem;
-    font-variant-numeric: tabular-nums;
-    text-align: right;
-    white-space: nowrap;
-}
-
 .animation-timeline-track {
-    grid-column: 1 / -1;
     min-width: 0;
 }
 
@@ -93,8 +86,14 @@
 }
 
 .animation-timeline-error {
-    grid-column: 1 / -1;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    padding: 0.3rem 0.55rem;
     color: #a11;
+    background: rgba(255, 255, 255, 0.95);
+    box-shadow: var(--control-shadow);
 }
 
 #animation-timeline :is(select, button, input):focus-visible {
@@ -104,17 +103,10 @@
 
 @media (max-width: 620px) {
     #animation-timeline {
-        left: 3.7rem;
-        right: 3.7rem;
-        grid-template-columns: auto minmax(0, 1fr) auto;
+        grid-template-columns: auto minmax(0, 1fr);
     }
 
-    .animation-timeline-title,
     .animation-timeline-selector {
         display: none;
-    }
-
-    .animation-timeline-value {
-        text-align: left;
     }
 }

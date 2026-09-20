@@ -21,13 +21,11 @@ function labelIndices(count) {
 }
 
 export function createAnimationTimeline({root, onPlay = () => {}, onSeek = () => {}, onSelect = () => {}}) {
-    const title = element('span', 'animation-timeline-title', 'Animation')
     const selectorLabel = element('label', 'animation-timeline-selector')
     const selector = document.createElement('select')
     selector.setAttribute('aria-label', 'Animation control')
-    const play = element('button', 'animation-timeline-play', 'Play')
+    const play = element('button', 'animation-timeline-play', '▶')
     play.type = 'button'
-    const value = element('output', 'animation-timeline-value')
     const track = element('div', 'animation-timeline-track')
     const range = document.createElement('input')
     range.type = 'range'
@@ -38,7 +36,7 @@ export function createAnimationTimeline({root, onPlay = () => {}, onSeek = () =>
     error.setAttribute('role', 'alert')
     selectorLabel.append(selector)
     track.append(range, labels)
-    root.replaceChildren(title, selectorLabel, play, value, track, error)
+    root.replaceChildren(play, selectorLabel, track, error)
 
     let activeId = ''
     let currentState = null
@@ -48,9 +46,7 @@ export function createAnimationTimeline({root, onPlay = () => {}, onSeek = () =>
 
     function writeValue(index) {
         if (!currentState?.sequence) return
-        const frame = currentState.sequence.value(index)
-        value.textContent = humanReadableAnimationValue(frame, currentType)
-        range.setAttribute('aria-valuetext', value.textContent)
+        range.setAttribute('aria-valuetext', humanReadableAnimationValue(currentState.sequence.value(index), currentType))
         labels.querySelectorAll('[data-index]').forEach(node => node.classList.toggle('current', Number(node.dataset.index) === index))
     }
 
@@ -89,8 +85,8 @@ export function createAnimationTimeline({root, onPlay = () => {}, onSeek = () =>
             }
             selector.value = activeId
             selectorLabel.hidden = animations.length < 2
-            play.textContent = playing === activeId ? 'Pause' : 'Play'
-            play.setAttribute('aria-label', `${play.textContent} ${selector.options[selector.selectedIndex]?.text || 'animation'}`)
+            play.textContent = playing === activeId ? '⏸' : '▶'
+            play.setAttribute('aria-label', `${playing === activeId ? 'Pause' : 'Play'} ${selector.options[selector.selectedIndex]?.text || 'animation'}`)
             currentState = null
             currentType = animations.find(animation => animation.id === activeId)?.type || 'number'
             error.textContent = ''
