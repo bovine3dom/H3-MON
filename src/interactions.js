@@ -160,6 +160,7 @@ export function createInteractions({getSettings, getReplaySettings = getSettings
 
     return {
         check,
+        prepare: (key, point, overrides) => prepare(key, point, readConfig(key, getReplaySettings()), {overrides}),
         preview: (key, point, overrides) => {
             if (!estimators.get(key) && metadata[key]?.budget === undefined) return undefined
             try { return assess(key, prepare(key, point, readConfig(key, getReplaySettings()), {overrides})?.url) }

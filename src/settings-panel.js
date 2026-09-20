@@ -34,6 +34,24 @@ function makeScaleControl(value) {
 }
 
 function makeControl(setting, value, colourSchemes, getLegendBounds) {
+    if (setting.type === 'animation') {
+        const root = element('details')
+        root.append(element('summary', '', 'Animate'))
+        const inputs = {}
+        for (const [key, label] of Object.entries({start: 'Start', end: 'End', step: setting.control.type === 'time' ? 'Step (seconds)' : 'Step', step_rate: 'FPS'})) {
+            const row = element('label', 'setting-description', label)
+            const input = document.createElement('input')
+            input.type = ['start', 'end'].includes(key) && setting.control.type === 'time' ? 'text' : 'number'
+            input.step = 'any'
+            input.setAttribute('aria-label', `${setting.name} ${label}`)
+            inputs[key] = input
+            row.append(input); root.append(row)
+            input.addEventListener('input', () => root.dispatchEvent(new CustomEvent('settingchange', {bubbles: true, detail: {typed: true}})))
+        }
+        const write = next => { for (const key in inputs) inputs[key].value = next?.[key] ?? '' }
+        write(value)
+        return {node: root, write, read: () => Object.fromEntries(Object.entries(inputs).map(([key, input]) => [key, input.type === 'number' ? (input.value === '' ? null : Number(input.value)) : input.value]))}
+    }
     if (setting.type === 'legendBounds') {
         const root = element('div')
         const button = element('button')
@@ -146,7 +164,7 @@ function makeControl(setting, value, colourSchemes, getLegendBounds) {
     }
 }
 
-export function createSettingsPanel({metadata, overrides, colourSchemes, onApply, getLegendBounds, getRequestEstimates = () => ({}), schema = SETTINGS_SCHEMA}) {
+export function createSettingsPanel({metadata, overrides, colourSchemes, onApply, onAnimation = () => {}, onRequestEdit = () => {}, getLegendBounds, getRequestEstimates = () => ({}), schema = SETTINGS_SCHEMA}) {
     const form = document.getElementById('settingsForm')
     const fieldsRoot = document.getElementById('settingsFields')
     const resetAllButton = document.getElementById('settingsResetAll')
@@ -156,6 +174,7 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
     let applyToken = 0
     let commitQueue = Promise.resolve()
     let requestTimer = null
+    let animationIntent = 0
     const fields = new Map(schema.map(setting => [setting.key, {version: 0, timer: null}]))
     const failedSettings = new Set()
     const requestSettings = schema.filter(setting => setting.refresh === 'request')
@@ -219,7 +238,7 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
                 field.visibilityError = error?.message || `Visibility rule failed for ${setting.name}`
             }
             const valid = refreshField(setting)
-            field.root.hidden = !visible && valid
+            field.root.hidden = !visible && valid && draftOverrides.animation !== setting.key.slice(2)
         }
         for (const group of groups.values()) {
             group.hidden = ![...group.querySelectorAll('.setting-field')].some(root => !root.hidden)
@@ -311,6 +330,7 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
             for (const alias of colourAliases) delete draftOverrides[alias.key]
         }
         draftOverrides[setting.key] = fields.get(setting.key).control.read()
+        if (setting.refresh === 'request') onRequestEdit()
         schedule(setting, event.type === 'input' || event.detail?.typed)
     }
 
@@ -352,12 +372,28 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
         group.append(root)
         Object.assign(fields.get(setting.key), {root, name, controlRow, setting, control, focusTarget, error})
         control.node.addEventListener(control.event || 'settingchange', event => changed(setting, event))
+        if (setting.type === 'animation') {
+            const button = element('button', '', 'Play')
+            button.type = 'button'
+            button.addEventListener('click', async () => {
+                const intent = ++animationIntent, version = fields.get(setting.key).version
+                if (draftOverrides.animation === setting.key.slice(2)) return onAnimation('')
+                if (!refreshField(setting)) return
+                clearTimeout(fields.get(setting.key).timer)
+                await commit(snapshot([setting]))
+                if (intent === animationIntent && version === fields.get(setting.key).version && refreshField(setting)) onAnimation(setting.key.slice(2))
+            })
+            root.append(button)
+            fields.get(setting.key).play = button
+        }
     }
     refreshVisibility()
     refreshEstimates()
 
     form.addEventListener('submit', event => event.preventDefault())
     resetAllButton.addEventListener('click', () => {
+        animationIntent++
+        onAnimation('')
         clearTimeout(requestTimer)
         const changedSettings = schema.filter(setting => hasOverride(appliedOverrides, setting.key) || failedSettings.has(setting.key))
         const colourScale = schema.find(setting => setting.key === 'colourScale')
@@ -365,6 +401,7 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
             changedSettings.push(colourScale)
         }
         draftOverrides = {}
+        onRequestEdit()
         for (const setting of schema) {
             edited(setting)
             fields.get(setting.key).control?.write(fieldValue(setting))
@@ -387,6 +424,17 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
     }
 
     return {
+        cancelPendingAnimation: () => { animationIntent++ },
+        setQuiet(key, value) {
+            draftOverrides[key] = appliedOverrides[key] = value
+            fields.get(key)?.control?.write(value)
+            for (const [id, field] of fields) if (field.play) field.play.textContent = draftOverrides.animation === id.slice(2) ? 'Pause' : 'Play'
+            refreshVisibility()
+        },
+        animationError(id, error) {
+            const field = fields.get(`a.${id}`)
+            if (field) { field.error.textContent = error.message; field.error.hidden = false }
+        },
         focusFirst: () => fields.get(schema.find(setting => !setting.hidden && !fields.get(setting.key).root.hidden && !fields.get(setting.key).controlRow.hidden)?.key)?.focusTarget?.focus(),
         getOverrides: () => ({...draftOverrides}),
         refreshCompleted,

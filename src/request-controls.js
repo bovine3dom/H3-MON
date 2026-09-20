@@ -1,4 +1,5 @@
 import {parseSettingValue, validateSettingValue} from './settings.js'
+import {animationSequence} from './animation.js'
 
 // Definitions must come from trusted metadata, never URL-merged settings.
 export function createRequestControls(definitions = {}) {
@@ -117,5 +118,12 @@ export function createRequestControls(definitions = {}) {
         }))
     }
 
-    return {schema: fields.map(({setting}) => setting), values, encode}
+    const animations = fields.filter(({id}) => Object.hasOwn(definitions[id], 'animate')).map(({id, setting}) => {
+        if (!['number', 'time'].includes(setting.type)) throw new Error('Animation requires a number or time control')
+        if (setting.type === 'time') setting.step = 'any'
+        return {key: `a.${id}`, name: `${setting.name}: Animate`, group: 'Request', type: 'animation', refresh: 'animation',
+            defaultValue: definitions[id].animate, control: setting,
+            validate: value => { try { animationSequence(setting, value) } catch (error) { return error.message } }}
+    })
+    return {schema: fields.map(({setting}) => setting), animations, values, encode}
 }

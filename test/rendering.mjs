@@ -184,6 +184,7 @@ try {
         page.on('pageerror', error => failures.push(`${device}: ${error.stack}`));
         page.on('console', message => {
             if (message.type() === 'error' && !message.text().includes('HTTP 503: selection-test-failure')
+                && !message.text().includes('H3 data requires value and index or index_lower/index_upper columns')
                 && message.text() !== 'Failed to load resource: the server responded with a status of 503 (Service Unavailable)'
                 && message.text() !== 'Error: <g> attribute transform: Expected transform function, "0".') failures.push(message.text());
         });
@@ -563,6 +564,121 @@ try {
             const historyWrites = await page.evaluate(() => window.historyWrites);
             assert(historyWrites.every((time, i) => !i || time - historyWrites[i - 1] >= 149), 'Shared history throttle');
             assert(queries.length - trafficStart > historyWrites.length, 'Queries outpace history writes');
+            for (const transport of ['http', 'ws']) {
+                const animationQueries = []; let heldFrame, holdLive = false, heldLive, responseFailure, seed, firstFrame, connections = 0, socketFrames = 0;
+                if (transport === 'http') await page.route('**/data/animation.csv?*', route => { seed = route; firstFrame?.(); });
+                const respond = (query, send) => {
+                    animationQueries.push(query);
+                    if (transport === 'http' && animationQueries.length === 1 && !seed) firstFrame = () => send(values(1));
+                    else if (animationQueries.length === 2) heldFrame = () => send(values(2));
+                    else send(values(Number(new URL(query, origin).searchParams.get('frame'))));
+                };
+                await page.route('**/animation-result?*', route => responseFailure
+                    ? route.fulfill(responseFailure === 'regular' ? {status: 503, body: 'selection-test-failure'}
+                        : {body: arrow({bad: Float64Array.of(1)}), contentType: 'application/octet-stream'})
+                    : respond(route.request().url(), body => route.fulfill({body, contentType: 'application/octet-stream'})));
+                await page.routeWebSocket('**/animation-stream', ws => { connections++; ws.onMessage(data => {
+                    const message = JSON.parse(String(data));
+                    if (responseFailure === 'socket' && ++socketFrames === 3) { ws.close({code: 1011, reason: 'animation-test-failure'}); return; }
+                    const send = bytes => { const header = Buffer.alloc(4); header.writeUInt32BE(message.id); ws.send(Buffer.concat([header, bytes])); };
+                    if (holdLive) { holdLive = false; heldLive = () => send(values(99)); animationQueries.push(message.url); }
+                    else respond(message.url, send);
+                }); });
+                const animate = {start: 1, end: 3, step: 1, step_rate: 2};
+                json('/data/animation.json', {cartogram: 'none', t: 'Frame {controls.frame}',
+                    controls: {frame: {label: 'Frame', type: 'number', default: 1, showIf: 'v => v.frame === 1', animate},
+                        other: {label: 'Other', type: 'number', default: 1}},
+                    onmove: {url: '/animation-result?frame={controls.frame}&other={controls.other}&lng={lng}', resolution: 5, wait: 0,
+                        ...(transport === 'ws' ? {socket: origin.replace('http:', 'ws:') + '/animation-stream'} : {})}});
+                routes.set('/data/animation.csv', routes.get('/data/query.csv'));
+                await page.goto(url('animation.csv&animation=frame&p.frame=1&a.frame=' + encodeURIComponent(JSON.stringify(animate))));
+                await page.waitForFunction(() => document.title === 'Frame 1');
+                if (transport === 'http') {
+                    assert(seed, 'Ready animation bytes replace a stalled seed fetch');
+                    await page.unroute('**/data/animation.csv?*');
+                }
+                while (!heldFrame) await new Promise(resolve => setTimeout(resolve, 10));
+                await page.locator('#settingsBtn').click();
+                await page.waitForTimeout(700);
+                assert.equal(await page.title(), 'Frame 1', 'A late frame holds the current title');
+                assert.equal(new URL(page.url()).searchParams.get('p.frame'), '1', 'Prefetch does not write future URL values');
+                assert.equal(await page.locator('#request-status[data-state="loading"]').count(), 0);
+                await heldFrame();
+                await page.waitForFunction(() => document.title === 'Frame 2');
+                assert.equal(await page.locator('[id="setting-p.frame"]').inputValue(), '2');
+                assert.equal(await page.locator('#observable_legend > :last-child .title').textContent(), 'Frame 2');
+                assert(await page.locator('[id="setting-p.frame"]').isVisible(), 'An active hidden control stays visible');
+                await page.waitForFunction(() => document.title === 'Frame 3');
+                await page.waitForFunction(() => document.title === 'Frame 1');
+                const beforeMove = animationQueries.length;
+                holdLive = transport === 'ws';
+                await page.evaluate(move);
+                await page.waitForTimeout(150);
+                assert(animationQueries.length > beforeMove, 'Live movement still submits requests');
+                assert(animationQueries.slice(beforeMove).some(query => new URL(query, origin).searchParams.get('lng') !== new URL(animationQueries[0], origin).searchParams.get('lng')));
+                if (transport === 'ws') {
+                    await page.waitForFunction(() => document.title === 'Frame 3');
+                    assert(heldLive, 'The live socket reply is held until a newer animation frame is displayed');
+                }
+                await page.getByRole('button', {name: 'Pause', exact: true}).click();
+                if (heldLive) {
+                    const title = await page.title(); heldLive(); await page.waitForTimeout(150);
+                    assert.equal(await page.title(), title);
+                    assert.notEqual(await page.evaluate(() => window._columnData.value[0]), 99, 'An old live reply cannot rewind animation');
+                }
+                await page.waitForFunction(() => !new URL(location.href).searchParams.has('animation'));
+                const panel = page.locator('[id="setting-a.frame"]').locator('xpath=ancestor::details');
+                await panel.locator('summary').click();
+                await panel.getByRole('spinbutton', {name: 'Frame: Animate FPS', exact: true}).fill('0');
+                assert.match(await page.locator('[id="setting-a.frame-error"]').textContent(), /positive/);
+                await panel.getByRole('spinbutton', {name: 'Frame: Animate FPS', exact: true}).fill('3');
+                await page.waitForFunction(() => JSON.parse(new URL(location.href).searchParams.get('a.frame')).step_rate === 3);
+                await page.getByRole('button', {name: 'Play', exact: true}).click();
+                await page.waitForFunction(() => new URL(location.href).searchParams.get('animation') === 'frame');
+                await page.reload();
+                await page.waitForFunction(() => document.title === 'Frame 2');
+                await page.locator('#settingsBtn').click();
+                const beforeEdit = animationQueries.length;
+                await page.getByRole('spinbutton', {name: 'Other', exact: true}).fill('');
+                await page.waitForTimeout(250);
+                assert(await page.getByRole('button', {name: 'Pause', exact: true}).isVisible(), 'Incomplete edits hold playback without stopping it');
+                await page.getByRole('spinbutton', {name: 'Other', exact: true}).fill('2');
+                await page.waitForTimeout(650);
+                assert(animationQueries.slice(beforeEdit).some(query => new URL(query, origin).searchParams.get('other') === '2'), 'Draft edits replace buffered request inputs');
+                assert.equal(await page.getByRole('spinbutton', {name: 'Other', exact: true}).inputValue(), '2', 'Animation does not overwrite another control draft');
+                await page.getByRole('button', {name: 'Pause', exact: true}).click();
+                if (transport === 'http') {
+                    responseFailure = 'regular';
+                    await page.evaluate(move);
+                    await page.locator('#request-status[data-state="error"]').waitFor({state: 'attached'});
+                    responseFailure = 'frame';
+                    await page.getByRole('button', {name: 'Play', exact: true}).click();
+                    await page.waitForFunction(() => document.getElementById('request-status').textContent.includes('H3 data requires')
+                        && !new URL(location.href).searchParams.has('animation'));
+                    assert(await page.getByRole('button', {name: 'Play', exact: true}).isVisible(), 'A malformed frame pauses despite an older regular request error');
+                    responseFailure = undefined;
+                    await page.evaluate(() => {
+                        [...document.querySelectorAll('button')].find(button => button.textContent === 'Play').click();
+                        document.getElementById('settingsResetAll').click();
+                    });
+                    await page.waitForFunction(() => !new URL(location.href).searchParams.has('a.frame'));
+                    await page.waitForTimeout(400);
+                    assert.equal(await page.getByRole('button', {name: 'Pause', exact: true}).count(), 0, 'Reset cancels a queued Play');
+                    await page.evaluate(() => {
+                        [...document.querySelectorAll('button')].find(button => button.textContent === 'Play').click();
+                        window.dispatchEvent(new Event('hashchange'));
+                    });
+                    await page.waitForTimeout(400);
+                    assert.equal(await page.getByRole('button', {name: 'Pause', exact: true}).count(), 0, 'Navigation cancels a queued Play');
+                } else {
+                    responseFailure = 'socket'; const beforeFailure = connections;
+                    await page.getByRole('button', {name: 'Play', exact: true}).click();
+                    await page.waitForFunction(() => document.getElementById('request-status').textContent.includes('WebSocket')
+                        && !new URL(location.href).searchParams.has('animation'));
+                    assert.equal(connections, beforeFailure + 1, 'A failed animation transport does not reconnect while earlier frames play');
+                }
+                console.log(`Desktop ${transport} animation: shared autoplay, late hold, loop, live movement and panel passed`);
+            }
             console.log('Desktop settings, Arrow coverage, HTTP selection and persistent socket passed');
         } catch (error) {
             failures.push(`${device}: ${error.stack}`);

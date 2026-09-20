@@ -131,6 +131,8 @@ legend title.
 
 ## Request controls and shared links
 
+See [Control Animation](docs/animation.md) for playback settings and shared animation URLs.
+
 Define each control under an ID in `controls`. Start the ID with a letter.
 Use only letters, digits and underscores.
 

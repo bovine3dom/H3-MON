@@ -232,7 +232,7 @@ function parseNumber(value) {
 }
 
 export function parseSettingValue(setting, value) {
-    if (setting.type === 'legendBounds') {
+    if (['legendBounds', 'animation'].includes(setting.type)) {
         if (typeof value !== 'string') return value
         try { return JSON.parse(value) } catch (_) { return value }
     }
@@ -257,7 +257,7 @@ export function parseSettingValue(setting, value) {
 }
 
 export function serializeSettingValue(setting, value) {
-    if (setting.type === 'legendBounds') return JSON.stringify(value)
+    if (['legendBounds', 'animation'].includes(setting.type)) return JSON.stringify(value)
     if (setting.type === 'boolean') return settingEnabled(value, false) ? '1' : '0'
     if (setting.type === 'nullableNumber' && value == null) return 'null'
     if (setting.type === 'scale') return value == null ? 'json:null' : (typeof value === 'object' ? `json:${JSON.stringify(value)}` : String(value))
@@ -290,6 +290,7 @@ export function effectiveSettingValue(metadata, overrides, setting) {
 }
 
 export function validateSettingValue(setting, value) {
+    if (setting.validate) return setting.validate(value)
     if (setting.type === 'legendBounds' && value != null && !fixedLegendScale(value)) {
         return `${setting.name} must be two finite numbers in ascending order.`
     }

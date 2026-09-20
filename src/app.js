@@ -17,6 +17,7 @@ import {SETTINGS_SCHEMA, colourScale, fixedLegendScale, readSettingLayers, seria
 import {centralLinkedH3, createInteractions} from './interactions'
 import {createRequestStatus} from './request-status'
 import {createRequestControls} from './request-controls'
+import {animationSequence, createAnimationPlayer} from './animation'
 import {createQuerySocket} from './query-socket'
 import {readQueryState, writeQueryState} from './query-state'
 import {rankitScale} from './rankit'
@@ -1392,7 +1393,8 @@ fetch(`data/${meta_name}`).then(r => {
 
 function bootstrap(meta = {}){
     const requestControls = createRequestControls(meta.controls)
-    const settingSchema = [...requestControls.schema, ...SETTINGS_SCHEMA]
+    const settingSchema = [...requestControls.schema, ...requestControls.animations,
+        {key: 'animation', hidden: true, type: 'text', defaultValue: '', refresh: 'animation'}, ...SETTINGS_SCHEMA]
     const settingLayers = readSettingLayers(meta, params, settingSchema)
     const metadataSettings = settingLayers.metadata
     let settingOverrides = settingLayers.overrides
@@ -2148,6 +2150,7 @@ function bootstrap(meta = {}){
 
     let reloadNum = 0
     const getHexData = async (publishLayer, source, signal) => {
+        source.fetching = !source.bytes
         const {url: file_path, ext, format} = source
         const reload = ++reloadNum
         const requestURL = new URL(file_path, document.baseURI)
@@ -2178,6 +2181,7 @@ function bootstrap(meta = {}){
                 if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${(await current(resp.text())).slice(0, 300)}`)
                 buf = await current(measurePerf(ext === 'csv' ? 'data.read_text' : 'data.read_arrayBuffer', () => ext === 'csv' ? resp.text() : resp.arrayBuffer()))
             }
+            source.fetching = false
             setLoadStage('Parsing data')
             let dataCols
             let schema
@@ -2424,8 +2428,9 @@ function bootstrap(meta = {}){
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
             loaded = {data: await current(measurePerf('data.read_json', () => resp.json()))}
         } else {
-            loaded = await current(measurePerf('data.load', {file: file_path, reload}, () => load(requestURL.href, format.loader, format.loadOptions)))
+            loaded = await current(measurePerf('data.load', {file: file_path, reload}, () => load(requestURL.href, format.loader, {...format.loadOptions, fetch: {signal}})))
         }
+        source.fetching = false
         let raw = loaded.data
         setLoadStage('Data loaded')
 
@@ -2791,6 +2796,7 @@ function bootstrap(meta = {}){
                 ...requestControls.encode(inputs), _inputs: requestControls.values(inputs)}
         },
         request: (url, {event, point, values, socket, manual}) => {
+            invalidateAnimation()
             const query = {event, index: values.index, lat: values.lat, lng: values.lng, zoom: values.zoom}
             if (point.cartogram) query.cartogram = point.cartogram
             const pageURL = writeQueryState(urlState.read(), query)
@@ -3064,7 +3070,7 @@ function bootstrap(meta = {}){
     const updateOnce = async (source, signal) => {
         loadProgress.interactive = mainLayers.length > 0
         document.body.classList.toggle('interactive-load', loadProgress.interactive)
-        if (!source.socket && !latestSocketSource) {
+        if (!source.animation && !source.socket && !latestSocketSource) {
             if (loadProgress.complete || loadProgress.interactive) resetLoadProgress('Loading data')
             if (loadProgress.interactive) requestStatus.begin()
             else requestStatus.clear()
@@ -3173,12 +3179,15 @@ function bootstrap(meta = {}){
             loadProgress.timer = null
             loadProgress.active.clear()
             if (!signal.aborted && (!source.socket || source.requestSource === latestSocketSource)) {
+                if (source.animation && e?.name !== 'AbortError') source.animationError = e
                 console.error(e)
                 if (!requestError || failedSource === source) { requestError = e; failedSource = source }
                 document.body.classList.add('load-error')
                 requestStatus.fail(requestError, {hasResult: mainLayers.length > 0, onRetry: retryRequest})
             }
             return false
+        } finally {
+            source.fetching = false
         }
     }
 
@@ -3363,6 +3372,13 @@ function bootstrap(meta = {}){
 
     let settingsApplication = Promise.resolve()
     function applySettingOverrides(nextOverrides, changedSettings) {
+        if (changedSettings.some(setting => setting.refresh === 'animation')) {
+            urlState.replace(updateUrlSettingOverrides(urlState.read(), nextOverrides, changedSettings.filter(setting => setting.refresh === 'animation')))
+            if (changedSettings.some(setting => setting.key === 'animation')) setAnimation(nextOverrides.animation || '')
+            else if (changedSettings.some(setting => setting.key === `a.${playing}`)) setAnimation(playing)
+            changedSettings = changedSettings.filter(setting => setting.refresh !== 'animation')
+            if (!changedSettings.length) return
+        }
         if (changedSettings.every(setting => setting.refresh === 'budget')) {
             urlState.replace(updateUrlSettingOverrides(urlState.read(), nextOverrides, changedSettings))
             for (const {key} of changedSettings) {
@@ -3412,18 +3428,145 @@ function bootstrap(meta = {}){
         return settingsApplication
     }
 
+    let playing = ''
+    let animationSocket = null
+    let animationReject = null
+    function invalidateAnimation() {
+        animationPlayer.invalidate()
+        if (loadingSource?.animation) updateController?.abort()
+    }
+    function stopPrefetch() {
+        animationSocket?.dispose(); animationSocket = null
+        animationReject?.(new DOMException('Animation cancelled', 'AbortError')); animationReject = null
+    }
+    const animationPlayer = createAnimationPlayer({
+        prepare: value => {
+            const event = lastQuery?.event || ['onmove', 'onclick'].find(key => metadataSettings[key]?.url)
+            if (!event) throw new Error('Animation requires an onclick or onmove URL.')
+            const point = event === 'onmove' ? map.getCenter() : lastClickPoint || lastQuery || map.getCenter()
+            const overrides = {...metadataSettings, ...settingsPanelApi.getOverrides(), [`p.${playing}`]: value}
+            // Hold playback during an incomplete control edit.
+            try { requestControls.values(overrides) } catch { return null }
+            return interactions.prepare(event, point, overrides)
+        },
+        latency: () => {
+            const event = lastQuery?.event || ['onmove', 'onclick'].find(key => metadataSettings[key]?.url)
+            if (!event) return 0
+            return interactions.preview(event, event === 'onmove' ? map.getCenter() : lastClickPoint || map.getCenter())?.cost
+        },
+        fetchFrame: async ({url, context}, signal) => {
+            interactions.check(context.event, url)
+            const {event, values, socket, point} = context
+            const query = {event, index: values.index, lat: values.lat, lng: values.lng, zoom: values.zoom,
+                index_lower: values.index_lower, index_upper: values.index_upper, _inputs: values._inputs}
+            if (point.cartogram) query.cartogram = point.cartogram
+            let bytes
+            if (socket) {
+                bytes = await new Promise((resolve, reject) => {
+                    animationReject = reject
+                    signal.addEventListener('abort', stopPrefetch, {once: true})
+                    animationSocket ||= createQuerySocket({
+                        onResult: (bytes, pending) => pending.resolve(bytes),
+                        onError: (error, pending) => {
+                            animationSocket?.dispose(); animationSocket = null
+                            pending.reject(error)
+                        },
+                        beforeSend: (url, pending) => interactions.check(pending.event, url),
+                    })
+                    animationSocket.submit(socket, url, {event, resolve, reject})
+                }).finally(() => { animationReject = null; signal.removeEventListener('abort', stopPrefetch) })
+            } else {
+                const response = await fetch(url, {signal, cache: 'no-store'})
+                if (!response.ok) throw new Error(`Animation request failed: HTTP ${response.status}`)
+                bytes = new Uint8Array(await response.arrayBuffer())
+            }
+            return {url, query, bytes, ext: 'arrow', format: FORMATS.arrow, cacheBust: false, animation: true}
+        },
+        present: async source => {
+            if (socketRenderPaused) return false
+            if (updateRunning) {
+                if (loadingSource?.fetching) updateController?.abort()
+                return false
+            }
+            invalidateSocket()
+            delete source.animationError
+            await update(source)
+            if (source.animationError) throw source.animationError
+            if (acceptedSource !== source) return false
+            const {index_lower, index_upper, _inputs, ...query} = source.query
+            lastQuery = query
+            const url = writeQueryState(urlState.read(), query)
+            for (const setting of requestControls.schema) {
+                const value = source.query._inputs[setting.key.slice(2)]
+                if (setting.key === `p.${playing}`) {
+                    settingsPanelApi.setQuiet(setting.key, value)
+                    settingOverrides[setting.key] = settings[setting.key] = value
+                }
+                url.searchParams.set(setting.key, serializeSettingValue(setting, value))
+            }
+            urlState.replace(url)
+            return true
+        },
+        onError: error => {
+            const id = playing
+            setAnimation('')
+            settingsPanelApi.animationError(id, error)
+            requestStatus.fail(error, {hasResult: mainLayers.length > 0, onRetry: () => setAnimation(id)})
+        },
+    })
+    function setAnimation(id) {
+        animationPlayer.pause(); stopPrefetch()
+        if (loadingSource?.animation) updateController?.abort()
+        playing = ''
+        let failure
+        if (id) {
+            const definition = requestControls.animations.find(setting => setting.key === `a.${id}`)
+            try {
+                if (!definition) throw new Error('Unknown animated control')
+                const overrides = settingsPanelApi.getOverrides()
+                const config = Object.hasOwn(overrides, definition.key) ? overrides[definition.key] : definition.defaultValue
+                const sequence = animationSequence(definition.control, config)
+                settingsPanelApi.setQuiet(definition.key, config)
+                if (failedSource?.animation) {
+                    requestError = failedSource = null
+                    document.body.classList.remove('load-error')
+                }
+                playing = id
+                animationPlayer.start(sequence, overrides[`p.${id}`] ?? definition.control.defaultValue)
+            } catch (error) { playing = ''; failure = error }
+        }
+        settingsPanelApi.setQuiet('animation', playing)
+        if (failure) settingsPanelApi.animationError(id, failure)
+        const url = urlState.read()
+        if (playing) {
+            url.searchParams.set('animation', playing)
+            url.searchParams.set(`a.${playing}`, JSON.stringify(settingsPanelApi.getOverrides()[`a.${playing}`]))
+        }
+        else url.searchParams.delete('animation')
+        urlState.replace(url)
+    }
+    for (const event of ['pagehide', 'popstate', 'hashchange']) window.addEventListener(event, () => {
+        settingsPanelApi.cancelPendingAnimation()
+        animationPlayer.pause(); stopPrefetch()
+        if (loadingSource?.animation) updateController?.abort()
+        playing = ''
+        settingsPanelApi.setQuiet('animation', '')
+    })
     settingsPanelApi = createSettingsPanel({
         schema: settingSchema,
         metadata: metadataSettings,
         overrides: settingOverrides,
         colourSchemes: availableColourSchemes(),
         onApply: applySettingOverrides,
+        onAnimation: setAnimation,
+        onRequestEdit: invalidateAnimation,
         getLegendBounds: () => displayedLegendBounds,
         getRequestEstimates: overrides => Object.fromEntries(['onclick', 'onmove'].map(key => [key,
             interactions.preview(key, key === 'onclick' ? lastClickPoint || map.getCenter() : map.getCenter(), {...metadataSettings, ...overrides})])),
     })
 
     if (restoredQuery) repeatQuery()
+    if (params.get('animation')) setAnimation(params.get('animation'))
 
     try {
         const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
