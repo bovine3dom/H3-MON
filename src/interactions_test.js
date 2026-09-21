@@ -26,6 +26,7 @@ Deno.test('CPU estimators receive resolved, encoded HTTP and WebSocket URLs', as
         assert(f.preview('onclick', point).cost === 10 && !f.calls.length && f.preview('onmove', point) === undefined)
         await f.click(point)
         assert(estimated === f.calls[0].url && estimated === `${socket ? '' : 'https://example.test'}/query?cost=08%3A30%20%2B%201&index=a%2Fb`)
+        assert(f.calls[0].context.tokens.has('index') && !f.calls[0].context.tokens.has('lat'))
     }
 })
 

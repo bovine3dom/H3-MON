@@ -106,6 +106,7 @@ export function createInteractions({getSettings, getReplaySettings = getSettings
         if (!config) return null
         const values = getValues(config, point, overrides)
         if (values == null) return null
+        const tokens = new Set()
         const template = config.url.replace(/\{([^{}]*)\}/g, (_, token) => {
             if ((!['index', 'index_lower', 'index_upper', 'lat', 'lng', 'zoom'].includes(token) && !/^controls\.[A-Za-z][A-Za-z0-9_]*$/.test(token)) || !Object.hasOwn(values, token)) {
                 throw new Error(`Unknown or missing interaction token: ${token}`)
@@ -114,6 +115,7 @@ export function createInteractions({getSettings, getReplaySettings = getSettings
             if (typeof value !== 'string' && typeof value !== 'number' || typeof value === 'number' && !Number.isFinite(value)) {
                 throw new Error(`Invalid interaction value: ${token}`)
             }
+            tokens.add(token)
             return encodeURIComponent(value)
         })
         if (/[{}]/.test(template)) throw new Error('Unresolved interaction token')
@@ -123,7 +125,7 @@ export function createInteractions({getSettings, getReplaySettings = getSettings
         }
         if (config.socket && resolved.href.includes('#')) throw new Error('Socket query URLs must not contain fragments')
         const url = config.socket ? resolved.pathname + resolved.search : resolved.href
-        return {url, context: {event: key, point, values, socket: config.socket, manual}}
+        return {url, context: {event: key, point, values, tokens, socket: config.socket, manual}}
     }
 
     function run(key, point, {manual = false, force = true} = {}) {

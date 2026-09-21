@@ -21,6 +21,7 @@ Deno.test('titles use raw inputs and select labels, preserving unknown tokens an
     const template = '{controls.time}|{controls.mode}|{controls.flag}|{TOWN_NAME}|{unknown}|{controls.toString}'
     assert(queryTitle(template, query, lookup, controls.schema) ===
         '360|Train $& {controls.time}|false|City {controls.time}|{unknown}|{controls.toString}')
+    assert(queryTitle('{TOWN_NAME}', {index: '851fb467fffffff'}, lookup, [], () => [48.8, 2.4]) === 'City {controls.time}')
     assert(query['controls.time'] === '21600' && query._inputs.mode === 'rail')
     assert(queryTitle(template, null, lookup, controls.schema) === template)
     assert(queryTitle('{TOWN_NAME}', query, () => undefined) === '{TOWN_NAME}')
@@ -79,16 +80,24 @@ Deno.test('URL writes throttle without starvation, merge pending edits and cance
 Deno.test('saved queries round-trip without replacing controls, data or camera', () => {
     const url = new URL('https://example.test/?data=sample.csv&p.time=360&onmove=false#x=1')
     writeQueryState(url, query)
+    assert(url.searchParams.get('query') === 'q2o1f_851fb467fffffff_48.8_2.4_6_3_7')
     assert(JSON.stringify(readQueryState(url.searchParams)) === JSON.stringify(query))
+    const legacy = new URL('https://example.test/')
+    legacy.searchParams.set('query', JSON.stringify(query))
+    assert(JSON.stringify(readQueryState(legacy.searchParams)) === JSON.stringify(query))
     writeQueryState(url, {...query, event: 'onmove'})
     assert(url.searchParams.getAll('query').length === 1)
+    const partial = new URL('https://example.test/')
+    writeQueryState(partial, {event: 'onmove', index: query.index})
+    assert(partial.searchParams.get('query') === 'q2m1_851fb467fffffff')
+    assert(JSON.stringify(readQueryState(partial.searchParams)) === JSON.stringify({event: 'onmove', index: query.index}))
     assert(url.searchParams.get('p.time') === '360' && url.searchParams.get('data') === 'sample.csv')
     assert(url.searchParams.get('onmove') === 'false' && url.hash === '#x=1')
     assert(readQueryState(new URLSearchParams()) === null)
 })
 
 Deno.test('saved queries reject executable strings and malformed geographic state', () => {
-    for (const input of ['(() => { throw new Error("executed") })()', '{}',
+    for (const input of ['(() => { throw new Error("executed") })()', '{}', 'q2o2_851fb467fffffff_bad',
         JSON.stringify({...query, lat: 91}), JSON.stringify({...query, event: 'eval'}),
         JSON.stringify({...query, zoom: '6'}), JSON.stringify({...query, cartogram: [1]})]) {
         let error

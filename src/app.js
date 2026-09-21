@@ -2774,6 +2774,20 @@ function bootstrap(meta = {}){
         if (event.target?.closest?.('#search-container, .maplibregl-ctrl, .pane-btn')) hideMapHoverTooltip()
     }, {capture: true})
 
+    function savedQuery(event, point, values, tokens) {
+        const fields = new Set()
+        for (const token of tokens ?? []) {
+            const field = ['index_lower', 'index_upper'].includes(token) ? 'index' : token
+            if (['index', 'lat', 'lng', 'zoom'].includes(field)) fields.add(field)
+        }
+        const title = typeof settings.t === 'string' ? settings.t : ''
+        if (title.includes('{TOWN_NAME}') || title.includes('{index}') || title.includes('{index_lower}') || title.includes('{index_upper}')) fields.add('index')
+        for (const field of ['lat', 'lng', 'zoom']) if (title.includes(`{${field}}`)) fields.add(field)
+        const query = {event}
+        for (const field of fields) if (values[field] !== undefined) query[field] = values[field]
+        if (point.cartogram) query.cartogram = point.cartogram
+        return query
+    }
     let lastClickPoint = restoredQuery?.event === 'onclick' ? restoredQuery : null
     const interactions = createInteractions({
         metadata: metadataSettings,
@@ -2784,22 +2798,27 @@ function bootstrap(meta = {}){
             if (point.index && !isValidCell(point.index)) throw new Error('Invalid query H3 cell')
             // Saved queries retain their resolved resolution; fresh clicks follow the data.
             const resolution = config.resolution ?? (point.event && point.index ? getResolution(point.index) : dataH3Res)
-            if (resolution == null) return null
-            const lng = ((point.lng + 180) % 360 + 360) % 360 - 180
-            let index = point.index || latLngToCell(point.lat, lng, resolution)
-            const sourceResolution = getResolution(index)
-            if (sourceResolution > resolution) index = cellToParent(index, resolution)
-            else if (sourceResolution < resolution) index = latLngToCell(point.lat, lng, resolution)
-            const [lower, upper] = h3IndexToSplitLong(index)
+            const centre = map.getCenter()
+            const lat = Number.isFinite(point.lat) ? point.lat : centre.lat
+            const lng = ((Number.isFinite(point.lng) ? point.lng : centre.lng) + 180) % 360 - 180
+            let index = point.index || (resolution == null ? null : latLngToCell(lat, lng, resolution))
+            if (index && resolution != null) {
+                const sourceResolution = getResolution(index)
+                if (sourceResolution > resolution) index = cellToParent(index, resolution)
+                else if (sourceResolution < resolution) index = latLngToCell(lat, lng, resolution)
+            }
             const inputs = {...metadataSettings, ...(overrides ?? settingsPanelApi?.getOverrides() ?? settingOverrides)}
-            return {index, index_lower: lower >>> 0, index_upper: upper >>> 0,
-                lat: point.lat, lng, zoom: point.zoom ?? map.getZoom(),
+            const values = {lat, lng, zoom: Number.isFinite(point.zoom) ? point.zoom : map.getZoom(),
                 ...requestControls.encode(inputs), _inputs: requestControls.values(inputs)}
+            if (index) {
+                const [lower, upper] = h3IndexToSplitLong(index)
+                Object.assign(values, {index, index_lower: lower >>> 0, index_upper: upper >>> 0})
+            }
+            return values
         },
-        request: (url, {event, point, values, socket, manual}) => {
+        request: (url, {event, point, values, tokens, socket, manual}) => {
             invalidateAnimation()
-            const query = {event, index: values.index, lat: values.lat, lng: values.lng, zoom: values.zoom}
-            if (point.cartogram) query.cartogram = point.cartogram
+            const query = savedQuery(event, point, values, tokens)
             const pageURL = writeQueryState(urlState.read(), query)
             for (const setting of requestControls.schema) {
                 pageURL.searchParams.set(setting.key, serializeSettingValue(setting, values._inputs[setting.key.slice(2)]))
@@ -2856,7 +2875,7 @@ function bootstrap(meta = {}){
     let displayedSelection = null
     async function restoreSelection(query) {
         displayedSelection = query
-        if ((queryTitle(settings.t, query, findClosestCity, requestControls.schema) || DEFAULT_DOCUMENT_TITLE) !== document.title) await refreshLegend()
+        if ((queryTitle(settings.t, query, findClosestCity, requestControls.schema, cellToLatLng) || DEFAULT_DOCUMENT_TITLE) !== document.title) await refreshLegend()
         if (query?.event !== 'onclick' || metadataSettings.onclick?.highlight === false) {
             hex([])
             cartogramApi?.highlightCells([])
@@ -2870,7 +2889,11 @@ function bootstrap(meta = {}){
                 return
             }
         }
-        await focusCartogramForH3(query.index, {focus: false})
+        const index = query.index || (Number.isFinite(query.index_lower) && Number.isFinite(query.index_upper)
+            ? splitLongToH3Index(query.index_lower, query.index_upper)
+            : Number.isFinite(query.lat) && Number.isFinite(query.lng) && dataH3Res != null
+                ? latLngToCell(query.lat, query.lng, metadataSettings.onclick?.resolution ?? dataH3Res) : null)
+        if (index) await focusCartogramForH3(index, {focus: false})
     }
     // MapLibre's click event excludes drags; metadata actions remain usable while loading.
     map.on('click', event => {
@@ -3300,7 +3323,7 @@ function bootstrap(meta = {}){
     }
 
     async function renderLegend(fmt) {
-        const title = queryTitle(settings.t, displayedSelection, findClosestCity, requestControls.schema)
+        const title = queryTitle(settings.t, displayedSelection, findClosestCity, requestControls.schema, cellToLatLng)
         document.title = title || DEFAULT_DOCUMENT_TITLE
         // Keep ticks ascending while sampling the ramp's complete (possibly flipped) mapping.
         const options = {color: d3.scaleSequential(colourRamp), marginTop: 0, height: 32}
@@ -3381,7 +3404,7 @@ function bootstrap(meta = {}){
         infill = settingEnabled(settings.infill, false)
         requireCompleteCoverage = settingEnabled(settings.requireCompleteCoverage, false)
         showTrains = settingEnabled(settings.trains, false)
-        document.title = queryTitle(settings.t, displayedSelection, findClosestCity, requestControls.schema) || DEFAULT_DOCUMENT_TITLE
+        document.title = queryTitle(settings.t, displayedSelection, findClosestCity, requestControls.schema, cellToLatLng) || DEFAULT_DOCUMENT_TITLE
         if (changedKeys.has('colourScheme') || changedKeys.has('cyclical') || changedKeys.has('flip')) rebuildColourRamp()
         if (changedKeys.has('cartogram')) resetCartogramState()
         if (changedKeys.has('animate') && !settingEnabled(settings.animate, false) && playing) setAnimation('')
@@ -3505,10 +3528,9 @@ function bootstrap(meta = {}){
         },
         fetchFrame: async ({url, context}, signal) => {
             interactions.check(context.event, url)
-            const {event, values, socket, point} = context
-            const query = {event, index: values.index, lat: values.lat, lng: values.lng, zoom: values.zoom,
+            const {event, values, socket, point, tokens} = context
+            const query = {...savedQuery(event, point, values, tokens),
                 index_lower: values.index_lower, index_upper: values.index_upper, _inputs: values._inputs}
-            if (point.cartogram) query.cartogram = point.cartogram
             let bytes
             if (socket) {
                 bytes = await new Promise((resolve, reject) => {

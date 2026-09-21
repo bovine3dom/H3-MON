@@ -1,7 +1,15 @@
-export function queryTitle(template, query, findClosestCity, controls = []) {
+export function queryTitle(template, query, findClosestCity, controls = [], latLngForIndex) {
     if (!template || !query) return template
-    const city = template.includes('{TOWN_NAME}') && Number.isFinite(query.lat) && Number.isFinite(query.lng)
-        ? findClosestCity(query.lat, ((query.lng + 180) % 360 + 360) % 360 - 180) : null
+    let city = null
+    if (template.includes('{TOWN_NAME}')) {
+        let origin = [query.lat, query.lng]
+        if (latLngForIndex && query.index) {
+            try { origin = latLngForIndex(query.index) } catch (_) { origin = [] }
+        }
+        if (Number.isFinite(origin[0]) && Number.isFinite(origin[1])) {
+            city = findClosestCity(origin[0], ((origin[1] + 180) % 360 + 360) % 360 - 180)
+        }
+    }
     return template.replace(/\{([^{}]*)\}/g, (placeholder, token) => {
         if (token === 'TOWN_NAME') return city?.name || placeholder
         const control = /^controls\.([A-Za-z][A-Za-z0-9_]*)$/.exec(token)
