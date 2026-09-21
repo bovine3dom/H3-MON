@@ -240,8 +240,34 @@ function parseNumber(value) {
     return Number.isFinite(number) ? number : value
 }
 
+function parseAnimationValue(setting, value) {
+    if (!value.startsWith('a1_')) return null
+    const fields = value.slice(3).split('_')
+    if (fields.length !== 4 || !fields[0] || !fields[1] || fields[2] === '' || fields[3] === '') return null
+    const step = Number(fields[2]), rate = Number(fields[3])
+    if (!Number.isFinite(step) || !Number.isFinite(rate)) return null
+    const number = setting.control?.type === 'number'
+    const start = number ? Number(fields[0]) : fields[0], end = number ? Number(fields[1]) : fields[1]
+    if (number && (!Number.isFinite(start) || !Number.isFinite(end))) return null
+    return {start, end, step, step_rate: rate}
+}
+
+function serializeAnimationValue(value) {
+    if (value && typeof value === 'object' && !Array.isArray(value)
+        && ['start', 'end', 'step', 'step_rate'].every(key => Object.hasOwn(value, key))) {
+        return `a1_${value.start}_${value.end}_${value.step}_${value.step_rate}`
+    }
+    return JSON.stringify(value)
+}
+
 export function parseSettingValue(setting, value) {
-    if (['legendBounds', 'animation'].includes(setting.type)) {
+    if (setting.type === 'animation') {
+        if (typeof value !== 'string') return value
+        const compact = parseAnimationValue(setting, value)
+        if (compact) return compact
+        try { return JSON.parse(value) } catch (_) { return value }
+    }
+    if (setting.type === 'legendBounds') {
         if (typeof value !== 'string') return value
         try { return JSON.parse(value) } catch (_) { return value }
     }
@@ -266,7 +292,8 @@ export function parseSettingValue(setting, value) {
 }
 
 export function serializeSettingValue(setting, value) {
-    if (['legendBounds', 'animation'].includes(setting.type)) return JSON.stringify(value)
+    if (setting.type === 'animation') return serializeAnimationValue(value)
+    if (setting.type === 'legendBounds') return JSON.stringify(value)
     if (setting.type === 'boolean') return settingEnabled(value, false) ? '1' : '0'
     if (setting.type === 'nullableNumber' && value == null) return 'null'
     if (setting.type === 'scale') return value == null ? 'json:null' : (typeof value === 'object' ? `json:${JSON.stringify(value)}` : String(value))

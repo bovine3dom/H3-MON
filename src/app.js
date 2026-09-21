@@ -3625,7 +3625,8 @@ function bootstrap(meta = {}){
         const url = urlState.read()
         if (playing) {
             url.searchParams.set('animation', playing)
-            url.searchParams.set(`a.${playing}`, JSON.stringify(settingsPanelApi.getOverrides()[`a.${playing}`]))
+            const definition = animationDefinition(playing)
+            url.searchParams.set(`a.${playing}`, serializeSettingValue(definition, settingsPanelApi.getOverrides()[`a.${playing}`]))
         }
         else url.searchParams.delete('animation')
         urlState.replace(url)

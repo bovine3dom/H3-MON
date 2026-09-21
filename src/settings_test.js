@@ -1,6 +1,6 @@
 import {
     SETTINGS_BY_KEY, colourScale, effectiveSettingValue, fixedLegendScale,
-    readSettingLayers, updateUrlSettingOverrides, validateSettingValue,
+    parseSettingValue, readSettingLayers, serializeSettingValue, updateUrlSettingOverrides, validateSettingValue,
 } from './settings.js'
 
 function assert(condition, message = 'Assertion failed') {
@@ -44,6 +44,15 @@ Deno.test('subset URL writes preserve unrelated state and selector edits clear a
     updateUrlSettingOverrides(url, {})
     assert(url.search === '?data=a.csv&query=saved' && url.hash === '#x=1')
     assert(readSettingLayers({rankit: true}, url.searchParams).settings.colourScale === 'rankit')
+})
+
+Deno.test('animation settings use compact URLs and retain JSON compatibility', () => {
+    const time = {type: 'animation', control: {type: 'time'}}, number = {type: 'animation', control: {type: 'number'}}
+    const config = {start: '00:00', end: '23:59', step: 1800, step_rate: 2}
+    assert(serializeSettingValue(time, config) === 'a1_00:00_23:59_1800_2')
+    assert(JSON.stringify(parseSettingValue(time, 'a1_00:00_23:59_1800_2')) === JSON.stringify(config))
+    assert(JSON.stringify(parseSettingValue(number, 'a1_0_1_0.5_2')) === '{"start":0,"end":1,"step":0.5,"step_rate":2}')
+    assert(JSON.stringify(parseSettingValue(time, JSON.stringify(config))) === JSON.stringify(config))
 })
 
 Deno.test('typed settings round-trip while legacy strings retain their meaning', () => {
