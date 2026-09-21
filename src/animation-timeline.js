@@ -52,6 +52,8 @@ export function createAnimationTimeline({root, onPlay = () => {}, onSeek = () =>
     }
     const labelResizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(fitLabels)
     labelResizeObserver?.observe(labels)
+    const attributionResizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(resizeToLegend)
+    if (attribution) attributionResizeObserver?.observe(attribution)
     window.addEventListener('resize', resizeToLegend)
     resizeToLegend()
 
