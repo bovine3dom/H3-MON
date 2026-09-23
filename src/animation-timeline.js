@@ -55,6 +55,9 @@ export function createAnimationTimeline({root, onPlay = () => {}, onSeek = () =>
     labelResizeObserver?.observe(labels)
     const attributionResizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(resizeToLegend)
     if (attribution) attributionResizeObserver?.observe(attribution)
+    const paneResizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(resizeToLegend)
+    const sidePane = document.getElementById('side-pane')
+    if (sidePane) paneResizeObserver?.observe(sidePane)
     const layoutObserver = typeof MutationObserver === 'undefined' ? null : new MutationObserver(resizeToLegend)
     layoutObserver?.observe(document.body, {attributes: true, attributeFilter: ['class']})
     window.addEventListener('resize', resizeToLegend)
@@ -94,19 +97,27 @@ export function createAnimationTimeline({root, onPlay = () => {}, onSeek = () =>
 
     function reserveButtonSlot() {
         root.style.removeProperty('--animation-timeline-left')
+        root.style.removeProperty('--animation-timeline-edge-right')
         root.style.removeProperty('--animation-timeline-width')
-        const button = document.getElementById('leftExpand')
+        const buttons = [...document.querySelectorAll('#leftExpand, #rightExpand')]
         const parent = root.parentElement?.getBoundingClientRect()
-        if (root.hidden || !button || !parent) return
-        const buttonRect = button.getBoundingClientRect()
+        if (root.hidden || !parent) return
         const timelineRect = root.getBoundingClientRect()
-        if (!buttonRect.width || !buttonRect.height || !timelineRect.width ||
-            buttonRect.left >= timelineRect.right || buttonRect.right <= timelineRect.left ||
-            buttonRect.top >= timelineRect.bottom || buttonRect.bottom <= timelineRect.top) return
-        const left = Math.max(timelineRect.left, buttonRect.right + 8) - parent.left
-        const width = timelineRect.right - parent.left - left
+        const overlaps = buttons.map(button => button.getBoundingClientRect()).filter(rect =>
+            rect.width && rect.height && rect.left < timelineRect.right && rect.right > timelineRect.left &&
+            rect.top < timelineRect.bottom && rect.bottom > timelineRect.top)
+        if (!timelineRect.width || !overlaps.length) return
+        let left = timelineRect.left - parent.left
+        let right = parent.right - timelineRect.right
+        const center = (timelineRect.left + timelineRect.right) / 2
+        for (const rect of overlaps) {
+            if ((rect.left + rect.right) / 2 < center) left = Math.max(left, rect.right - parent.left + 8)
+            else right = Math.max(right, parent.right - rect.left + 8)
+        }
+        const width = parent.width - left - right
         if (width <= 0) return
         root.style.setProperty('--animation-timeline-left', `${left}px`)
+        root.style.setProperty('--animation-timeline-edge-right', `${right}px`)
         root.style.setProperty('--animation-timeline-width', `${width}px`)
         fitLabels()
     }

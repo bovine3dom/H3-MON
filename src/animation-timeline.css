@@ -2,7 +2,7 @@
     position: absolute;
     bottom: 0.5rem;
     left: var(--animation-timeline-left, 0.5rem);
-    right: var(--animation-timeline-right, 22rem);
+    right: var(--animation-timeline-edge-right, var(--animation-timeline-right, 22rem));
     width: var(--animation-timeline-width, auto);
     z-index: 1;
     display: grid;
@@ -109,7 +109,7 @@
 @media (max-width: 620px) {
     #animation-timeline {
         left: var(--animation-timeline-left, auto);
-        right: var(--animation-timeline-legend-right, 0.5rem);
+        right: var(--animation-timeline-edge-right, var(--animation-timeline-legend-right, 0.5rem));
         width: var(--animation-timeline-width, min(var(--animation-timeline-legend-width, 100%), calc(100% - 1rem)));
         bottom: var(--animation-timeline-bottom, 0.5rem);
         z-index: 2;
