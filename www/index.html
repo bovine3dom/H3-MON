@@ -54,6 +54,8 @@ body.pane-full #map {
     display: none;
 }
 .pane-btn {
+    display: grid;
+    place-items: center;
     box-shadow: var(--control-shadow);
     position: absolute;
     top: 0.5em;
@@ -85,7 +87,9 @@ body.pane-full #map {
     left: 0.5em;
     z-index: 1101;
     display: flex;
+    align-items: center;
     gap: 0.35em;
+    font: var(--btn-font);
     transition: transform 0.2s ease;
 }
 body.cartogram-ready:not(.pane-open) .utility-controls {

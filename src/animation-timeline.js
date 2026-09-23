@@ -49,11 +49,14 @@ export function createAnimationTimeline({root, onPlay = () => {}, onSeek = () =>
             root.style.setProperty('--animation-timeline-legend-right', `${Math.max(0, parent.right - legend.right + 4)}px`)
         }
         fitLabels()
+        reserveButtonSlot()
     }
     const labelResizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(fitLabels)
     labelResizeObserver?.observe(labels)
     const attributionResizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(resizeToLegend)
     if (attribution) attributionResizeObserver?.observe(attribution)
+    const layoutObserver = typeof MutationObserver === 'undefined' ? null : new MutationObserver(resizeToLegend)
+    layoutObserver?.observe(document.body, {attributes: true, attributeFilter: ['class']})
     window.addEventListener('resize', resizeToLegend)
     resizeToLegend()
 
@@ -89,6 +92,25 @@ export function createAnimationTimeline({root, onPlay = () => {}, onSeek = () =>
         nodes.forEach(node => { node.style.display = 'none' })
     }
 
+    function reserveButtonSlot() {
+        root.style.removeProperty('--animation-timeline-left')
+        root.style.removeProperty('--animation-timeline-width')
+        const button = document.getElementById('leftExpand')
+        const parent = root.parentElement?.getBoundingClientRect()
+        if (root.hidden || !button || !parent) return
+        const buttonRect = button.getBoundingClientRect()
+        const timelineRect = root.getBoundingClientRect()
+        if (!buttonRect.width || !buttonRect.height || !timelineRect.width ||
+            buttonRect.left >= timelineRect.right || buttonRect.right <= timelineRect.left ||
+            buttonRect.top >= timelineRect.bottom || buttonRect.bottom <= timelineRect.top) return
+        const left = Math.max(timelineRect.left, buttonRect.right + 8) - parent.left
+        const width = timelineRect.right - parent.left - left
+        if (width <= 0) return
+        root.style.setProperty('--animation-timeline-left', `${left}px`)
+        root.style.setProperty('--animation-timeline-width', `${width}px`)
+        fitLabels()
+    }
+
     function writeValue(index) {
         if (!currentState?.sequence) return
         range.setAttribute('aria-valuetext', humanReadableAnimationValue(currentState.sequence.value(index), currentType))
@@ -118,7 +140,10 @@ export function createAnimationTimeline({root, onPlay = () => {}, onSeek = () =>
     return {
         update({enabled = false, animations = [], activeId: nextId = '', playing = '', getState = () => null} = {}) {
             root.hidden = !enabled || !animations.length
-            if (root.hidden) return
+            if (root.hidden) {
+                reserveButtonSlot()
+                return
+            }
             if (!animations.some(animation => animation.id === nextId)) nextId = animations[0].id
             activeId = nextId
             const animationsKey = animations.map(animation => `${animation.id}:${animation.name}:${animation.type}`).join('|')
@@ -139,7 +164,10 @@ export function createAnimationTimeline({root, onPlay = () => {}, onSeek = () =>
             error.textContent = ''
             try { currentState = getState(activeId) } catch (cause) { error.textContent = cause?.message || String(cause) }
             error.hidden = !error.textContent
-            if (!currentState?.sequence) return
+            if (!currentState?.sequence) {
+                reserveButtonSlot()
+                return
+            }
             const sequence = currentState.sequence
             const stateKey = `${activeId}:${currentState.key || `${sequence.count}:${sequence.value(0)}:${sequence.value(sequence.count - 1)}`}`
             const index = Math.max(0, Math.min(sequence.count - 1, currentState.index || 0))
@@ -153,6 +181,7 @@ export function createAnimationTimeline({root, onPlay = () => {}, onSeek = () =>
             error.hidden = true
             range.value = String(index)
             writeValue(index)
+            reserveButtonSlot()
         },
         setFrame(index) {
             if (!currentState?.sequence) return
