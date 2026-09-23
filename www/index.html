@@ -86,6 +86,13 @@ body.pane-full #map {
     z-index: 1101;
     display: flex;
     gap: 0.35em;
+    transition: transform 0.2s ease;
+}
+body.cartogram-ready:not(.pane-open) .utility-controls {
+    transform: translateX(calc(var(--btn-size) + 0.35em));
+}
+@media (prefers-reduced-motion: reduce) {
+    .utility-controls { transition: none; }
 }
 .utility-controls .pane-btn {
     position: static;
