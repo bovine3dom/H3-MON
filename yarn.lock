@@ -2046,10 +2046,10 @@ thrift@^0.19.0:
     q "^1.5.0"
     ws "^5.2.3"
 
-tiny-geocoder@^0.0.2:
-  version "0.0.2"
-  resolved "https://registry.yarnpkg.com/tiny-geocoder/-/tiny-geocoder-0.0.2.tgz#b7563e541b9fdcaa31e9c0997c14bd45ff89a401"
-  integrity sha512-0ReP3mvQdSeYODk5Q1P71XBjfIdJfiW22DM6MGjA9DhYOzlbIR1kIpbuA5ZXORBpbjd3YKBtEo3rJy8F08ilMg==
+tiny-geocoder@^0.0.3:
+  version "0.0.3"
+  resolved "https://registry.yarnpkg.com/tiny-geocoder/-/tiny-geocoder-0.0.3.tgz#adac6df7a9d7dbfac01ef7e05e462d94a983e0a4"
+  integrity sha512-sIgTJ1o+gYw3O13RAZz1H27PfErQcMPxFI9tGgzSi5nLgNE/t+JZnDX9szWg3zZO8BNmn47gb5GftQgnSzUS6A==
   dependencies:
     geokdbush "^2.1.0"
     kdbush "^4.0.2"

@@ -11,6 +11,7 @@ import * as d3 from 'd3'
 import {cellToBoundary, cellToLatLng, latLngToCell, getResolution, isValidCell, cellToParent, cellToChildren, h3IndexToSplitLong, splitLongToH3Index} from 'h3-js'
 import * as observablehq from './vendor/observablehq' // from https://observablehq.com/@d3/color-legend
 import {getCitiesStartsWith, findClosestCity} from 'tiny-geocoder'
+import {findMostPopulousCityForCell} from './city-label-lookup'
 import {render_cartogram} from './cartogram'
 import {createSettingsPanel} from './settings-panel'
 import {SETTINGS_SCHEMA, colourScale, fixedLegendScale, readSettingLayers, serializeSettingValue, settingEnabled, updateUrlSettingOverrides} from './settings'
@@ -3221,7 +3222,7 @@ function bootstrap(meta = {}){
 
     async function restoreSelection(query) {
         displayedSelection = query
-        if ((queryTitle(settings.t, query, findClosestCity, requestControls.schema, cellToLatLng) || DEFAULT_DOCUMENT_TITLE) !== document.title) await refreshLegend()
+        if ((queryTitle(settings.t, query, findClosestCity, requestControls.schema, cellToLatLng, findMostPopulousCityForCell) || DEFAULT_DOCUMENT_TITLE) !== document.title) await refreshLegend()
         if (query?.multi) {
             await highlightMultiQueryOrigins(query)
             return
@@ -3676,7 +3677,7 @@ function bootstrap(meta = {}){
     }
 
     async function renderLegend(fmt) {
-        const title = queryTitle(settings.t, displayedSelection, findClosestCity, requestControls.schema, cellToLatLng)
+        const title = queryTitle(settings.t, displayedSelection, findClosestCity, requestControls.schema, cellToLatLng, findMostPopulousCityForCell)
         document.title = title || DEFAULT_DOCUMENT_TITLE
         // Keep ticks ascending while sampling the ramp's complete (possibly flipped) mapping.
         const options = {color: d3.scaleSequential(colourRamp), marginTop: 0, height: 32}
@@ -3757,7 +3758,7 @@ function bootstrap(meta = {}){
         infill = settingEnabled(settings.infill, false)
         requireCompleteCoverage = settingEnabled(settings.requireCompleteCoverage, false)
         showTrains = settingEnabled(settings.trains, false)
-        document.title = queryTitle(settings.t, displayedSelection, findClosestCity, requestControls.schema, cellToLatLng) || DEFAULT_DOCUMENT_TITLE
+        document.title = queryTitle(settings.t, displayedSelection, findClosestCity, requestControls.schema, cellToLatLng, findMostPopulousCityForCell) || DEFAULT_DOCUMENT_TITLE
         if (changedKeys.has('colourScheme') || changedKeys.has('cyclical') || changedKeys.has('flip')) rebuildColourRamp()
         if (changedKeys.has('cartogram')) resetCartogramState()
         if (changedKeys.has('animate') && !settingEnabled(settings.animate, false) && playing) setAnimation('')

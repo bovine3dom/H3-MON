@@ -1,9 +1,15 @@
-export function queryTitle(template, query, findClosestCity, controls = [], latLngForIndex) {
+export function queryTitle(template, query, findClosestCity, controls = [], latLngForIndex, findCityForCell) {
     if (!template || !query) return template
     let townNames = []
     if (template.includes('{TOWN_NAME}')) {
         const origins = query.origins || [query]
         townNames = origins.map(originQuery => {
+            if (findCityForCell && originQuery.index) {
+                try {
+                    const city = findCityForCell(originQuery.index)
+                    if (city?.name) return city.name
+                } catch (_) {}
+            }
             let origin = [originQuery.lat, originQuery.lng]
             if (latLngForIndex && originQuery.index) {
                 try { origin = latLngForIndex(originQuery.index) } catch (_) { origin = [] }

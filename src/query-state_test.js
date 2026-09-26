@@ -1,5 +1,6 @@
 import {encodeQueryState, readQueryOrigins, readQueryState, writeQueryOrigins, writeQueryState} from './query-state.js'
 import {queryTitle} from './query-title.js'
+import {mostPopulousCityInCell} from './city-label.js'
 import {createRequestControls} from './request-controls.js'
 import {createURLState} from './url-state.js'
 
@@ -37,6 +38,19 @@ Deno.test('multi-origin titles list every town and retain shared control values'
     const latLng = index => [48, Number.parseInt(index.slice(-1), 16)]
     assert(queryTitle('{TOWN_NAME} | {controls.time}', query, lookup, [], latLng) ===
         'Town 15, Town 14, and Town 13 | 360')
+    assert(queryTitle('{TOWN_NAME}', query, lookup, [], latLng, index => ({name: `Owned ${index}`})) ===
+        'Owned 851fb467fffffff, Owned 851fb467ffffffe, and Owned 851fb467ffffffd')
+})
+
+Deno.test('city labels choose the most populous town that belongs to the cell', () => {
+    const cities = [
+        {name: 'Neighbor city', population: 10000, latitude: 0, longitude: 0.8},
+        {name: 'Smaller owner', population: 100, latitude: 0, longitude: 0.1},
+        {name: 'Largest owner', population: 1000, latitude: 0, longitude: -0.2},
+    ]
+    const center = [0, 0]
+    const neighbors = [[0, 1], [0, -1], [1, 0]]
+    assert(mostPopulousCityInCell(cities, center, neighbors)?.name === 'Largest owner')
 })
 
 const query = {event: 'onclick', index: '851fb467fffffff', lat: 48.8, lng: 2.4, zoom: 6, cartogram: [3, 7]}
