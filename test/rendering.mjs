@@ -7,6 +7,8 @@ import {PNG} from 'pngjs';
 import {cellToBoundary, cellToLatLng, gridDisk, h3IndexToSplitLong, latLngToCell} from 'h3-js';
 import {tableFromArrays, tableToIPC} from 'apache-arrow';
 import {findClosestCity} from 'tiny-geocoder';
+import {readMultiQueryOptions} from '../src/multi-query.js';
+import {SETTINGS_BY_KEY, parseSettingValue, readSettingLayers, serializeSettingValue} from '../src/settings.js';
 
 // Serve the real build and deterministic fixtures, never local user data or a replacement Deck layer.
 const cell = '851fb467fffffff', center = cellToLatLng(cell).reverse(), boundary = cellToBoundary(cell, true);
@@ -172,8 +174,33 @@ async function clickCell(page, index = cell, modifiers = []) {
     for (const modifier of [...modifiers].reverse()) await page.keyboard.up(modifier);
 }
 async function setting(page, key, value) {
+    const definition = SETTINGS_BY_KEY.get(key);
+    if (definition) {
+        const expected = value == null ? null : serializeSettingValue(definition, parseSettingValue(definition, value));
+        const deadline = Date.now() + 20000;
+        while (Date.now() < deadline) {
+            const {overrides} = readSettingLayers({}, new URL(page.url()).searchParams);
+            const matches = value == null ? !Object.hasOwn(overrides, key)
+                : Object.hasOwn(overrides, key) && serializeSettingValue(definition, overrides[key]) === expected;
+            if (matches) return;
+            await page.waitForTimeout(25);
+        }
+        throw new Error(`Timed out waiting for compact setting ${key}: ${JSON.stringify(readSettingLayers({}, new URL(page.url()).searchParams).overrides)}`);
+    }
     await page.waitForFunction(([key, value]) => new URL(location.href).searchParams.get(key) === value
         && document.body.classList.contains('load-complete'), [key, value]);
+}
+async function settingAbsent(page, key) {
+    await page.waitForFunction(key => !new URL(location.href).searchParams.has(key)
+        && document.body.classList.contains('load-complete'), key);
+}
+async function multiOption(page, key, value) {
+    const deadline = Date.now() + 20000;
+    while (Date.now() < deadline) {
+        if (Object.is(readMultiQueryOptions(new URL(page.url()).searchParams)[key], value)) return;
+        await page.waitForTimeout(25);
+    }
+    throw new Error(`Timed out waiting for multi-query option ${key}`);
 }
 
 let browser;
@@ -263,7 +290,8 @@ try {
                 }, value);
                 assert.deepEqual(state, [value !== 'time_distance_quantile', value !== 'total_population'], 'Visibility changes before the request debounce');
                 assert.equal(await page.evaluate(() => window._columnData.value[0]), 17, 'Displayed results remain during edits');
-                await setting(page, 'p.metric', value);
+                if (value === conditional.controls.metric.default) await settingAbsent(page, 'p.metric')
+                else await setting(page, 'p.metric', value)
             };
             await switchMetric('time_distance_quantile');
             await mode.selectOption('cycle');
@@ -298,7 +326,7 @@ try {
             assert(await mode.isVisible() && await radius.isHidden(), 'Reset restores default visibility immediately');
             assert.equal(await mode.inputValue(), 'walk');
             assert.equal(await radius.inputValue(), '2');
-            await setting(page, 'p.metric', 'time_distance_quantile');
+            await settingAbsent(page, 'p.metric');
             assert.equal(visibilityRequests.at(-1).get('radius'), '2000');
             conditional.controls.origin_radius.showIf = 'values => { throw new Error("visibility-test-failure") }';
             json('/data/visibility.json', conditional);
@@ -374,8 +402,9 @@ try {
             // A later debounced title commit is the barrier for invalid edits, rather than an arbitrary sleep.
             await page.locator('#setting-t').fill('Validation barrier');
             await setting(page, 't', 'Validation barrier');
-            assert.equal(new URL(page.url()).searchParams.get('trimFactor'), '0.1');
-            assert.equal(new URL(page.url()).searchParams.get('scale'), null, 'Invalid JSON does not apply');
+            const savedSettings = readSettingLayers({}, new URL(page.url()).searchParams)
+            assert.equal(savedSettings.settings.trimFactor, 0.1);
+            assert.equal(Object.hasOwn(savedSettings.overrides, 'scale'), false, 'Invalid JSON does not apply');
             await trim.fill('0.2');
             await setting(page, 'trimFactor', '0.2');
             await scale.fill('{"0":"Low","100":"High"}');
@@ -400,7 +429,7 @@ try {
             assert.equal(budgetRequests, 1);
             const restoredRequest = page.waitForRequest('**/budget-result?*'); await page.reload(); await restoredRequest;
             await page.locator('#settingsBtn').click(); assert(await approval.isChecked());
-            await approval.uncheck(); await page.waitForFunction(() => new URL(location.href).searchParams.get('onclickBudgetOverride') === '0', null, {timeout: 1000});
+            await approval.uncheck(); await setting(page, 'onclickBudgetOverride', '0');
             await page.locator('#settingsClose').click(); await clickCell(page, cells[1]); await budgetError.waitFor();
             assert.equal(budgetRequests, 2, 'Revocation blocks new requests while the approved response is held');
             await heldBudget.fulfill({contentType: 'application/octet-stream', body: values(10)});
@@ -457,6 +486,14 @@ try {
             await clickCell(page, cells[1], ['Control']);
             await page.waitForFunction(() => window._columnData?.value?.length === 1 && window._columnData.value[0] === 6);
             assert.equal(multiRequests.length, 2, 'Control-click adds an independent query');
+            await page.waitForFunction(() => new URL(location.href).searchParams.get('multiOrigin')?.split('*').length === 2);
+            const defaultState = new URL(page.url()).searchParams;
+            assert.equal(defaultState.has('query'), false, 'Multi-origin URLs omit the duplicate last query');
+            assert.equal(defaultState.getAll('multiOrigin').length, 1);
+            assert.equal(defaultState.get('multiOrigin').split('*').length, 2, 'One parameter contains every origin');
+            for (const key of ['p.shift', 'multiAggregation', 'multiCoverage', 'multiQuantile', 'multiAccumulate']) {
+                assert.equal(defaultState.has(key), false, `Default ${key} is omitted`);
+            }
             await page.waitForFunction(() => /^From .+ and .+: 0$/.test(document.title));
             await page.waitForFunction(() => m._controls.find(c => c.getCanvas?.()?.id === 'deckgl-overlay')
                 ._deck.props.layers.find(layer => layer.id === 'hex-highlight')?.props.data.length === 2);
@@ -485,13 +522,12 @@ try {
             assert(await page.locator('#multi-query-quantile').isVisible(), 'Quantile input appears only for quantile');
             await page.locator('#multi-query-quantile').fill('0.25');
             await page.waitForFunction(() => [...window._columnData.value].sort((a, b) => a - b).join(',') === '3,6,7');
-            await page.waitForFunction(() => new URL(location.href).searchParams.get('multiQuantile') === '0.25');
+            await multiOption(page, 'quantile', 0.25);
             const sharedSettings = new URL(page.url()).searchParams;
-            assert.equal(sharedSettings.getAll('multiOrigin').length, 2, 'Shared URL stores every origin');
-            assert(sharedSettings.getAll('multiOrigin').every(origin => /^q2o1_/.test(origin)), 'Origins store only the H3 index when requests do not use coordinates');
-            assert.equal(sharedSettings.get('multiAggregation'), 'quantile');
-            assert.equal(sharedSettings.get('multiCoverage'), 'union');
-            assert.equal(sharedSettings.get('multiQuantile'), '0.25');
+            assert.equal(sharedSettings.getAll('multiOrigin').length, 1, 'All origins use one query parameter');
+            assert(sharedSettings.get('multiOrigin').split('*').every(origin => /^q2o1_/.test(origin)), 'Origins store only the H3 index when requests do not use coordinates');
+            assert.equal(sharedSettings.has('query'), false, 'Multi-origin URL omits the duplicate last query');
+            assert.deepEqual(readMultiQueryOptions(sharedSettings), {aggregation: 'quantile', coverage: 'union', quantile: 0.25, accumulateOnClick: false});
             await page.reload();
             await page.waitForFunction(() => window._columnData?.value?.length === 3
                 && [...window._columnData.value].sort((a, b) => a - b).join(',') === '3,6,7');
@@ -516,7 +552,7 @@ try {
             assert(await page.locator('#settingsClearMap').isDisabled(), 'Clear map is disabled with no origins');
             await page.locator('#settingsBtn').click();
             await page.locator('#multi-query-accumulate').check();
-            await page.waitForFunction(() => new URL(location.href).searchParams.get('multiAccumulate') === 'true');
+            await multiOption(page, 'accumulateOnClick', true);
             await page.reload();
             await displayed(page, 0.65);
             await page.locator('#settingsBtn').click();
@@ -529,7 +565,7 @@ try {
             await clickCell(page, cells[1]);
             await page.waitForFunction(() => window._columnData?.value?.length === 2 && window._columnData.value[0] === 12);
             assert.equal(multiRequests.length, requestsBeforeRemoval, 'Removing an origin reuses its partner result');
-            assert.equal(new URL(page.url()).searchParams.getAll('multiOrigin').length, 1);
+            await page.waitForFunction(() => new URL(location.href).searchParams.get('multiOrigin')?.split('*').length === 1);
             await page.locator('#settingsBtn').click();
             await page.getByRole('button', {name: 'Clear map', exact: true}).click();
             await displayed(page, 0.65);
@@ -661,8 +697,10 @@ try {
                 assert.equal(new URL(queries.at(-1).url, origin).searchParams.get('time'), '180');
                 await page.waitForFunction(() => Math.abs(window._columnData?.quantile?.[0] - 1 / 6) < 1e-6);
                 await selector.selectOption('rankit');
-                await page.waitForFunction(() => new URL(location.href).searchParams.get('colourScale') === 'rankit'
+                await page.waitForFunction(() => new URL(location.href).searchParams.has('s')
+                    && !new URL(location.href).searchParams.has('colourScale')
                     && Math.abs(window._columnData?.quantile?.[0] - 0.5) < 1e-6);
+                assert.equal(readSettingLayers({}, new URL(page.url()).searchParams).settings.colourScale, 'rankit');
                 assert(queries.length > 9, 'Settings finish while multiple results arrive');
                 await page.waitForFunction(() => window.historyWrites.length >= 3);
             } finally {
@@ -672,9 +710,10 @@ try {
             await page.waitForFunction(lng => {
                 const url = new URL(location.href), query = url.searchParams.get('query');
                 return query?.startsWith('q2') && url.searchParams.get('p.time') === '3'
-                    && url.searchParams.get('colourScale') === 'rankit'
+                    && url.searchParams.has('s') && !url.searchParams.has('colourScale')
                     && Math.abs(Number(new URLSearchParams(url.hash.slice(1)).get('x')) - Number(lng)) < 0.000051;
             }, new URL(queries.at(-1).url, origin).searchParams.get('lng'));
+            assert.equal(readSettingLayers({}, new URL(page.url()).searchParams).settings.colourScale, 'rankit');
             const historyWrites = await page.evaluate(() => window.historyWrites);
             assert(historyWrites.every((time, i) => !i || time - historyWrites[i - 1] >= 149), 'Shared history throttle');
             assert(queries.length - trafficStart > historyWrites.length, 'Queries outpace history writes');
@@ -715,7 +754,7 @@ try {
                 await page.locator('#settingsBtn').click();
                 await page.waitForTimeout(700);
                 assert.equal(await page.title(), 'Frame 1', 'A late frame holds the current title');
-                assert.equal(new URL(page.url()).searchParams.get('p.frame'), '1', 'Prefetch does not write future URL values');
+                assert.equal(new URL(page.url()).searchParams.has('p.frame'), false, 'Prefetch omits the default frame and does not write future URL values');
                 assert.equal(await page.locator('#request-status[data-state="loading"]').count(), 0);
                 await heldFrame();
                 await page.waitForFunction(() => document.title === 'Frame 2');

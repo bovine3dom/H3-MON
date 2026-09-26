@@ -39,11 +39,22 @@ Deno.test('subset URL writes preserve unrelated state and selector edits clear a
     assert(url.searchParams.get('rankit') === 'false')
     updateUrlSettingOverrides(url, {colourScale: 'quantile'}, [SETTINGS_BY_KEY.get('colourScale')])
     for (const key of ['raw', 'linear', 'rankit']) assert(!url.searchParams.has(key))
-    assert(readSettingLayers({raw: true}, url.searchParams).settings.colourScale === 'quantile')
-    assert(url.searchParams.get('t') === 'New title')
+    const settings = readSettingLayers({raw: true}, url.searchParams).settings
+    assert(settings.colourScale === 'quantile' && settings.t === 'New title')
+    assert(url.searchParams.has('s') && url.searchParams.get('t') === 'New title')
     updateUrlSettingOverrides(url, {})
     assert(url.search === '?data=a.csv&query=saved' && url.hash === '#x=1')
     assert(readSettingLayers({rankit: true}, url.searchParams).settings.colourScale === 'rankit')
+})
+
+Deno.test('fixed application settings use stable bit positions and decode legacy named values', () => {
+    const url = new URL('https://example.test/?data=sample.csv')
+    updateUrlSettingOverrides(url, {colourScale: 'linear'}, [SETTINGS_BY_KEY.get('colourScale')])
+    assert(url.searchParams.get('s') === 'v1*4*o2')
+    assert(!url.searchParams.has('colourScale'))
+    assert(readSettingLayers({}, url.searchParams).settings.colourScale === 'linear')
+    url.searchParams.set('colourScale', 'rankit')
+    assert(readSettingLayers({}, url.searchParams).settings.colourScale === 'rankit')
 })
 
 Deno.test('animation settings use compact URLs and retain JSON compatibility', () => {

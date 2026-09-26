@@ -1,4 +1,4 @@
-import {readQueryOrigins, readQueryState, writeQueryOrigins, writeQueryState} from './query-state.js'
+import {encodeQueryState, readQueryOrigins, readQueryState, writeQueryOrigins, writeQueryState} from './query-state.js'
 import {queryTitle} from './query-title.js'
 import {createRequestControls} from './request-controls.js'
 import {createURLState} from './url-state.js'
@@ -106,14 +106,16 @@ Deno.test('saved queries round-trip without replacing controls, data or camera',
     assert(readQueryState(new URLSearchParams()) === null)
 })
 
-Deno.test('saved origin sets round-trip as repeated compact queries', () => {
+Deno.test('saved origin sets round-trip in one compact query and read legacy repeated values', () => {
     const origins = [query, {...query, index: '851fb463fffffff', lat: 48.8, lng: 2.18}]
     const url = new URL('https://example.test/?data=sample.csv')
-    writeQueryState(url, origins.at(-1))
     writeQueryOrigins(url, origins)
-    assert(url.searchParams.getAll('multiOrigin').length === 2)
+    assert(url.searchParams.getAll('multiOrigin').length === 1)
+    assert(url.searchParams.get('multiOrigin').split('*').length === 2)
     assert(JSON.stringify(readQueryOrigins(url.searchParams)) === JSON.stringify(origins))
-    assert(readQueryState(url.searchParams).index === origins.at(-1).index)
+    const legacy = new URLSearchParams()
+    for (const origin of origins) legacy.append('multiOrigin', encodeQueryState(origin))
+    assert(JSON.stringify(readQueryOrigins(legacy)) === JSON.stringify(origins))
     let failed = false
     try { writeQueryOrigins(url, [{event: 'onmove', index: query.index}]) } catch { failed = true }
     assert(failed, 'Only on-click origins can be saved')

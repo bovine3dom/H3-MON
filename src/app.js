@@ -1397,6 +1397,15 @@ function bootstrap(meta = {}){
     const requestControls = createRequestControls(meta.controls)
     const settingSchema = [...requestControls.schema, ...requestControls.animations,
         {key: 'animation', hidden: true, type: 'text', defaultValue: '', refresh: 'animation'}, ...SETTINGS_SCHEMA]
+    function writeRequestControlSettings(url, values) {
+        for (const setting of requestControls.schema) {
+            const id = setting.key.slice(2)
+            const value = serializeSettingValue(setting, values[id])
+            if (value === serializeSettingValue(setting, setting.defaultValue)) url.searchParams.delete(setting.key)
+            else url.searchParams.set(setting.key, value)
+        }
+        return url
+    }
     const settingLayers = readSettingLayers(meta, params, settingSchema)
     const metadataSettings = settingLayers.metadata
     let settingOverrides = settingLayers.overrides
@@ -2841,9 +2850,7 @@ function bootstrap(meta = {}){
             const query = savedQuery(event, point, values, tokens)
             const pageURL = writeQueryState(urlState.read(), query)
             pageURL.searchParams.delete('multiOrigin')
-            for (const setting of requestControls.schema) {
-                pageURL.searchParams.set(setting.key, serializeSettingValue(setting, values._inputs[setting.key.slice(2)]))
-            }
+            writeRequestControlSettings(pageURL, values._inputs)
             urlState.replace(pageURL)
             lastQuery = query
             const source = {url, ext: 'arrow', format: FORMATS.arrow, cacheBust: false, socket,
@@ -2919,16 +2926,14 @@ function bootstrap(meta = {}){
 
     function persistMultiQueryState(group) {
         const origins = group.entries.map(entry => multiOriginLocation(entry.query))
-        const last = origins.at(-1)
         const values = group.entries.at(-1).prepared.context.values
-        const url = writeQueryState(urlState.read(), last)
+        const url = urlState.read()
+        url.searchParams.delete('query')
         writeQueryOrigins(url, origins)
         writeMultiQueryOptions(url, multiQueryOptions)
-        for (const setting of requestControls.schema) {
-            url.searchParams.set(setting.key, serializeSettingValue(setting, values._inputs[setting.key.slice(2)]))
-        }
+        writeRequestControlSettings(url, values._inputs)
         urlState.replace(url)
-        lastQuery = last
+        lastQuery = origins.at(-1)
     }
 
     async function readMultiQueryResult(bytes) {
@@ -3811,10 +3816,7 @@ function bootstrap(meta = {}){
             const url = updateUrlSettingOverrides(urlState.read(), nextOverrides, changedSettings)
             const nextLayers = readSettingLayers(metadataSettings, url.searchParams, settingSchema)
             const inputs = requestControls.values(nextLayers.settings)
-            // Preserve default inputs even when Reset produces a deduplicated request.
-            for (const setting of requestControls.schema) {
-                url.searchParams.set(setting.key, serializeSettingValue(setting, inputs[setting.key.slice(2)]))
-            }
+            writeRequestControlSettings(url, inputs)
             settingOverrides = nextLayers.overrides
             urlState.replace(url)
             activateSettings(nextLayers.settings, new Set(changedSettings.map(setting => setting.key)))
@@ -3959,9 +3961,14 @@ function bootstrap(meta = {}){
             }
             const {index_lower, index_upper, _inputs, multi, origins, ...query} = source.query
             lastQuery = query
-            const url = writeQueryState(urlState.read(), query)
-            if (source.multiQueryResults) writeQueryOrigins(url, origins.map(multiOriginLocation))
-            else if (source.query.event !== 'onclick') url.searchParams.delete('multiOrigin')
+            const url = urlState.read()
+            if (source.multiQueryResults) {
+                url.searchParams.delete('query')
+                writeQueryOrigins(url, origins.map(multiOriginLocation))
+            } else {
+                writeQueryState(url, query)
+                if (source.query.event !== 'onclick' || multiQueryGroup?.entries.length === 1) url.searchParams.delete('multiOrigin')
+            }
             writeMultiQueryOptions(url, multiQueryOptions)
             const id = animationTarget || playing
             for (const setting of requestControls.schema) {
@@ -3970,8 +3977,8 @@ function bootstrap(meta = {}){
                     settingsPanelApi.setQuiet(setting.key, value)
                     settingOverrides[setting.key] = settings[setting.key] = value
                 }
-                url.searchParams.set(setting.key, serializeSettingValue(setting, value))
             }
+            writeRequestControlSettings(url, source.query._inputs)
             urlState.replace(url)
             refreshAnimationTimeline()
             return true

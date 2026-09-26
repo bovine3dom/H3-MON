@@ -221,6 +221,25 @@ export const SETTINGS_SCHEMA = [
 
 export const SETTINGS_BY_KEY = new Map(SETTINGS_SCHEMA.map(setting => [setting.key, setting]))
 
+// Keep these option orders stable; compact URLs store their numeric positions.
+export const MULTI_QUERY_SETTING_OPTIONS = Object.freeze({
+    aggregation: Object.freeze(['min', 'max', 'mean', 'median', 'quantile']),
+    coverage: Object.freeze(['intersection', 'union']),
+})
+
+// Keep these bit positions stable. Add new settings at the end.
+const COMPACT_SETTING_KEYS = [
+    'onclickBudgetOverride', 'onmoveBudgetOverride', 'colourScale', 'quantileSource', 'trimFactor', 'defaultValue',
+    'requireCompleteCoverage', 'multiAggregation', 'multiCoverage', 'multiQuantile', 'multiAccumulate',
+]
+const COMPACT_SETTING_INDEX = new Map(COMPACT_SETTING_KEYS.map((key, index) => [key, index]))
+const COMPACT_SETTING_DEFS = new Map([
+    ...COMPACT_SETTING_KEYS.map(key => [key, SETTINGS_BY_KEY.get(key)]).filter(([, setting]) => setting),
+    ['multiAggregation', {key: 'multiAggregation', type: 'select', options: MULTI_QUERY_SETTING_OPTIONS.aggregation.map(value => ({value}))}],
+    ['multiCoverage', {key: 'multiCoverage', type: 'select', options: MULTI_QUERY_SETTING_OPTIONS.coverage.map(value => ({value}))}],
+    ['multiQuantile', {key: 'multiQuantile', type: 'number'}],
+    ['multiAccumulate', {key: 'multiAccumulate', type: 'boolean'}],
+])
 const LEGACY_COLOUR_SCALES = ['raw', 'linear', 'rankit']
 
 export function colourScale(settings = {}, overrides = {}) {
@@ -300,9 +319,81 @@ export function serializeSettingValue(setting, value) {
     return String(value ?? '')
 }
 
+function encodeCompactSettingValue(setting, value) {
+    if (setting.type === 'boolean') return settingEnabled(value, false) ? 'b1' : 'b0'
+    const option = setting.options?.findIndex(item => item.value === value) ?? -1
+    if (option >= 0) return `o${option.toString(36)}`
+    return `v${encodeURIComponent(serializeSettingValue(setting, value)).replaceAll('*', '%2A')}`
+}
+
+function decodeCompactSettings(searchParams) {
+    const values = searchParams.getAll('s')
+    if (!values.length) return new Map()
+    if (values.length !== 1) throw new Error('Duplicate compact settings')
+    const [version, maskText, ...fields] = values[0].split('*')
+    if (version !== 'v1' || !/^[0-9a-z]+$/.test(maskText || '')) throw new Error('Invalid compact settings')
+    const mask = Number.parseInt(maskText, 36)
+    if (!Number.isSafeInteger(mask) || mask < 0) throw new Error('Invalid compact settings mask')
+    const count = mask.toString(2).replaceAll('0', '').length
+    if (fields.length !== count) throw new Error('Invalid compact settings values')
+    const decoded = new Map()
+    let remaining = mask, index = 0, fieldIndex = 0
+    while (remaining) {
+        if (remaining % 2) {
+            const key = COMPACT_SETTING_KEYS[index]
+            const token = fields[fieldIndex++]
+            if (key) {
+                const setting = COMPACT_SETTING_DEFS.get(key)
+                let value
+                if (setting.type === 'boolean' && /^b[01]$/.test(token)) value = token === 'b1'
+                else if (setting.options && /^o[0-9a-z]+$/.test(token)) {
+                    const option = setting.options[Number.parseInt(token.slice(1), 36)]
+                    if (!option) throw new Error('Invalid compact setting option')
+                    value = option.value
+                } else if (token.startsWith('v')) value = parseSettingValue(setting, decodeURIComponent(token.slice(1)))
+                else throw new Error('Invalid compact setting value')
+                decoded.set(key, value)
+            }
+        }
+        remaining = Math.floor(remaining / 2)
+        index++
+    }
+    return decoded
+}
+
+function encodeCompactSettings(values) {
+    let mask = 0
+    const fields = []
+    COMPACT_SETTING_KEYS.forEach((key, index) => {
+        if (!values.has(key)) return
+        mask += 2 ** index
+        fields.push(encodeCompactSettingValue(COMPACT_SETTING_DEFS.get(key), values.get(key)))
+    })
+    return mask ? `v1*${mask.toString(36)}*${fields.join('*')}` : null
+}
+
+export function readCompactSettingOverrides(searchParams) {
+    return decodeCompactSettings(searchParams)
+}
+
+export function writeCompactSettingOverrides(url, changes) {
+    const values = decodeCompactSettings(url.searchParams)
+    for (const [key, value] of Object.entries(changes)) {
+        if (!COMPACT_SETTING_INDEX.has(key)) throw new Error(`Unsupported compact setting: ${key}`)
+        if (value === undefined) values.delete(key)
+        else values.set(key, value)
+    }
+    const encoded = encodeCompactSettings(values)
+    if (encoded) url.searchParams.set('s', encoded)
+    else url.searchParams.delete('s')
+    return url
+}
+
 export function readSettingLayers(metadata = {}, searchParams = new URLSearchParams(), schema = SETTINGS_SCHEMA) {
     const query = Object.fromEntries(searchParams.entries())
-    const overrides = {}
+    delete query.s
+    const schemaKeys = new Set(schema.map(setting => setting.key))
+    const overrides = Object.fromEntries([...decodeCompactSettings(searchParams)].filter(([key]) => schemaKeys.has(key)))
     for (const setting of schema) {
         if (searchParams.has(setting.key)) overrides[setting.key] = parseSettingValue(setting, searchParams.get(setting.key))
     }
@@ -372,18 +463,32 @@ export function settingValuesEqual(left, right) {
 }
 
 export function updateUrlSettingOverrides(url, overrides, schema = SETTINGS_SCHEMA) {
+    const compactKeys = new Set(schema.map(setting => setting.key).filter(key => COMPACT_SETTING_INDEX.has(key)))
+    const compact = compactKeys.size ? decodeCompactSettings(url.searchParams) : null
     // Selector edits remove aliases from the draft, including with a subset schema.
     if (schema.some(setting => setting.key === 'colourScale')) {
         for (const key of LEGACY_COLOUR_SCALES) {
-            if (!Object.prototype.hasOwnProperty.call(overrides, key)) url.searchParams.delete(key)
+            if (!Object.prototype.hasOwnProperty.call(overrides, key)) {
+                url.searchParams.delete(key)
+                compact?.delete(key)
+            }
         }
     }
     for (const setting of schema) {
-        if (Object.prototype.hasOwnProperty.call(overrides, setting.key)) {
+        if (compact && COMPACT_SETTING_INDEX.has(setting.key)) {
+            url.searchParams.delete(setting.key)
+            if (Object.prototype.hasOwnProperty.call(overrides, setting.key)) compact.set(setting.key, overrides[setting.key])
+            else compact.delete(setting.key)
+        } else if (Object.prototype.hasOwnProperty.call(overrides, setting.key)) {
             if (!url.searchParams.has(setting.key) || !settingValuesEqual(parseSettingValue(setting, url.searchParams.get(setting.key)), overrides[setting.key])) {
                 url.searchParams.set(setting.key, serializeSettingValue(setting, overrides[setting.key]))
             }
         } else url.searchParams.delete(setting.key)
+    }
+    if (compact) {
+        const encoded = encodeCompactSettings(compact)
+        if (encoded) url.searchParams.set('s', encoded)
+        else url.searchParams.delete('s')
     }
     return url
 }

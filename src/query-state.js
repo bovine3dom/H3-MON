@@ -76,7 +76,7 @@ export function readQueryState(searchParams) {
 }
 
 export function readQueryOrigins(searchParams) {
-    return searchParams.getAll('multiOrigin').map(value => {
+    return searchParams.getAll('multiOrigin').flatMap(value => value.split('*')).map(value => {
         const query = decodeQueryState(value)
         if (query.event !== 'onclick') throw new Error('Saved origins must use on-click queries')
         return query
@@ -90,7 +90,7 @@ export function writeQueryOrigins(url, origins) {
         return compactQuery(query)
     })
     url.searchParams.delete('multiOrigin')
-    for (const value of encoded) url.searchParams.append('multiOrigin', value)
+    if (encoded.length) url.searchParams.set('multiOrigin', encoded.join('*'))
     return url
 }
 

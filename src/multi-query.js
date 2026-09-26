@@ -1,6 +1,8 @@
+import {MULTI_QUERY_SETTING_OPTIONS, readCompactSettingOverrides, writeCompactSettingOverrides} from './settings.js'
+
 export const MULTI_QUERY_DEFAULTS = Object.freeze({aggregation: 'mean', coverage: 'intersection', quantile: 0.5, accumulateOnClick: false})
-const AGGREGATIONS = new Set(['min', 'max', 'mean', 'median', 'quantile'])
-const COVERAGES = new Set(['intersection', 'union'])
+const AGGREGATIONS = new Set(MULTI_QUERY_SETTING_OPTIONS.aggregation)
+const COVERAGES = new Set(MULTI_QUERY_SETTING_OPTIONS.coverage)
 
 export function validateMultiQueryOptions(options = {}) {
     const {aggregation = MULTI_QUERY_DEFAULTS.aggregation, coverage = MULTI_QUERY_DEFAULTS.coverage,
@@ -13,16 +15,19 @@ export function validateMultiQueryOptions(options = {}) {
 }
 
 export function readMultiQueryOptions(searchParams) {
+    const compact = readCompactSettingOverrides(searchParams)
     const read = (key, fallback) => {
         const values = searchParams.getAll(key)
         if (values.length > 1) throw new Error(`Duplicate ${key} setting`)
-        return values.length ? values[0] : fallback
+        return values.length ? values[0] : compact.get(key) ?? fallback
     }
-    const quantile = read('multiQuantile', String(MULTI_QUERY_DEFAULTS.quantile))
-    const accumulate = read('multiAccumulate', String(MULTI_QUERY_DEFAULTS.accumulateOnClick))
-    if (!['true', 'false'].includes(accumulate)) throw new Error('Invalid multiAccumulate setting')
+    const quantile = read('multiQuantile', MULTI_QUERY_DEFAULTS.quantile)
+    const accumulate = read('multiAccumulate', MULTI_QUERY_DEFAULTS.accumulateOnClick)
+    const accumulateOnClick = typeof accumulate === 'boolean' ? accumulate
+        : accumulate === 'true' ? true : accumulate === 'false' ? false : null
+    if (accumulateOnClick === null) throw new Error('Invalid multiAccumulate setting')
     return validateMultiQueryOptions({
-        accumulateOnClick: accumulate === 'true',
+        accumulateOnClick,
         aggregation: read('multiAggregation', MULTI_QUERY_DEFAULTS.aggregation),
         coverage: read('multiCoverage', MULTI_QUERY_DEFAULTS.coverage),
         quantile: quantile === '' ? NaN : Number(quantile),
@@ -30,12 +35,14 @@ export function readMultiQueryOptions(searchParams) {
 }
 
 export function writeMultiQueryOptions(url, options) {
-    const {aggregation, coverage, quantile, accumulateOnClick} = validateMultiQueryOptions(options)
-    url.searchParams.set('multiAggregation', aggregation)
-    url.searchParams.set('multiCoverage', coverage)
-    url.searchParams.set('multiQuantile', String(quantile))
-    url.searchParams.set('multiAccumulate', String(accumulateOnClick))
-    return url
+    const values = validateMultiQueryOptions(options)
+    for (const key of ['multiAggregation', 'multiCoverage', 'multiQuantile', 'multiAccumulate']) url.searchParams.delete(key)
+    return writeCompactSettingOverrides(url, {
+        multiAggregation: values.aggregation === MULTI_QUERY_DEFAULTS.aggregation ? undefined : values.aggregation,
+        multiCoverage: values.coverage === MULTI_QUERY_DEFAULTS.coverage ? undefined : values.coverage,
+        multiQuantile: values.quantile === MULTI_QUERY_DEFAULTS.quantile ? undefined : values.quantile,
+        multiAccumulate: values.accumulateOnClick === MULTI_QUERY_DEFAULTS.accumulateOnClick ? undefined : values.accumulateOnClick,
+    })
 }
 
 function statistic(values, aggregation, quantile) {
