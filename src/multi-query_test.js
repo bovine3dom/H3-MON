@@ -39,14 +39,16 @@ Deno.test('multi-query aggregation accepts finite values only under union covera
 
 Deno.test('multi-query options round-trip through URL settings', () => {
     const url = new URL('https://example.test/?data=sample.csv')
-    const options = {aggregation: 'quantile', coverage: 'union', quantile: 0.75}
+    const options = {aggregation: 'quantile', coverage: 'union', quantile: 0.75, accumulateOnClick: true}
     writeMultiQueryOptions(url, options)
     assertEqual(JSON.stringify(readMultiQueryOptions(url.searchParams)), JSON.stringify(options))
-    assertEqual(readMultiQueryOptions(new URLSearchParams()).aggregation, 'mean')
+    const defaults = readMultiQueryOptions(new URLSearchParams())
+    assertEqual(defaults.aggregation, 'mean')
+    assertEqual(defaults.accumulateOnClick, false)
 })
 
 Deno.test('multi-query aggregation validates options', () => {
-    for (const options of [{aggregation: 'sum'}, {coverage: 'partial'}, {quantile: 1.1}]) {
+    for (const options of [{aggregation: 'sum'}, {coverage: 'partial'}, {quantile: 1.1}, {accumulateOnClick: 'yes'}]) {
         let failed = false
         try { aggregateH3Values([first], options) } catch { failed = true }
         assert(failed, `Expected invalid options to fail: ${JSON.stringify(options)}`)

@@ -2898,6 +2898,11 @@ function bootstrap(meta = {}){
         return point && typeof point === 'object' ? {...point} : point
     }
 
+    function multiOriginKey(prepared) {
+        const {index, lat, lng} = prepared.context.values
+        return index || `${lat},${lng}`
+    }
+
     function prepareMultiQuery(point) {
         const prepared = interactions.prepare('onclick', point)
         if (!prepared) throw new Error('The on-click query is not available')
@@ -3046,9 +3051,9 @@ function bootstrap(meta = {}){
         return Promise.all(entries.map(entry => runMultiQueryEntry(entry, group))).then(results => results.every(Boolean))
     }
 
-    function runMultiQuery(points) {
+    function runMultiQuery(points, requests = null) {
         let prepared
-        try { prepared = points.map(point => prepareMultiQuery(point)) }
+        try { prepared = requests || points.map(point => prepareMultiQuery(point)) }
         catch (error) {
             requestStatus.fail(error, {hasResult: mainLayers.length > 0, onRetry: retryRequest})
             return Promise.resolve(false)
@@ -3063,6 +3068,7 @@ function bootstrap(meta = {}){
             entries: prepared.map((request, index) => ({point: multiQueryPoint(points[index]), prepared: request, result: null})),
         }
         multiQueryGroup = group
+        settingsPanelApi?.setMultiQueryActive(true)
         requestError = null
         failedSource = null
         document.body.classList.remove('load-error')
@@ -3076,9 +3082,9 @@ function bootstrap(meta = {}){
         return launchMultiQueryEntries(group, group.entries)
     }
 
-    function addMultiQueryPoint(point) {
+    function addMultiQueryPoint(point, request = null) {
         let prepared
-        try { prepared = prepareMultiQuery(point) }
+        try { prepared = request || prepareMultiQuery(point) }
         catch (error) {
             requestStatus.fail(error, {hasResult: mainLayers.length > 0, onRetry: retryRequest})
             return Promise.resolve(false)
@@ -3099,10 +3105,78 @@ function bootstrap(meta = {}){
         return launchMultiQueryEntries(group, [entry])
     }
 
+    async function showBaseForPendingMultiQuery(group) {
+        if (updatePromise) await updatePromise
+        if (group !== multiQueryGroup) return false
+        if (group.entries.some(entry => entry.result)) return renderMultiQueryResults(group)
+        displayedSelection = null
+        if (!await update(fileSource) || group !== multiQueryGroup) return false
+        if (group.entries.some(entry => entry.result)) return renderMultiQueryResults(group)
+        await restoreSelection(multiQuerySelection(group))
+        return true
+    }
+
+    async function removeMultiQueryOrigin(index) {
+        const group = multiQueryGroup
+        if (!group || index < 0) return false
+        const [removed] = group.entries.splice(index, 1)
+        removed.controller?.abort()
+        removed.socket?.dispose()
+        invalidateAnimation()
+        if (!group.entries.length) return clearMultiQuery()
+        lastClickPoint = group.entries.at(-1).point
+        persistMultiQueryState(group)
+        void highlightMultiQueryOrigins(multiQuerySelection(group))
+        if (group.entries.some(entry => entry.result)) {
+            const rendered = await renderMultiQueryResults(group)
+            if (group === multiQueryGroup) await restoreSelection(multiQuerySelection(group))
+            return rendered
+        }
+        return showBaseForPendingMultiQuery(group)
+    }
+
+    async function clearMultiQuery() {
+        const group = multiQueryGroup
+        multiQueryGroup = null
+        settingsPanelApi?.setMultiQueryActive(false)
+        interactions.cancel()
+        invalidateSocket()
+        cancelMultiQueryGroup(group)
+        setAnimation('')
+        displayedSelection = lastQuery = lastClickPoint = null
+        hex([])
+        cartogramApi?.highlightCells([])
+        requestError = failedSource = null
+        document.body.classList.remove('load-error')
+        const url = urlState.read()
+        url.searchParams.delete('query')
+        url.searchParams.delete('multiOrigin')
+        urlState.replace(url)
+        if (updatePromise) await updatePromise
+        displayedSelection = null
+        hex([])
+        cartogramApi?.highlightCells([])
+        requestStatus.clear()
+        requestStatus.begin()
+        if (!await update(fileSource)) throw requestError || new Error('Could not restore the original data')
+        return true
+    }
+
     function submitOnClick(point, add = false) {
         lastClickPoint = point
         if (!multiQueryEnabled) return interactions.click(point)
-        return add ? addMultiQueryPoint(point) : runMultiQuery([point])
+        let request
+        try { request = prepareMultiQuery(point) }
+        catch (error) {
+            requestStatus.fail(error, {hasResult: mainLayers.length > 0, onRetry: retryRequest})
+            return Promise.resolve(false)
+        }
+        const group = multiQueryGroup
+        const key = multiOriginKey(request)
+        const duplicate = group?.entries.findIndex(entry => multiOriginKey(entry.prepared) === key) ?? -1
+        if (duplicate >= 0) return removeMultiQueryOrigin(duplicate)
+        return add || multiQueryOptions.accumulateOnClick && group?.entries.length
+            ? addMultiQueryPoint(point, request) : runMultiQuery([point], [request])
     }
 
     function changeMultiQueryOptions(options) {
@@ -4022,6 +4096,7 @@ function bootstrap(meta = {}){
         multiQuery: multiQueryEnabled,
         multiQuerySettings: multiQueryOptions,
         onMultiQueryChange: changeMultiQueryOptions,
+        onMultiQueryClear: () => { void clearMultiQuery().catch(error => requestStatus.fail(error, {hasResult: mainLayers.length > 0, onRetry: retryRequest})) },
     })
     animationTimeline = createAnimationTimeline({
         root: document.getElementById('animation-timeline'),

@@ -165,12 +165,14 @@ function makeControl(setting, value, colourSchemes, getLegendBounds) {
     }
 }
 
-export function createSettingsPanel({metadata, overrides, colourSchemes, onApply, onAnimation = () => {}, onRequestEdit = () => {}, getLegendBounds, getRequestEstimates = () => ({}), schema = SETTINGS_SCHEMA, multiQuery = false, multiQuerySettings = {}, onMultiQueryChange = () => {}}) {
+export function createSettingsPanel({metadata, overrides, colourSchemes, onApply, onAnimation = () => {}, onRequestEdit = () => {}, getLegendBounds, getRequestEstimates = () => ({}), schema = SETTINGS_SCHEMA, multiQuery = false, multiQuerySettings = {}, onMultiQueryChange = () => {}, onMultiQueryClear = () => {}}) {
     const form = document.getElementById('settingsForm')
     const fieldsRoot = document.getElementById('settingsFields')
     const resetAllButton = document.getElementById('settingsResetAll')
+    const clearMapButton = document.getElementById('settingsClearMap')
     const status = document.getElementById('settingsStatus')
     const multiQueryRoot = document.getElementById('multiQueryControls')
+    clearMapButton.hidden = !multiQuery
     let multiQueryOptions = {...MULTI_QUERY_DEFAULTS, ...multiQuerySettings}
     const appliedOverrides = {...overrides}
     let draftOverrides = {...overrides}
@@ -387,6 +389,21 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
         quantileRow.append(quantileControl)
         quantileRow.hidden = multiQueryOptions.aggregation !== 'quantile'
         group.append(quantileRow)
+        const accumulateRow = element('label', 'setting-field')
+        accumulateRow.append(element('span', 'setting-name', 'Accumulate origins on click'))
+        const accumulateControl = element('div', 'setting-control-row')
+        const accumulateInput = document.createElement('input')
+        accumulateInput.id = 'multi-query-accumulate'
+        accumulateInput.type = 'checkbox'
+        accumulateInput.checked = multiQueryOptions.accumulateOnClick
+        accumulateInput.setAttribute('aria-label', 'Accumulate origins on click')
+        accumulateInput.addEventListener('change', () => {
+            multiQueryOptions = {...multiQueryOptions, accumulateOnClick: accumulateInput.checked}
+            onMultiQueryChange({...multiQueryOptions})
+        })
+        accumulateControl.append(accumulateInput)
+        accumulateRow.append(accumulateControl)
+        group.append(accumulateRow)
         multiQueryRoot.append(group)
     }
 
@@ -448,6 +465,7 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
     refreshEstimates()
 
     form.addEventListener('submit', event => event.preventDefault())
+    clearMapButton.addEventListener('click', onMultiQueryClear)
     resetAllButton.addEventListener('click', () => {
         animationIntent++
         onAnimation('')
@@ -482,6 +500,7 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
 
     return {
         cancelPendingAnimation: () => { animationIntent++ },
+        setMultiQueryActive(active) { clearMapButton.disabled = !active },
         setQuiet(key, value) {
             draftOverrides[key] = appliedOverrides[key] = value
             fields.get(key)?.control?.write(value)

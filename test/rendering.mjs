@@ -401,7 +401,7 @@ try {
             const restoredRequest = page.waitForRequest('**/budget-result?*'); await page.reload(); await restoredRequest;
             await page.locator('#settingsBtn').click(); assert(await approval.isChecked());
             await approval.uncheck(); await page.waitForFunction(() => new URL(location.href).searchParams.get('onclickBudgetOverride') === '0', null, {timeout: 1000});
-            await page.locator('#settingsClose').click(); await clickCell(page); await budgetError.waitFor();
+            await page.locator('#settingsClose').click(); await clickCell(page, cells[1]); await budgetError.waitFor();
             assert.equal(budgetRequests, 2, 'Revocation blocks new requests while the approved response is held');
             await heldBudget.fulfill({contentType: 'application/octet-stream', body: values(10)});
 
@@ -506,11 +506,35 @@ try {
             await setting(page, 'p.shift', '10');
             await page.waitForFunction(() => window._columnData?.value?.length === 1 && window._columnData.value[0] === 16);
             assert.equal(multiRequests.length, requestsBeforeEdit + 2, 'A request-control change reruns all selected origins');
+            await page.locator('#settingsClose').click();
+            await clickCell(page, cells[2]);
+            await page.waitForFunction(() => window._columnData?.value?.[0] === 14);
+            await clickCell(page, cells[2]);
+            await displayed(page, 0.65);
+            assert.equal(new URL(page.url()).searchParams.getAll('multiOrigin').length, 0, 'Clicking an origin again removes it');
+            assert(await page.locator('#settingsClearMap').isDisabled(), 'Clear map is disabled with no origins');
+            await page.locator('#settingsBtn').click();
+            await page.locator('#multi-query-accumulate').check();
+            await page.waitForFunction(() => new URL(location.href).searchParams.get('multiAccumulate') === 'true');
+            await page.reload();
+            await displayed(page, 0.65);
+            await page.locator('#settingsBtn').click();
+            assert(await page.locator('#multi-query-accumulate').isChecked(), 'Accumulation setting restores from the URL');
             await clickCell(page, cell);
             await page.waitForFunction(() => window._columnData?.value?.[0] === 12);
-            assert.equal(await page.locator('.multi-query-status').count(), 0, 'Origin status and clear controls are omitted');
-            await page.goto(url('rendering.csv'));
+            await clickCell(page, cells[1]);
+            await page.waitForFunction(() => window._columnData?.value?.length === 1 && window._columnData.value[0] === 16);
+            const requestsBeforeRemoval = multiRequests.length;
+            await clickCell(page, cells[1]);
+            await page.waitForFunction(() => window._columnData?.value?.length === 2 && window._columnData.value[0] === 12);
+            assert.equal(multiRequests.length, requestsBeforeRemoval, 'Removing an origin reuses its partner result');
+            assert.equal(new URL(page.url()).searchParams.getAll('multiOrigin').length, 1);
+            await page.locator('#settingsBtn').click();
+            await page.getByRole('button', {name: 'Clear map', exact: true}).click();
             await displayed(page, 0.65);
+            assert.equal(new URL(page.url()).searchParams.has('query'), false);
+            assert.equal(new URL(page.url()).searchParams.getAll('multiOrigin').length, 0);
+            assert(await page.locator('#settingsClearMap').isDisabled(), 'Clear map resets the origin set');
 
             // One HTTP lifecycle: labels and selection track displayed results, never pending or failed queries.
             const action = {url: '/selection-result?index={index}&time={controls.time}', focus: false, highlight: true};
