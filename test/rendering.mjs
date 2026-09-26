@@ -488,6 +488,7 @@ try {
             await page.waitForFunction(() => new URL(location.href).searchParams.get('multiQuantile') === '0.25');
             const sharedSettings = new URL(page.url()).searchParams;
             assert.equal(sharedSettings.getAll('multiOrigin').length, 2, 'Shared URL stores every origin');
+            assert(sharedSettings.getAll('multiOrigin').every(origin => /^q2o1_/.test(origin)), 'Origins store only the H3 index when requests do not use coordinates');
             assert.equal(sharedSettings.get('multiAggregation'), 'quantile');
             assert.equal(sharedSettings.get('multiCoverage'), 'union');
             assert.equal(sharedSettings.get('multiQuantile'), '0.25');

@@ -2804,12 +2804,6 @@ function bootstrap(meta = {}){
         return query
     }
 
-    function multiOriginQuery(event, point, values, tokens) {
-        const query = savedQuery(event, point, values, tokens)
-        for (const field of ['index', 'lat', 'lng']) if (values[field] !== undefined) query[field] = values[field]
-        return query
-    }
-
     let lastClickPoint = restoredQuery?.event === 'onclick' ? restoredQuery : null
     const multiQueryEnabled = typeof metadataSettings.onclick?.url === 'string' && !!metadataSettings.onclick.url.trim()
     let multiQueryOptions = readMultiQueryOptions(params)
@@ -2911,7 +2905,7 @@ function bootstrap(meta = {}){
 
     function saveMultiQueryRequest(prepared) {
         const {event, point, values, tokens} = prepared.context
-        const query = multiOriginQuery(event, point, values, tokens)
+        const query = savedQuery(event, point, values, tokens)
         return {...query, index_lower: values.index_lower, index_upper: values.index_upper, _inputs: values._inputs}
     }
 
@@ -3896,7 +3890,7 @@ function bootstrap(meta = {}){
                     .then(readMultiQueryResult)))
                 const dataCols = multiQueryData({entries: results.map(result => ({result}))})
                 const origins = packet.multiRequests.map(({context}) => ({
-                    ...multiOriginQuery(context.event, context.point, context.values, context.tokens),
+                    ...savedQuery(context.event, context.point, context.values, context.tokens),
                     _inputs: context.values._inputs,
                 }))
                 const values = packet.multiRequests.at(-1).context.values
