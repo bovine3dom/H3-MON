@@ -17,6 +17,11 @@ const columns = {
 };
 const arrow = data => Buffer.from(tableToIPC(tableFromArrays(data)));
 const values = value => arrow({...columns, value: Float64Array.from([value, 20, 110, 10000])});
+const valuesFor = (indexes, dataValues) => arrow({
+    index_lower: Uint32Array.from(indexes, index => h3IndexToSplitLong(index)[0]),
+    index_upper: Uint32Array.from(indexes, index => h3IndexToSplitLong(index)[1]),
+    value: Float64Array.from(dataValues),
+});
 const background = '#5890aa';
 const style = {
     version: 8, transition: {duration: 0, delay: 0},
@@ -157,12 +162,14 @@ async function frame(page, name, paneOpen = false) {
     assert(edges >= 3, `${name}: fewer than three unobscured edges`);
     console.log(`${name}: alignment, multiply and ${edges} rasterized edges passed`);
 }
-async function clickCell(page, index = cell) {
+async function clickCell(page, index = cell, modifiers = []) {
     const point = await page.evaluate(center => {
         const p = m.project(center), rect = m.getCanvas().getBoundingClientRect();
         return [rect.x + p.x, rect.y + p.y];
     }, cellToLatLng(index).reverse());
+    for (const modifier of modifiers) await page.keyboard.down(modifier);
     await page.mouse.click(...point);
+    for (const modifier of [...modifiers].reverse()) await page.keyboard.up(modifier);
 }
 async function setting(page, key, value) {
     await page.waitForFunction(([key, value]) => new URL(location.href).searchParams.get(key) === value
@@ -424,6 +431,87 @@ try {
             await coverageTooltip(0, null);
             await coverageTooltip(1, 0);
 
+            // On-click result sets aggregate by H3 cell and refresh every origin when request controls change.
+            const multiRequests = [];
+            json('/data/multi.json', {cartogram: 'none', colourScale: 'raw', t: 'From {TOWN_NAME}: {controls.shift}',
+                controls: {shift: {label: 'Value shift', type: 'number', default: 0,
+                    animate: {start: 0, end: 1, step: 1, step_rate: 2}}},
+                onclick: {url: '/multi-result?index={index}&shift={controls.shift}', resolution: 5, focus: false}});
+            routes.set('/data/multi.csv', routes.get('/data/query.csv'));
+            await page.route('**/multi-result?*', route => {
+                const search = new URL(route.request().url()).searchParams;
+                const index = search.get('index'), shift = Number(search.get('shift'));
+                multiRequests.push({index, shift});
+                const result = index === cell
+                    ? valuesFor([cell, cells[1]], [2 + shift, 8 + shift])
+                    : valuesFor([cells[1], cells[2]], [4 + shift, 6 + shift]);
+                return route.fulfill({contentType: 'application/octet-stream', body: result});
+            });
+            await page.goto(url('multi.csv'));
+            await displayed(page, 0.65);
+            await page.locator('#settingsBtn').click();
+            assert(await page.locator('#multiQueryControls').isVisible(), 'Multi-query controls show for an on-click endpoint');
+            await page.locator('#settingsBtn').click();
+            await clickCell(page, cell);
+            await page.waitForFunction(() => window._columnData?.value?.[0] === 2);
+            await clickCell(page, cells[1], ['Control']);
+            await page.waitForFunction(() => window._columnData?.value?.length === 1 && window._columnData.value[0] === 6);
+            assert.equal(multiRequests.length, 2, 'Control-click adds an independent query');
+            await page.waitForFunction(() => /^From .+ and .+: 0$/.test(document.title));
+            await page.waitForFunction(() => m._controls.find(c => c.getCanvas?.()?.id === 'deckgl-overlay')
+                ._deck.props.layers.find(layer => layer.id === 'hex-highlight')?.props.data.length === 2);
+            assert.deepEqual(await page.evaluate(indexes => m._controls.find(c => c.getCanvas?.()?.id === 'deckgl-overlay')
+                ._deck.props.layers.find(layer => layer.id === 'hex-highlight')?.props.data, [cell, cells[1]]), [cell, cells[1]]);
+            await page.locator('#settingsBtn').click();
+            assert(await page.locator('#multiQueryControls').evaluate(el => el.parentElement.id === 'settingsFields'
+                && el === el.parentElement.lastElementChild), 'Combine controls are a normal section at the end of Settings');
+            const animationRequestStart = multiRequests.length;
+            await page.getByRole('button', {name: 'Play', exact: true}).click();
+            await page.waitForFunction(() => window._columnData?.value?.[0] === 7);
+            await page.waitForFunction(() => /^From .+ and .+: 1$/.test(document.title));
+            await page.getByRole('button', {name: 'Pause', exact: true}).click();
+            assert(multiRequests.length >= animationRequestStart + 4, 'Animation requests every origin for both frames');
+            const animationRequests = multiRequests.slice(animationRequestStart);
+            for (const shift of [0, 1]) {
+                const origins = animationRequests.filter(request => request.shift === shift).map(request => request.index);
+                assert.equal(new Set(origins).size, 2, `Animation frame ${shift} requests every origin`);
+            }
+            const requestsBeforeAggregation = multiRequests.length;
+            await page.locator('#multi-query-coverage').selectOption('union');
+            await page.waitForFunction(() => window._columnData?.value?.length === 3
+                && [...window._columnData.value].sort((a, b) => a - b).join(',') === '3,7,7');
+            assert.equal(multiRequests.length, requestsBeforeAggregation, 'Changing aggregation settings does not repeat requests');
+            await page.locator('#multi-query-aggregation').selectOption('quantile');
+            assert(await page.locator('#multi-query-quantile').isVisible(), 'Quantile input appears only for quantile');
+            await page.locator('#multi-query-quantile').fill('0.25');
+            await page.waitForFunction(() => [...window._columnData.value].sort((a, b) => a - b).join(',') === '3,6,7');
+            await page.waitForFunction(() => new URL(location.href).searchParams.get('multiQuantile') === '0.25');
+            const sharedSettings = new URL(page.url()).searchParams;
+            assert.equal(sharedSettings.getAll('multiOrigin').length, 2, 'Shared URL stores every origin');
+            assert.equal(sharedSettings.get('multiAggregation'), 'quantile');
+            assert.equal(sharedSettings.get('multiCoverage'), 'union');
+            assert.equal(sharedSettings.get('multiQuantile'), '0.25');
+            await page.reload();
+            await page.waitForFunction(() => window._columnData?.value?.length === 3
+                && [...window._columnData.value].sort((a, b) => a - b).join(',') === '3,6,7');
+            assert.equal(new Set(multiRequests.slice(-2).map(request => request.index)).size, 2, 'Reload replays both origins');
+            await page.locator('#settingsBtn').click();
+            assert.equal(await page.locator('#multi-query-aggregation').inputValue(), 'quantile');
+            assert.equal(await page.locator('#multi-query-coverage').inputValue(), 'union');
+            assert.equal(await page.locator('#multi-query-quantile').inputValue(), '0.25');
+            await page.locator('#multi-query-aggregation').selectOption('mean');
+            await page.locator('#multi-query-coverage').selectOption('intersection');
+            const requestsBeforeEdit = multiRequests.length;
+            await page.locator('[id="setting-p.shift"]').fill('10');
+            await setting(page, 'p.shift', '10');
+            await page.waitForFunction(() => window._columnData?.value?.length === 1 && window._columnData.value[0] === 16);
+            assert.equal(multiRequests.length, requestsBeforeEdit + 2, 'A request-control change reruns all selected origins');
+            await clickCell(page, cell);
+            await page.waitForFunction(() => window._columnData?.value?.[0] === 12);
+            assert.equal(await page.locator('.multi-query-status').count(), 0, 'Origin status and clear controls are omitted');
+            await page.goto(url('rendering.csv'));
+            await displayed(page, 0.65);
+
             // One HTTP lifecycle: labels and selection track displayed results, never pending or failed queries.
             const action = {url: '/selection-result?index={index}&time={controls.time}', focus: false, highlight: true};
             const metadata = {cartogram: 'none', trimFactor: 0, t: 'From {TOWN_NAME}: {controls.time} min',
@@ -499,7 +587,6 @@ try {
             await received(2);
             await clickCell(page, cells[2]);
             reply(await received(3), 20);
-            reply(queries[1], 99);
             await displayed(page, 20);
             const move = (continuous = false) => {
                 const tick = () => {
@@ -520,12 +607,14 @@ try {
             assert.equal(await page.evaluate(() => window._columnData.value[0]), 30, 'Older reply cannot replace displayed trailing result');
             reply(queries[5], 40);
             await displayed(page, 40);
-            assert.equal(sockets.length, 1);
+            const movementSocket = queries[5].socket;
+            assert(queries.slice(3, 6).every(query => query.socket === movementSocket), 'Movement queries reuse one connection');
             await page.evaluate(move);
             const outstanding = await received(7);
-            await sockets[0].close({code: 1011, reason: 'controlled disconnect'});
+            const connectionCount = sockets.length;
+            await movementSocket.close({code: 1011, reason: 'controlled disconnect'});
             const reconnected = await received(8);
-            assert.equal(sockets.length, 2);
+            assert.equal(sockets.length, connectionCount + 1);
             assert.equal(reconnected.url, outstanding.url);
             reply(reconnected, 50);
             await displayed(page, 50);
@@ -556,8 +645,8 @@ try {
                 streaming = false;
             }
             await page.waitForFunction(lng => {
-                const url = new URL(location.href), query = JSON.parse(url.searchParams.get('query'));
-                return query?.lng === Number(lng) && url.searchParams.get('p.time') === '3'
+                const url = new URL(location.href), query = url.searchParams.get('query');
+                return query?.startsWith('q2') && url.searchParams.get('p.time') === '3'
                     && url.searchParams.get('colourScale') === 'rankit'
                     && Math.abs(Number(new URLSearchParams(url.hash.slice(1)).get('x')) - Number(lng)) < 0.000051;
             }, new URL(queries.at(-1).url, origin).searchParams.get('lng'));
@@ -632,7 +721,7 @@ try {
                 await panel.getByRole('spinbutton', {name: 'Frame: Animate FPS', exact: true}).fill('0');
                 assert.match(await page.locator('[id="setting-a.frame-error"]').textContent(), /positive/);
                 await panel.getByRole('spinbutton', {name: 'Frame: Animate FPS', exact: true}).fill('3');
-                await page.waitForFunction(() => JSON.parse(new URL(location.href).searchParams.get('a.frame')).step_rate === 3);
+                await page.waitForFunction(() => new URL(location.href).searchParams.get('a.frame')?.split('_').at(-1) === '3');
                 await page.getByRole('button', {name: 'Play', exact: true}).click();
                 await page.waitForFunction(() => new URL(location.href).searchParams.get('animation') === 'frame');
                 await page.reload();

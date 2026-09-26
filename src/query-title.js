@@ -1,17 +1,22 @@
 export function queryTitle(template, query, findClosestCity, controls = [], latLngForIndex) {
     if (!template || !query) return template
-    let city = null
+    let townNames = []
     if (template.includes('{TOWN_NAME}')) {
-        let origin = [query.lat, query.lng]
-        if (latLngForIndex && query.index) {
-            try { origin = latLngForIndex(query.index) } catch (_) { origin = [] }
-        }
-        if (Number.isFinite(origin[0]) && Number.isFinite(origin[1])) {
-            city = findClosestCity(origin[0], ((origin[1] + 180) % 360 + 360) % 360 - 180)
-        }
+        const origins = query.origins || [query]
+        townNames = origins.map(originQuery => {
+            let origin = [originQuery.lat, originQuery.lng]
+            if (latLngForIndex && originQuery.index) {
+                try { origin = latLngForIndex(originQuery.index) } catch (_) { origin = [] }
+            }
+            if (!Number.isFinite(origin[0]) || !Number.isFinite(origin[1])) return null
+            return findClosestCity(origin[0], ((origin[1] + 180) % 360 + 360) % 360 - 180)?.name || null
+        }).filter(Boolean)
     }
+    const townName = townNames.length > 2
+        ? `${townNames.slice(0, -1).join(', ')}, and ${townNames.at(-1)}`
+        : townNames.join(' and ')
     return template.replace(/\{([^{}]*)\}/g, (placeholder, token) => {
-        if (token === 'TOWN_NAME') return city?.name || placeholder
+        if (token === 'TOWN_NAME') return townName || placeholder
         const control = /^controls\.([A-Za-z][A-Za-z0-9_]*)$/.exec(token)
         const values = control ? query._inputs : query
         const key = control ? control[1] : token

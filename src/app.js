@@ -20,10 +20,11 @@ import {createRequestControls} from './request-controls'
 import {animationSequence, createAnimationPlayer} from './animation'
 import {createAnimationTimeline} from './animation-timeline'
 import {createQuerySocket} from './query-socket'
-import {readQueryState, writeQueryState} from './query-state'
+import {readQueryOrigins, readQueryState, writeQueryOrigins, writeQueryState} from './query-state'
 import {rankitScale} from './rankit'
 import {queryTitle} from './query-title'
 import {createURLState} from './url-state'
+import {aggregateH3Values, readMultiQueryOptions, writeMultiQueryOptions} from './multi-query'
 
 const params = new URLSearchParams(window.location.search)
 const urlState = createURLState(window)
@@ -1406,6 +1407,7 @@ function bootstrap(meta = {}){
     }
     refreshCrosshair()
     const restoredQuery = readQueryState(params)
+    const restoredOrigins = readQueryOrigins(params)
     let lastQuery = restoredQuery
     let requestError = null
     let failedSource = null
@@ -2151,7 +2153,7 @@ function bootstrap(meta = {}){
 
     let reloadNum = 0
     const getHexData = async (publishLayer, source, signal) => {
-        source.fetching = !source.bytes
+        source.fetching = !source.bytes && !source.dataCols
         const {url: file_path, ext, format} = source
         const reload = ++reloadNum
         const requestURL = new URL(file_path, document.baseURI)
@@ -2175,26 +2177,28 @@ function bootstrap(meta = {}){
         const useCartogramQuantiles = cartogramEnabled && settings.quantileSource === 'cartogram'
 
         if (format.layer === 'hex' && (ext === 'arrow' || ext === 'csv')) {
-            let buf = source.bytes
-            if (source.socket && !buf) throw new Error('Missing query socket result bytes')
-            if (!buf) {
-                const resp = await current(measurePerf('data.fetch', {file: file_path, reload}, () => fetch(requestURL, {signal, cache: 'no-store'})))
-                if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${(await current(resp.text())).slice(0, 300)}`)
-                buf = await current(measurePerf(ext === 'csv' ? 'data.read_text' : 'data.read_arrayBuffer', () => ext === 'csv' ? resp.text() : resp.arrayBuffer()))
-            }
-            source.fetching = false
-            setLoadStage('Parsing data')
-            let dataCols
-            let schema
-            if (ext === 'arrow') {
-                const dataTable = await current(parseArrowTable(buf, 'data.arrow_parse', {bytes: buf.byteLength}))
-                const fields = dataTable.schema.fields.map(f => f.name)
-                dataCols = await current(materializeArrowColumns(dataTable, fields, 'data.arrow_column'))
-                schema = dataCols
-            } else {
-                const rows = await current(parseCsvRows(buf))
-                dataCols = await current(measurePerf('data.csv_to_columns', {rows: rows.length}, () => rowsToColumns(rows)))
-                schema = dataCols
+            let dataCols = source.dataCols
+            let schema = dataCols
+            if (!dataCols) {
+                let buf = source.bytes
+                if (source.socket && !buf) throw new Error('Missing query socket result bytes')
+                if (!buf) {
+                    const resp = await current(measurePerf('data.fetch', {file: file_path, reload}, () => fetch(requestURL, {signal, cache: 'no-store'})))
+                    if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${(await current(resp.text())).slice(0, 300)}`)
+                    buf = await current(measurePerf(ext === 'csv' ? 'data.read_text' : 'data.read_arrayBuffer', () => ext === 'csv' ? resp.text() : resp.arrayBuffer()))
+                }
+                source.fetching = false
+                setLoadStage('Parsing data')
+                if (ext === 'arrow') {
+                    const dataTable = await current(parseArrowTable(buf, 'data.arrow_parse', {bytes: buf.byteLength}))
+                    const fields = dataTable.schema.fields.map(f => f.name)
+                    dataCols = await current(materializeArrowColumns(dataTable, fields, 'data.arrow_column'))
+                    schema = dataCols
+                } else {
+                    const rows = await current(parseCsvRows(buf))
+                    dataCols = await current(measurePerf('data.csv_to_columns', {rows: rows.length}, () => rowsToColumns(rows)))
+                    schema = dataCols
+                }
             }
             if (!dataCols.value || !hasH3Index(dataCols)) throw new Error('H3 data requires value and index or index_lower/index_upper columns')
             setLoadStage('Data parsed')
@@ -2353,7 +2357,7 @@ function bootstrap(meta = {}){
                                     if (!updateRunning && !metadataSettings.onclick?.url && !acceptedSource.query) {
                                         restoreSelection({event: 'onclick', ...point}).catch(error => console.warn('Could not highlight linked cells', error))
                                     }
-                                    interactions.click(lastClickPoint = point)
+                                    submitOnClick(point, !!(event.ctrlKey || event.metaKey))
                                     settingsPanelApi?.refreshEstimates()
                                 } catch (e) {
                                     console.warn('Cartogram click failed', {row: i, cartoRes, dataH3Res}, e)
@@ -2756,6 +2760,17 @@ function bootstrap(meta = {}){
         if (focus) cartogramApi.fitToBounds([[xMin - padding, yMin - padding, xMax + padding, yMax + padding]])
     }
 
+    async function highlightCartogramOrigins(indexes) {
+        if (!cartogramApi || !cartoAggCols) return
+        const h3map = await ensureH3ToXY()
+        if (!h3map || !cartogramApi || !cartoAggCols) return
+        const rows = new Set()
+        for (const index of indexes) for (const cartoH3 of cartoH3sForDataH3(index)) {
+            for (const row of h3map.get(cartoH3)?.cellIndices || []) rows.add(row)
+        }
+        cartogramApi.highlightCells([...rows])
+    }
+
     const mapOverlay = new MapboxOverlay({
         interleaved: false,
         _pickable: false,
@@ -2788,7 +2803,18 @@ function bootstrap(meta = {}){
         if (point.cartogram) query.cartogram = point.cartogram
         return query
     }
+
+    function multiOriginQuery(event, point, values, tokens) {
+        const query = savedQuery(event, point, values, tokens)
+        for (const field of ['index', 'lat', 'lng']) if (values[field] !== undefined) query[field] = values[field]
+        return query
+    }
+
     let lastClickPoint = restoredQuery?.event === 'onclick' ? restoredQuery : null
+    const multiQueryEnabled = typeof metadataSettings.onclick?.url === 'string' && !!metadataSettings.onclick.url.trim()
+    let multiQueryOptions = readMultiQueryOptions(params)
+    let multiQueryGroup = null
+    const hasMultipleOrigins = () => multiQueryEnabled && multiQueryGroup?.entries.length > 1
     const interactions = createInteractions({
         metadata: metadataSettings,
         getSettings: () => ({...metadataSettings, ...(settingsPanelApi?.getOverrides() ?? settingOverrides), onclick: settings.onclick, onmove: settings.onmove}),
@@ -2820,6 +2846,7 @@ function bootstrap(meta = {}){
             invalidateAnimation()
             const query = savedQuery(event, point, values, tokens)
             const pageURL = writeQueryState(urlState.read(), query)
+            pageURL.searchParams.delete('multiOrigin')
             for (const setting of requestControls.schema) {
                 pageURL.searchParams.set(setting.key, serializeSettingValue(setting, values._inputs[setting.key.slice(2)]))
             }
@@ -2858,24 +2885,274 @@ function bootstrap(meta = {}){
             requestStatus.fail(error, {hasResult: mainLayers.length > 0, onRetry: retryRequest})
         },
     })
+
+    function beginMultiQueryLoading(label) {
+        loadProgress.interactive = mainLayers.length > 0
+        document.body.classList.toggle('interactive-load', loadProgress.interactive)
+        resetLoadProgress(label)
+        setLoadStage(label)
+        requestStatus.begin()
+    }
+
+    function multiQueryPoint(point) {
+        return point && typeof point === 'object' ? {...point} : point
+    }
+
+    function prepareMultiQuery(point) {
+        const prepared = interactions.prepare('onclick', point)
+        if (!prepared) throw new Error('The on-click query is not available')
+        return prepared
+    }
+
+    function saveMultiQueryRequest(prepared) {
+        const {event, point, values, tokens} = prepared.context
+        const query = multiOriginQuery(event, point, values, tokens)
+        return {...query, index_lower: values.index_lower, index_upper: values.index_upper, _inputs: values._inputs}
+    }
+
+    function multiOriginLocation(query) {
+        const location = {event: 'onclick'}
+        for (const field of ['index', 'lat', 'lng', 'zoom', 'cartogram']) {
+            if (query[field] !== undefined) location[field] = query[field]
+        }
+        return location
+    }
+
+    function persistMultiQueryState(group) {
+        const origins = group.entries.map(entry => multiOriginLocation(entry.query))
+        const last = origins.at(-1)
+        const values = group.entries.at(-1).prepared.context.values
+        const url = writeQueryState(urlState.read(), last)
+        writeQueryOrigins(url, origins)
+        writeMultiQueryOptions(url, multiQueryOptions)
+        for (const setting of requestControls.schema) {
+            url.searchParams.set(setting.key, serializeSettingValue(setting, values._inputs[setting.key.slice(2)]))
+        }
+        urlState.replace(url)
+        lastQuery = last
+    }
+
+    async function readMultiQueryResult(bytes) {
+        const table = await parseArrowTable(bytes, 'data.arrow_parse', {bytes: bytes.byteLength})
+        const fields = table.schema.fields.map(field => field.name)
+        const columns = await materializeArrowColumns(table, fields, 'data.arrow_column')
+        if (!columns.value || !hasH3Index(columns)) throw new Error('Multi-query results require H3 indexes and a value column')
+        const values = new Map()
+        for (let i = 0; i < h3RowCount(columns); i++) {
+            values.set(h3IndexStringAt(columns, i), toFiniteNumber(columnValue(columns.value, i)))
+        }
+        return values
+    }
+
+    function multiQueryData(group) {
+        const results = group.entries.filter(entry => entry.result).map(entry => entry.result)
+        const values = aggregateH3Values(results, multiQueryOptions)
+        const indexes = [...values.keys()]
+        const lower = new Uint32Array(indexes.length)
+        const upper = new Uint32Array(indexes.length)
+        const value = new Float64Array(indexes.length)
+        indexes.forEach((index, i) => {
+            const split = h3IndexToSplitLong(index)
+            lower[i] = split[0] >>> 0
+            upper[i] = split[1] >>> 0
+            value[i] = values.get(index)
+        })
+        return {index_lower: lower, index_upper: upper, value}
+    }
+
+    function multiQuerySelection(group) {
+        const query = group.entries.at(-1)?.query
+        return group.entries.length === 1 ? query : {
+            ...query, multi: true, origins: group.entries.map(entry => entry.query),
+        }
+    }
+
+    async function renderMultiQueryResults(group = multiQueryGroup) {
+        if (!group || group !== multiQueryGroup || !group.entries.some(entry => entry.result)) return false
+        const query = multiQuerySelection(group)
+        displayedSelection = query
+        return update({url: 'data/multi-query.arrow', ext: 'arrow', format: FORMATS.arrow, cacheBust: false,
+            dataCols: multiQueryData(group), query, multiQuery: true})
+    }
+
+    function fetchMultiQueryBytes(entry, signal) {
+        const {url, context} = entry.prepared
+        if (signal?.aborted) return Promise.reject(signal.reason || new DOMException('Request cancelled', 'AbortError'))
+        interactions.check('onclick', url)
+        if (context.socket) {
+            return new Promise((resolve, reject) => {
+                let settled = false
+                const finish = (callback, value) => {
+                    if (settled) return
+                    settled = true
+                    signal?.removeEventListener('abort', abort)
+                    callback(value)
+                }
+                const abort = () => {
+                    entry.socket?.dispose()
+                    finish(reject, signal.reason || new DOMException('Request cancelled', 'AbortError'))
+                }
+                entry.socket = createQuerySocket({
+                    onResult: bytes => finish(resolve, bytes),
+                    onError: error => finish(reject, error),
+                    beforeSend: () => interactions.check('onclick', url),
+                })
+                signal?.addEventListener('abort', abort, {once: true})
+                if (signal?.aborted) abort()
+                else entry.socket.submit(context.socket, url, context, {reset: true})
+            }).finally(() => {
+                entry.socket?.dispose()
+                entry.socket = null
+            })
+        }
+        const controller = signal ? null : new AbortController()
+        if (controller) entry.controller = controller
+        return fetch(url, {signal: signal || controller.signal, cache: 'no-store'}).then(async response => {
+            if (!response.ok) throw new Error(`HTTP ${response.status}: ${(await response.text()).slice(0, 300)}`)
+            return response.arrayBuffer()
+        }).finally(() => { if (controller) entry.controller = null })
+    }
+
+    function cancelMultiQueryGroup(group) {
+        for (const entry of group?.entries || []) {
+            entry.controller?.abort()
+            entry.socket?.dispose()
+        }
+    }
+
+    async function runMultiQueryEntry(entry, group) {
+        try {
+            await group.ready
+            if (group !== multiQueryGroup) return false
+            const bytes = await fetchMultiQueryBytes(entry)
+            if (group !== multiQueryGroup) return false
+            const result = await readMultiQueryResult(bytes)
+            if (group !== multiQueryGroup) return false
+            entry.result = result
+            await renderMultiQueryResults(group)
+            if (group === multiQueryGroup) await restoreSelection(multiQuerySelection(group))
+            return true
+        } catch (error) {
+            if (group !== multiQueryGroup || error?.name === 'AbortError') return false
+            requestError = error
+            document.body.classList.add('load-error')
+            console.warn('Multi-query request failed', error)
+            requestStatus.fail(error, {hasResult: mainLayers.length > 0, onRetry: retryRequest})
+            return false
+        }
+    }
+
+    function launchMultiQueryEntries(group, entries) {
+        return Promise.all(entries.map(entry => runMultiQueryEntry(entry, group))).then(results => results.every(Boolean))
+    }
+
+    function runMultiQuery(points) {
+        let prepared
+        try { prepared = points.map(point => prepareMultiQuery(point)) }
+        catch (error) {
+            requestStatus.fail(error, {hasResult: mainLayers.length > 0, onRetry: retryRequest})
+            return Promise.resolve(false)
+        }
+        const inputSignature = JSON.stringify(prepared[0]?.context.values._inputs || {})
+        const previousUpdate = updatePromise
+        interactions.cancel()
+        invalidateSocket()
+        cancelMultiQueryGroup(multiQueryGroup)
+        const group = {
+            inputSignature,
+            entries: prepared.map((request, index) => ({point: multiQueryPoint(points[index]), prepared: request, result: null})),
+        }
+        multiQueryGroup = group
+        requestError = null
+        failedSource = null
+        document.body.classList.remove('load-error')
+        invalidateAnimation()
+        prepared.forEach((request, index) => { group.entries[index].query = saveMultiQueryRequest(request) })
+        persistMultiQueryState(group)
+        if (group.entries.length > 1) void highlightMultiQueryOrigins(multiQuerySelection(group))
+        requestStatus.clear()
+        beginMultiQueryLoading('Waiting for query results')
+        group.ready = previousUpdate ? previousUpdate.then(() => group === multiQueryGroup) : Promise.resolve(true)
+        return launchMultiQueryEntries(group, group.entries)
+    }
+
+    function addMultiQueryPoint(point) {
+        let prepared
+        try { prepared = prepareMultiQuery(point) }
+        catch (error) {
+            requestStatus.fail(error, {hasResult: mainLayers.length > 0, onRetry: retryRequest})
+            return Promise.resolve(false)
+        }
+        const group = multiQueryGroup
+        const signature = JSON.stringify(prepared.context.values._inputs || {})
+        if (!group?.entries.length || group.inputSignature !== signature) {
+            return runMultiQuery([...(group?.entries.map(entry => entry.point) || []), point])
+        }
+        const entry = {point: multiQueryPoint(point), prepared, result: null}
+        invalidateAnimation()
+        entry.query = saveMultiQueryRequest(prepared)
+        group.entries.push(entry)
+        persistMultiQueryState(group)
+        void highlightMultiQueryOrigins(multiQuerySelection(group))
+        beginMultiQueryLoading('Waiting for additional results')
+        if (group.entries.length > 1 && group.entries.some(item => item.result)) void renderMultiQueryResults(group)
+        return launchMultiQueryEntries(group, [entry])
+    }
+
+    function submitOnClick(point, add = false) {
+        lastClickPoint = point
+        if (!multiQueryEnabled) return interactions.click(point)
+        return add ? addMultiQueryPoint(point) : runMultiQuery([point])
+    }
+
+    function changeMultiQueryOptions(options) {
+        multiQueryOptions = {...multiQueryOptions, ...options}
+        const url = urlState.read()
+        writeMultiQueryOptions(url, multiQueryOptions)
+        urlState.replace(url)
+        invalidateAnimation()
+        void renderMultiQueryResults()
+    }
+
     function repeatQuery({force = true} = {}) {
+        if (multiQueryEnabled && multiQueryGroup?.entries.length) {
+            return runMultiQuery(multiQueryGroup.entries.map(entry => entry.point))
+        }
         const event = ['onclick', 'onmove'].find(key => typeof metadataSettings[key]?.url === 'string') || 'onclick'
         const query = lastQuery || {event, ...map.getCenter()}
         return interactions.replay(query.event, query, {force})
     }
 
     function retryRequest() {
+        if (multiQueryEnabled && multiQueryGroup?.entries.length) return repeatQuery()
         return failedSource && !failedSource.socket ? update(failedSource) : interactions.retry()
     }
 
     function guardSource(source) {
-        if (source.query && !source.bytes) interactions.check(source.query.event, source.url)
+        if (source.query && !source.bytes && !source.multiQuery) interactions.check(source.query.event, source.url)
     }
 
     let displayedSelection = null
+    async function highlightMultiQueryOrigins(query) {
+        const indexes = (query.origins || [query]).map(origin => origin.index ||
+            (Number.isFinite(origin.lat) && Number.isFinite(origin.lng) && dataH3Res != null
+                ? latLngToCell(origin.lat, origin.lng, metadataSettings.onclick?.resolution ?? dataH3Res) : null)).filter(Boolean)
+        if (metadataSettings.onclick?.highlight === false) {
+            hex([])
+            cartogramApi?.highlightCells([])
+        } else {
+            hex(indexes)
+            await highlightCartogramOrigins(indexes)
+        }
+    }
+
     async function restoreSelection(query) {
         displayedSelection = query
         if ((queryTitle(settings.t, query, findClosestCity, requestControls.schema, cellToLatLng) || DEFAULT_DOCUMENT_TITLE) !== document.title) await refreshLegend()
+        if (query?.multi) {
+            await highlightMultiQueryOrigins(query)
+            return
+        }
         if (query?.event !== 'onclick' || metadataSettings.onclick?.highlight === false) {
             hex([])
             cartogramApi?.highlightCells([])
@@ -2896,6 +3173,9 @@ function bootstrap(meta = {}){
         if (index) await focusCartogramForH3(index, {focus: false})
     }
     // MapLibre's click event excludes drags; metadata actions remain usable while loading.
+    if (multiQueryEnabled) mapContainer.addEventListener('contextmenu', event => {
+        if (event.ctrlKey || event.metaKey) event.preventDefault()
+    }, {capture: true})
     map.on('click', event => {
         const original = event.originalEvent
         if (!original || original.button !== 0 || original.target?.closest?.('#search-container, .maplibregl-ctrl, .maplibregl-popup, .pane-btn')) return
@@ -2909,7 +3189,7 @@ function bootstrap(meta = {}){
                 restoreSelection({event: 'onclick', index, lat: event.lngLat.lat, lng: event.lngLat.lng}).catch(error => console.warn('Could not highlight linked cells', error))
             }
         }
-        interactions.click(lastClickPoint = event.lngLat)
+        submitOnClick(event.lngLat, !!(original.ctrlKey || original.metaKey))
         settingsPanelApi?.refreshEstimates()
     })
     let userInteractionMove = false
@@ -2919,10 +3199,10 @@ function bootstrap(meta = {}){
     map.on('move', event => {
         settingsPanelApi?.refreshEstimates()
         userInteractionMove ||= !!(event.keyboardMoving || eventStartedInMap(event.originalEvent))
-        if (userInteractionMove) interactions.move(map.getCenter())
+        if (userInteractionMove && !hasMultipleOrigins()) interactions.move(map.getCenter())
     })
     map.on('moveend', () => {
-        if (userInteractionMove) interactions.move(map.getCenter())
+        if (userInteractionMove && !hasMultipleOrigins()) interactions.move(map.getCenter())
         userInteractionMove = false
     })
     window.addEventListener('pagehide', event => {
@@ -3452,7 +3732,10 @@ function bootstrap(meta = {}){
         if (changedSettings.every(setting => setting.refresh === 'budget')) {
             urlState.replace(updateUrlSettingOverrides(urlState.read(), nextOverrides, changedSettings))
             for (const {key} of changedSettings) {
-                if (settingEnabled(nextOverrides[key] ?? metadataSettings[key])) void interactions.retry(key.replace('BudgetOverride', ''))
+                if (settingEnabled(nextOverrides[key] ?? metadataSettings[key])) {
+                    if (multiQueryEnabled && multiQueryGroup?.entries.length) void repeatQuery()
+                    else void interactions.retry(key.replace('BudgetOverride', ''))
+                }
             }
             return
         }
@@ -3512,21 +3795,44 @@ function bootstrap(meta = {}){
     }
     const animationPlayer = createAnimationPlayer({
         prepare: value => {
-            const event = lastQuery?.event || ['onmove', 'onclick'].find(key => metadataSettings[key]?.url)
+            const group = hasMultipleOrigins() ? multiQueryGroup : null
+            const event = group ? 'onclick' : lastQuery?.event || ['onmove', 'onclick'].find(key => metadataSettings[key]?.url)
             if (!event) throw new Error('Animation requires an onclick or onmove URL.')
             const point = event === 'onmove' ? map.getCenter() : lastClickPoint || lastQuery || map.getCenter()
             const id = animationTarget || playing
             const overrides = {...metadataSettings, ...settingsPanelApi.getOverrides(), [`p.${id}`]: value}
             // Hold playback during an incomplete control edit.
             try { requestControls.values(overrides) } catch { return null }
+            if (group) {
+                const requests = group.entries.map(entry => interactions.prepare('onclick', entry.point, overrides))
+                return requests.every(Boolean) ? {multiRequests: requests} : null
+            }
             return interactions.prepare(event, point, overrides)
         },
         latency: () => {
+            const group = hasMultipleOrigins() ? multiQueryGroup : null
+            if (group) return group.entries.reduce((sum, entry) => sum + (interactions.preview('onclick', entry.point)?.cost || 0), 0)
             const event = lastQuery?.event || ['onmove', 'onclick'].find(key => metadataSettings[key]?.url)
             if (!event) return 0
             return interactions.preview(event, event === 'onmove' ? map.getCenter() : lastClickPoint || map.getCenter())?.cost
         },
-        fetchFrame: async ({url, context}, signal) => {
+        fetchFrame: async (packet, signal) => {
+            if (packet.multiRequests) {
+                const results = await Promise.all(packet.multiRequests.map(prepared => fetchMultiQueryBytes({prepared}, signal)
+                    .then(readMultiQueryResult)))
+                const dataCols = multiQueryData({entries: results.map(result => ({result}))})
+                const origins = packet.multiRequests.map(({context}) => ({
+                    ...multiOriginQuery(context.event, context.point, context.values, context.tokens),
+                    _inputs: context.values._inputs,
+                }))
+                const values = packet.multiRequests.at(-1).context.values
+                const query = {...origins.at(-1), _inputs: values._inputs, multi: true, origins}
+                const byteLength = dataCols.index_lower.byteLength + dataCols.index_upper.byteLength + dataCols.value.byteLength
+                return {url: 'data/multi-query.arrow', query, bytes: {byteLength}, dataCols, ext: 'arrow', format: FORMATS.arrow,
+                    cacheBust: false, animation: true, multiQuery: true, multiQueryResults: results,
+                    multiQueryPrepared: packet.multiRequests}
+            }
+            const {url, context} = packet
             interactions.check(context.event, url)
             const {event, values, socket, point, tokens} = context
             const query = {...savedQuery(event, point, values, tokens),
@@ -3575,9 +3881,20 @@ function bootstrap(meta = {}){
             await update(source)
             if (source.animationError) throw source.animationError
             if (acceptedSource !== source) return false
-            const {index_lower, index_upper, _inputs, ...query} = source.query
+            if (source.multiQueryResults && multiQueryGroup?.entries.length === source.multiQueryResults.length) {
+                source.multiQueryResults.forEach((result, index) => {
+                    multiQueryGroup.entries[index].result = result
+                    multiQueryGroup.entries[index].prepared = source.multiQueryPrepared[index]
+                    multiQueryGroup.entries[index].query = {...source.query.origins[index], _inputs: source.query._inputs}
+                })
+                multiQueryGroup.inputSignature = JSON.stringify(source.query._inputs)
+            }
+            const {index_lower, index_upper, _inputs, multi, origins, ...query} = source.query
             lastQuery = query
             const url = writeQueryState(urlState.read(), query)
+            if (source.multiQueryResults) writeQueryOrigins(url, origins.map(multiOriginLocation))
+            else if (source.query.event !== 'onclick') url.searchParams.delete('multiOrigin')
+            writeMultiQueryOptions(url, multiQueryOptions)
             const id = animationTarget || playing
             for (const setting of requestControls.schema) {
                 const value = source.query._inputs[setting.key.slice(2)]
@@ -3702,6 +4019,9 @@ function bootstrap(meta = {}){
         getLegendBounds: () => displayedLegendBounds,
         getRequestEstimates: overrides => Object.fromEntries(['onclick', 'onmove'].map(key => [key,
             interactions.preview(key, key === 'onclick' ? lastClickPoint || map.getCenter() : map.getCenter(), {...metadataSettings, ...overrides})])),
+        multiQuery: multiQueryEnabled,
+        multiQuerySettings: multiQueryOptions,
+        onMultiQueryChange: changeMultiQueryOptions,
     })
     animationTimeline = createAnimationTimeline({
         root: document.getElementById('animation-timeline'),
@@ -3711,13 +4031,15 @@ function bootstrap(meta = {}){
     })
     refreshAnimationTimeline()
 
-    if (restoredQuery) repeatQuery()
+    if (multiQueryEnabled && restoredOrigins.length) void runMultiQuery(restoredOrigins)
+    else if (restoredQuery?.event === 'onclick' && multiQueryEnabled) void runMultiQuery([restoredQuery])
+    else if (restoredQuery) repeatQuery()
     if (params.get('animation')) setAnimation(params.get('animation'))
 
     try {
         const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
         const host = window.location.hostname.includes(':') ? `[${window.location.hostname}]` : window.location.hostname
-        const socket = new WebSocket(`${protocol}://${host}:1990`)
+        const socket = new WebSocket(`${protocol}://${host}/ws/`)
         let updateStarted = false
         const startUpdate = (delay = 0) => {
             updateStarted = true

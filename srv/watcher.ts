@@ -3,8 +3,8 @@ import { debounce } from "https://deno.land/std@0.224.0/async/debounce.ts";
 import { delay } from "https://deno.land/std@0.224.0/async/delay.ts"; // <-- Import delay
 import { resolve, normalize } from "https://deno.land/std@0.224.0/path/mod.ts";
 
-const WS_PORT = 1990;
-const HTTP_PORT = 1983;
+const WS_PORT = 1991;
+const HTTP_PORT = 1985;
 const WATCH_DIR_NAME = "data";
 const DEBOUNCE_MS = 200;
 const OVERWRITE_CHECK_DELAY_MS = 300; // Delay in ms to wait after remove event

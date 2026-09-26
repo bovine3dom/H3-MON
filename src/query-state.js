@@ -55,10 +55,7 @@ function expandMaskedQuery(value) {
     return query
 }
 
-export function readQueryState(searchParams) {
-    if (!searchParams.has('query')) return null
-    if (searchParams.getAll('query').length !== 1) throw new Error('Duplicate saved query')
-    const value = searchParams.get('query')
+export function decodeQueryState(value) {
     let query
     if (MASKED_QUERY.test(value)) query = expandMaskedQuery(value)
     else {
@@ -68,7 +65,36 @@ export function readQueryState(searchParams) {
     return validateQuery(query)
 }
 
+export function encodeQueryState(query) {
+    return compactQuery(validateQuery(query))
+}
+
+export function readQueryState(searchParams) {
+    if (!searchParams.has('query')) return null
+    if (searchParams.getAll('query').length !== 1) throw new Error('Duplicate saved query')
+    return decodeQueryState(searchParams.get('query'))
+}
+
+export function readQueryOrigins(searchParams) {
+    return searchParams.getAll('multiOrigin').map(value => {
+        const query = decodeQueryState(value)
+        if (query.event !== 'onclick') throw new Error('Saved origins must use on-click queries')
+        return query
+    })
+}
+
+export function writeQueryOrigins(url, origins) {
+    const encoded = origins.map(origin => {
+        const query = validateQuery(origin)
+        if (query.event !== 'onclick') throw new Error('Saved origins must use on-click queries')
+        return compactQuery(query)
+    })
+    url.searchParams.delete('multiOrigin')
+    for (const value of encoded) url.searchParams.append('multiOrigin', value)
+    return url
+}
+
 export function writeQueryState(url, query) {
-    url.searchParams.set('query', compactQuery(validateQuery(query)))
+    url.searchParams.set('query', encodeQueryState(query))
     return url
 }

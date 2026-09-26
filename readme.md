@@ -131,6 +131,17 @@ Put metadata alongside the data: `www/data/example.json` for `example.arrow`,
 These plus `{TOWN_NAME}` for the nearest city/town are accepted in `t` for the
 legend title.
 
+## multiple on-click results
+
+When metadata has an active `onclick` URL, a normal map click starts a result set.
+Hold Ctrl or Cmd while you click to add an origin. The map marks each origin in red.
+
+Choose `Minimum`, `Maximum`, `Mean`, `Median` or `Quantile` in Settings.
+Choose `Intersection` to keep cells that appear in each result received so far.
+Choose `Union` to keep cells that appear in at least one result. The map updates
+when each request completes. If the legend title uses `{TOWN_NAME}`, it lists the
+nearest town for each origin.
+
 ## Request controls and shared links
 
 See [Control Animation](docs/animation.md) for playback settings and shared animation URLs.

@@ -1,4 +1,4 @@
-import {readQueryState, writeQueryState} from './query-state.js'
+import {readQueryOrigins, readQueryState, writeQueryOrigins, writeQueryState} from './query-state.js'
 import {queryTitle} from './query-title.js'
 import {createRequestControls} from './request-controls.js'
 import {createURLState} from './url-state.js'
@@ -27,6 +27,16 @@ Deno.test('titles use raw inputs and select labels, preserving unknown tokens an
     assert(queryTitle('{TOWN_NAME}', query, () => undefined) === '{TOWN_NAME}')
     assert(queryTitle('{controls.mode}', {_inputs: {mode: 'removed'}}, null, controls.schema) === 'removed')
     assert(queryTitle('{lat}|{controls.time}', {lat: NaN, 'controls.time': '21600'}) === '{lat}|{controls.time}')
+})
+
+Deno.test('multi-origin titles list every town and retain shared control values', () => {
+    const query = {index: '851fb467fffffff', _inputs: {time: 360}, origins: [
+        {index: '851fb467fffffff'}, {index: '851fb467ffffffe'}, {index: '851fb467ffffffd'},
+    ]}
+    const lookup = (_lat, lng) => ({name: `Town ${lng}`})
+    const latLng = index => [48, Number.parseInt(index.slice(-1), 16)]
+    assert(queryTitle('{TOWN_NAME} | {controls.time}', query, lookup, [], latLng) ===
+        'Town 15, Town 14, and Town 13 | 360')
 })
 
 const query = {event: 'onclick', index: '851fb467fffffff', lat: 48.8, lng: 2.4, zoom: 6, cartogram: [3, 7]}
@@ -94,6 +104,19 @@ Deno.test('saved queries round-trip without replacing controls, data or camera',
     assert(url.searchParams.get('p.time') === '360' && url.searchParams.get('data') === 'sample.csv')
     assert(url.searchParams.get('onmove') === 'false' && url.hash === '#x=1')
     assert(readQueryState(new URLSearchParams()) === null)
+})
+
+Deno.test('saved origin sets round-trip as repeated compact queries', () => {
+    const origins = [query, {...query, index: '851fb463fffffff', lat: 48.8, lng: 2.18}]
+    const url = new URL('https://example.test/?data=sample.csv')
+    writeQueryState(url, origins.at(-1))
+    writeQueryOrigins(url, origins)
+    assert(url.searchParams.getAll('multiOrigin').length === 2)
+    assert(JSON.stringify(readQueryOrigins(url.searchParams)) === JSON.stringify(origins))
+    assert(readQueryState(url.searchParams).index === origins.at(-1).index)
+    let failed = false
+    try { writeQueryOrigins(url, [{event: 'onmove', index: query.index}]) } catch { failed = true }
+    assert(failed, 'Only on-click origins can be saved')
 })
 
 Deno.test('saved queries reject executable strings and malformed geographic state', () => {

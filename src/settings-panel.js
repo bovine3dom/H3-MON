@@ -5,6 +5,7 @@ import {
     settingEnabled,
     validateSettingValue,
 } from './settings.js'
+import {MULTI_QUERY_DEFAULTS} from './multi-query.js'
 import './settings-panel.css'
 
 function element(tag, className, text) {
@@ -164,11 +165,13 @@ function makeControl(setting, value, colourSchemes, getLegendBounds) {
     }
 }
 
-export function createSettingsPanel({metadata, overrides, colourSchemes, onApply, onAnimation = () => {}, onRequestEdit = () => {}, getLegendBounds, getRequestEstimates = () => ({}), schema = SETTINGS_SCHEMA}) {
+export function createSettingsPanel({metadata, overrides, colourSchemes, onApply, onAnimation = () => {}, onRequestEdit = () => {}, getLegendBounds, getRequestEstimates = () => ({}), schema = SETTINGS_SCHEMA, multiQuery = false, multiQuerySettings = {}, onMultiQueryChange = () => {}}) {
     const form = document.getElementById('settingsForm')
     const fieldsRoot = document.getElementById('settingsFields')
     const resetAllButton = document.getElementById('settingsResetAll')
     const status = document.getElementById('settingsStatus')
+    const multiQueryRoot = document.getElementById('multiQueryControls')
+    let multiQueryOptions = {...MULTI_QUERY_DEFAULTS, ...multiQuerySettings}
     const appliedOverrides = {...overrides}
     let draftOverrides = {...overrides}
     let applyToken = 0
@@ -334,6 +337,59 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
         schedule(setting, event.type === 'input' || event.detail?.typed)
     }
 
+    if (multiQuery && multiQueryRoot) {
+        multiQueryRoot.hidden = false
+        const group = element('fieldset', 'settings-group')
+        group.append(element('legend', '', 'Combine on-click results'))
+        const addSelect = (label, key, options) => {
+            const row = element('div', 'setting-field')
+            const name = element('label', 'setting-name', label)
+            const select = document.createElement('select')
+            for (const [value, text] of options) {
+                const option = document.createElement('option')
+                option.value = value
+                option.textContent = text
+                select.append(option)
+            }
+            select.value = multiQueryOptions[key]
+            name.htmlFor = `multi-query-${key}`
+            select.id = `multi-query-${key}`
+            select.addEventListener('change', () => {
+                multiQueryOptions = {...multiQueryOptions, [key]: select.value}
+                if (key === 'aggregation') quantileRow.hidden = select.value !== 'quantile'
+                onMultiQueryChange({...multiQueryOptions})
+            })
+            const control = element('div', 'setting-control-row')
+            control.append(select)
+            row.append(name, control)
+            group.append(row)
+        }
+        addSelect('Statistic', 'aggregation', [['min', 'Minimum'], ['max', 'Maximum'], ['mean', 'Mean'], ['median', 'Median'], ['quantile', 'Quantile']])
+        addSelect('Cell coverage', 'coverage', [['intersection', 'Intersection'], ['union', 'Union']])
+        const quantileRow = element('label', 'setting-field')
+        quantileRow.htmlFor = 'multi-query-quantile'
+        quantileRow.append(element('span', 'setting-name', 'Quantile (0–1)'))
+        const quantileInput = document.createElement('input')
+        quantileInput.id = 'multi-query-quantile'
+        quantileInput.type = 'number'
+        quantileInput.min = '0'
+        quantileInput.max = '1'
+        quantileInput.step = 'any'
+        quantileInput.value = String(multiQueryOptions.quantile)
+        quantileInput.setAttribute('aria-label', 'Quantile (0–1)')
+        quantileInput.addEventListener('input', () => {
+            if (!quantileInput.value || !quantileInput.validity.valid) return
+            multiQueryOptions = {...multiQueryOptions, quantile: Number(quantileInput.value)}
+            onMultiQueryChange({...multiQueryOptions})
+        })
+        const quantileControl = element('div', 'setting-control-row')
+        quantileControl.append(quantileInput)
+        quantileRow.append(quantileControl)
+        quantileRow.hidden = multiQueryOptions.aggregation !== 'quantile'
+        group.append(quantileRow)
+        multiQueryRoot.append(group)
+    }
+
     const groups = new Map()
     for (const setting of schema) {
         if (setting.hidden) continue
@@ -387,6 +443,7 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
             fields.get(setting.key).play = button
         }
     }
+    if (multiQueryRoot) fieldsRoot.append(multiQueryRoot)
     refreshVisibility()
     refreshEstimates()
 
