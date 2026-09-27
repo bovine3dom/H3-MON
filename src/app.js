@@ -3090,7 +3090,7 @@ function bootstrap(meta = {}){
             entries: prepared.map((request, index) => ({point: multiQueryPoint(points[index]), prepared: request, result: null})),
         }
         multiQueryGroup = group
-        settingsPanelApi?.setMultiQueryActive(true)
+        settingsPanelApi?.setMultiQueryOriginCount(group.entries.length)
         requestError = null
         failedSource = null
         document.body.classList.remove('load-error')
@@ -3120,6 +3120,7 @@ function bootstrap(meta = {}){
         invalidateAnimation()
         entry.query = saveMultiQueryRequest(prepared)
         group.entries.push(entry)
+        settingsPanelApi?.setMultiQueryOriginCount(group.entries.length)
         persistMultiQueryState(group)
         void highlightMultiQueryOrigins(multiQuerySelection(group))
         beginMultiQueryLoading('Waiting for additional results')
@@ -3142,6 +3143,7 @@ function bootstrap(meta = {}){
         const group = multiQueryGroup
         if (!group || index < 0) return false
         const [removed] = group.entries.splice(index, 1)
+        settingsPanelApi?.setMultiQueryOriginCount(group.entries.length)
         removed.controller?.abort()
         removed.socket?.dispose()
         invalidateAnimation()
@@ -3160,7 +3162,7 @@ function bootstrap(meta = {}){
     async function clearMultiQuery() {
         const group = multiQueryGroup
         multiQueryGroup = null
-        settingsPanelApi?.setMultiQueryActive(false)
+        settingsPanelApi?.setMultiQueryOriginCount(0)
         interactions.cancel()
         invalidateSocket()
         cancelMultiQueryGroup(group)
@@ -4271,7 +4273,7 @@ function bootstrap(meta = {}){
         const pos = map.getCenter()
         const z = map.getZoom()
         const url = urlState.read()
-        url.hash = `x=${pos.lng.toFixed(4)}&y=${pos.lat.toFixed(4)}&z=${z.toFixed(4)}&b=${map.getBearing().toFixed(4)}&p=${map.getPitch().toFixed(4)}`
+        url.hash = `x=${pos.lng.toFixed(4)}&y=${pos.lat.toFixed(4)}&z=${z.toFixed(4)}`
         urlState.replace(url)
         syncLog('map.moveend', {
             originalEventType: original ? original.type : null,

@@ -171,7 +171,16 @@ Deno.test('saved queries round-trip without replacing controls, data or camera',
     assert(readQueryState(new URLSearchParams()) === null)
 })
 
-Deno.test('saved origin sets round-trip in one compact query and read legacy repeated values', () => {
+Deno.test('saved origin sets use bare H3 indexes when possible and read legacy encodings', () => {
+    const h3Origins = [
+        {event: 'onclick', index: query.index},
+        {event: 'onclick', index: '851fb463fffffff'},
+    ]
+    const h3Url = new URL('https://example.test/')
+    writeQueryOrigins(h3Url, h3Origins)
+    assert(h3Url.searchParams.get('multiOrigin') === h3Origins.map(origin => origin.index).join('*'))
+    assert(JSON.stringify(readQueryOrigins(h3Url.searchParams)) === JSON.stringify(h3Origins))
+
     const origins = [query, {...query, index: '851fb463fffffff', lat: 48.8, lng: 2.18}]
     const url = new URL('https://example.test/?data=sample.csv')
     writeQueryOrigins(url, origins)

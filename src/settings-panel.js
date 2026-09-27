@@ -180,6 +180,8 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
     const multiQueryRoot = document.getElementById('multiQueryControls')
     clearMapButton.hidden = !multiQuery
     let multiQueryOptions = {...MULTI_QUERY_DEFAULTS, ...multiQuerySettings}
+    let multiQueryOriginCount = 0
+    let refreshMultiQueryVisibility = () => {}
     const appliedOverrides = {...overrides}
     let draftOverrides = {...overrides}
     let applyToken = 0
@@ -365,16 +367,17 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
             select.id = `multi-query-${key}`
             select.addEventListener('change', () => {
                 multiQueryOptions = {...multiQueryOptions, [key]: select.value}
-                if (key === 'aggregation') quantileRow.hidden = select.value !== 'quantile'
+                refreshMultiQueryVisibility()
                 onMultiQueryChange({...multiQueryOptions})
             })
             const control = element('div', 'setting-control-row')
             control.append(select)
             row.append(name, control)
             group.append(row)
+            return row
         }
-        addSelect('Statistic', 'aggregation', [['min', 'Minimum'], ['max', 'Maximum'], ['mean', 'Mean'], ['median', 'Median'], ['quantile', 'Quantile']])
-        addSelect('Cell coverage', 'coverage', [['intersection', 'Intersection'], ['union', 'Union']])
+        const aggregationRow = addSelect('Statistic', 'aggregation', [['min', 'Minimum'], ['max', 'Maximum'], ['mean', 'Mean'], ['median', 'Median'], ['quantile', 'Quantile']])
+        const coverageRow = addSelect('Cell coverage', 'coverage', [['intersection', 'Intersection'], ['union', 'Union']])
         const quantileRow = element('label', 'setting-field')
         quantileRow.title = 'client.quantile'
         quantileRow.htmlFor = 'multi-query-quantile'
@@ -395,7 +398,6 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
         const quantileControl = element('div', 'setting-control-row')
         quantileControl.append(quantileInput)
         quantileRow.append(quantileControl)
-        quantileRow.hidden = multiQueryOptions.aggregation !== 'quantile'
         group.append(quantileRow)
         const accumulateRow = element('label', 'setting-field')
         accumulateRow.title = 'client.accumulateOnClick'
@@ -413,6 +415,12 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
         accumulateControl.append(accumulateInput)
         accumulateRow.append(accumulateControl)
         group.append(accumulateRow)
+        refreshMultiQueryVisibility = () => {
+            const multipleOrigins = multiQueryOriginCount > 1
+            aggregationRow.hidden = coverageRow.hidden = !multipleOrigins
+            quantileRow.hidden = !multipleOrigins || multiQueryOptions.aggregation !== 'quantile'
+        }
+        refreshMultiQueryVisibility()
         multiQueryRoot.append(group)
     }
 
@@ -510,7 +518,11 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
 
     return {
         cancelPendingAnimation: () => { animationIntent++ },
-        setMultiQueryActive(active) { clearMapButton.disabled = !active },
+        setMultiQueryOriginCount(count) {
+            multiQueryOriginCount = count
+            clearMapButton.disabled = count < 1
+            refreshMultiQueryVisibility()
+        },
         setQuiet(key, value) {
             draftOverrides[key] = appliedOverrides[key] = value
             fields.get(key)?.control?.write(value)
