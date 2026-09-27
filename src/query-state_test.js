@@ -21,13 +21,64 @@ Deno.test('titles use raw inputs and select labels, preserving unknown tokens an
     }
     const template = '{controls.time}|{controls.mode}|{controls.flag}|{TOWN_NAME}|{unknown}|{controls.toString}'
     assert(queryTitle(template, query, lookup, controls.schema) ===
-        '360|Train $& {controls.time}|false|City {controls.time}|{unknown}|{controls.toString}')
+        '360|train $& {controls.time}|false|City {controls.time}|{unknown}|{controls.toString}')
+    assert(queryTitle('{controls.mode}', query, lookup, controls.schema) === 'Train $& {controls.time}')
+    assert(queryTitle('Mode: {controls.mode}', query, lookup, controls.schema) === 'Mode: train $& {controls.time}')
+    assert(queryTitle('Done. {controls.mode}', query, lookup, controls.schema) === 'Done. Train $& {controls.time}')
     assert(queryTitle('{TOWN_NAME}', {index: '851fb467fffffff'}, lookup, [], () => [48.8, 2.4]) === 'City {controls.time}')
     assert(query['controls.time'] === '21600' && query._inputs.mode === 'rail')
     assert(queryTitle(template, null, lookup, controls.schema) === template)
     assert(queryTitle('{TOWN_NAME}', query, () => undefined) === '{TOWN_NAME}')
     assert(queryTitle('{controls.mode}', {_inputs: {mode: 'removed'}}, null, controls.schema) === 'removed')
     assert(queryTitle('{lat}|{controls.time}', {lat: NaN, 'controls.time': '21600'}) === '{lat}|{controls.time}')
+})
+
+Deno.test('title blocks hide with their controls and can contain static text', () => {
+    const controls = createRequestControls({
+        metric: {label: 'Metric', type: 'select', default: 'time', options: [
+            {value: 'time', label: 'travel time'}, {value: 'population', label: 'population'},
+        ]},
+        radius: {label: 'Radius', type: 'number', default: 5, showIf: 'values => values.metric === "population"'},
+        fallback: {label: 'Fallback', type: 'text', default: 'shown', showIf: '() => { throw new Error("broken") }'},
+        window_size: {label: 'Window size', type: 'number', default: 0},
+    })
+    const query = {...controls.encode(), _inputs: controls.values()}
+    assert(queryTitle('{controls.radius}', query, null, controls.schema) === '')
+    assert(queryTitle('Reachable{ within {controls.radius} km}', query, null, controls.schema) === 'Reachable')
+    assert(queryTitle('{within {controls.metric} and {controls.radius} km}', query, null, controls.schema) === '')
+    assert(queryTitle('{controls.metric}', query, null, controls.schema) === 'travel time')
+    assert(queryTitle('{controls.fallback}', query, null, controls.schema) === 'shown')
+    assert(queryTitle('{until {controls.window_size > 0} hours later}', query, null, controls.schema) === '')
+
+    query._inputs = controls.values({'p.metric': 'population', 'p.window_size': 3})
+    assert(queryTitle('{within {controls.radius} km of {controls.metric}}', query, null, controls.schema) === 'within 5 km of population')
+    assert(queryTitle('{until {controls.window_size > 0} hours later}', query, null, controls.schema) === 'until hours later')
+    assert(queryTitle('{for population {controls.metric == "population"}}', query, null, controls.schema) === 'for population')
+
+    const contexts = {
+        client: {values: {aggregation: 'mean', coverage: 'union'}, showIfValues: {originCount: 2}, schema: [
+            {key: 'aggregation', type: 'select', showIf: values => values.originCount > 1, options: [
+                {value: 'mean', name: 'Mean'}, {value: 'median', name: 'Median'},
+            ]},
+            {key: 'coverage', type: 'select', showIf: values => values.originCount > 1, options: [
+                {value: 'intersection', name: 'Intersection'}, {value: 'union', name: 'Union'},
+            ]},
+        ]},
+        remote: {values: {window_size: 3, aggregation: 'remote value'}, schema: [
+            {key: 'window_size', remoteControl: true}, {key: 'aggregation', remoteControl: true},
+        ]},
+    }
+    assert(queryTitle('{client.aggregation}', query, null, controls.schema, undefined, undefined, contexts) === 'Mean')
+    assert(queryTitle('Statistic: {client.aggregation}', query, null, controls.schema, undefined, undefined, contexts) === 'Statistic: mean')
+    assert(queryTitle('Done. {client.aggregation}', query, null, controls.schema, undefined, undefined, contexts) === 'Done. Mean')
+    assert(queryTitle('Using {client.coverage}', query, null, controls.schema, undefined, undefined, contexts) === 'Using union')
+    const singleOriginContexts = {...contexts, client: {...contexts.client, showIfValues: {originCount: 1}}}
+    assert(queryTitle('Using {client.aggregation}', query, null, controls.schema, undefined, undefined, singleOriginContexts) === 'Using ')
+    assert(queryTitle('{with {client.coverage} coverage}', query, null, controls.schema, undefined, undefined, singleOriginContexts) === '')
+    assert(queryTitle('{remote.aggregation}', query, null, controls.schema, undefined, undefined, contexts) === 'remote value')
+    assert(queryTitle('{remote.window_size}', query, null, controls.schema, undefined, undefined, contexts) === '3')
+    assert(queryTitle('{until {remote.window_size > 0} hours later}', query, null, controls.schema, undefined, undefined, contexts) === 'until hours later')
+    assert(queryTitle('At {remote.query.lat}', {lat: 48.5}, null, [], undefined, undefined, contexts) === 'At 48.5')
 })
 
 Deno.test('multi-origin titles list every town and retain shared control values', () => {

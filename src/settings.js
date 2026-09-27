@@ -46,7 +46,7 @@ export const SETTINGS_SCHEMA = [
         key: 't',
         name: 'Title',
         group: 'General',
-        type: 'text',
+        type: 'textarea',
         defaultValue: '',
         refresh: 'render',
     },

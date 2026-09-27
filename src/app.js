@@ -14,7 +14,7 @@ import {getCitiesStartsWith, findClosestCity} from 'tiny-geocoder'
 import {findMostPopulousCityForCell} from './city-label-lookup'
 import {render_cartogram} from './cartogram'
 import {createSettingsPanel} from './settings-panel'
-import {SETTINGS_SCHEMA, colourScale, fixedLegendScale, readSettingLayers, serializeSettingValue, settingEnabled, updateUrlSettingOverrides} from './settings'
+import {SETTINGS_SCHEMA, colourScale, effectiveSettingValue, fixedLegendScale, readSettingLayers, serializeSettingValue, settingEnabled, updateUrlSettingOverrides} from './settings'
 import {centralLinkedH3, createInteractions} from './interactions'
 import {createRequestStatus} from './request-status'
 import {createRequestControls} from './request-controls'
@@ -1396,8 +1396,28 @@ fetch(`data/${meta_name}`).then(r => {
 
 function bootstrap(meta = {}){
     const requestControls = createRequestControls(meta.controls)
-    const settingSchema = [...requestControls.schema, ...requestControls.animations,
-        {key: 'animation', hidden: true, type: 'text', defaultValue: '', refresh: 'animation'}, ...SETTINGS_SCHEMA]
+    const requestControlSchema = requestControls.schema.map(setting => ({...setting,
+        legendToken: `remote.${setting.key.slice(2)}`}))
+    const animationSchema = requestControls.animations.map(setting => ({...setting,
+        legendToken: `remote.animation.${setting.key.slice(2)}`}))
+    const remoteTitleSchema = [
+        ...requestControls.schema.map(setting => ({...setting, key: setting.key.slice(2), remoteControl: true})),
+        ...requestControls.animations.map(setting => ({...setting, key: `animation.${setting.key.slice(2)}`})),
+    ]
+    const clientTitleSchema = [
+        ...SETTINGS_SCHEMA,
+        {key: 'aggregation', type: 'select', showIf: values => values.originCount > 1, options: [
+            {value: 'min', name: 'Minimum'}, {value: 'max', name: 'Maximum'}, {value: 'mean', name: 'Mean'},
+            {value: 'median', name: 'Median'}, {value: 'quantile', name: 'Quantile'},
+        ]},
+        {key: 'coverage', type: 'select', showIf: values => values.originCount > 1, options: [
+            {value: 'intersection', name: 'Intersection'}, {value: 'union', name: 'Union'},
+        ]},
+        {key: 'quantile', type: 'number'}, {key: 'accumulateOnClick', type: 'boolean'},
+        {key: 'animation', type: 'text'},
+    ]
+    const settingSchema = [...requestControlSchema, ...animationSchema,
+        {key: 'animation', hidden: true, type: 'text', defaultValue: '', refresh: 'animation', legendToken: 'client.animation'}, ...SETTINGS_SCHEMA]
     function writeRequestControlSettings(url, values) {
         for (const setting of requestControls.schema) {
             const id = setting.key.slice(2)
@@ -2806,8 +2826,10 @@ function bootstrap(meta = {}){
             if (['index', 'lat', 'lng', 'zoom'].includes(field)) fields.add(field)
         }
         const title = typeof settings.t === 'string' ? settings.t : ''
-        if (title.includes('{TOWN_NAME}') || title.includes('{index}') || title.includes('{index_lower}') || title.includes('{index_upper}')) fields.add('index')
-        for (const field of ['lat', 'lng', 'zoom']) if (title.includes(`{${field}}`)) fields.add(field)
+        const usesRemote = field => title.includes(`{${field}}`) || title.includes(`{remote.query.${field}}`)
+        if (title.includes('{TOWN_NAME}') || title.includes('{remote.query.TOWN_NAME}') ||
+            ['index', 'index_lower', 'index_upper'].some(usesRemote)) fields.add('index')
+        for (const field of ['lat', 'lng', 'zoom']) if (usesRemote(field)) fields.add(field)
         const query = {event}
         for (const field of fields) if (values[field] !== undefined) query[field] = values[field]
         if (point.cartogram) query.cartogram = point.cartogram
@@ -3185,6 +3207,7 @@ function bootstrap(meta = {}){
         writeMultiQueryOptions(url, multiQueryOptions)
         urlState.replace(url)
         invalidateAnimation()
+        if (displayedSelection) void refreshLegend()
         void renderMultiQueryResults()
     }
 
@@ -3207,6 +3230,25 @@ function bootstrap(meta = {}){
     }
 
     let displayedSelection = null
+    function titleContext(query) {
+        const clientValues = Object.fromEntries(SETTINGS_SCHEMA.map(setting => [setting.key,
+            effectiveSettingValue(metadataSettings, settingOverrides, setting)]))
+        clientValues.animation = settingOverrides.animation ?? settings.animation ?? ''
+        Object.assign(clientValues, multiQueryOptions)
+        const inputDefaults = requestControls.values(settings)
+        const remoteValues = {...inputDefaults, ...query?._inputs}
+        for (const setting of requestControls.animations) {
+            const id = setting.key.slice(2)
+            remoteValues[`animation.${id}`] = effectiveSettingValue(metadataSettings, settingOverrides, setting)
+        }
+        return {client: {values: clientValues, schema: clientTitleSchema,
+            showIfValues: {originCount: query?.origins?.length ?? 1}},
+            remote: {values: remoteValues, schema: remoteTitleSchema}}
+    }
+    function legendTitle(query) {
+        return queryTitle(settings.t, query, findClosestCity, requestControls.schema, cellToLatLng,
+            findMostPopulousCityForCell, titleContext(query))
+    }
     async function highlightMultiQueryOrigins(query) {
         const indexes = (query.origins || [query]).map(origin => origin.index ||
             (Number.isFinite(origin.lat) && Number.isFinite(origin.lng) && dataH3Res != null
@@ -3222,7 +3264,7 @@ function bootstrap(meta = {}){
 
     async function restoreSelection(query) {
         displayedSelection = query
-        if ((queryTitle(settings.t, query, findClosestCity, requestControls.schema, cellToLatLng, findMostPopulousCityForCell) || DEFAULT_DOCUMENT_TITLE) !== document.title) await refreshLegend()
+        if ((legendTitle(query) || DEFAULT_DOCUMENT_TITLE) !== document.title) await refreshLegend()
         if (query?.multi) {
             await highlightMultiQueryOrigins(query)
             return
@@ -3677,7 +3719,7 @@ function bootstrap(meta = {}){
     }
 
     async function renderLegend(fmt) {
-        const title = queryTitle(settings.t, displayedSelection, findClosestCity, requestControls.schema, cellToLatLng, findMostPopulousCityForCell)
+        const title = legendTitle(displayedSelection)
         document.title = title || DEFAULT_DOCUMENT_TITLE
         // Keep ticks ascending while sampling the ramp's complete (possibly flipped) mapping.
         const options = {color: d3.scaleSequential(colourRamp), marginTop: 0, height: 32}
@@ -3758,7 +3800,7 @@ function bootstrap(meta = {}){
         infill = settingEnabled(settings.infill, false)
         requireCompleteCoverage = settingEnabled(settings.requireCompleteCoverage, false)
         showTrains = settingEnabled(settings.trains, false)
-        document.title = queryTitle(settings.t, displayedSelection, findClosestCity, requestControls.schema, cellToLatLng, findMostPopulousCityForCell) || DEFAULT_DOCUMENT_TITLE
+        document.title = legendTitle(displayedSelection) || DEFAULT_DOCUMENT_TITLE
         if (changedKeys.has('colourScheme') || changedKeys.has('cyclical') || changedKeys.has('flip')) rebuildColourRamp()
         if (changedKeys.has('cartogram')) resetCartogramState()
         if (changedKeys.has('animate') && !settingEnabled(settings.animate, false) && playing) setAnimation('')
@@ -3790,7 +3832,7 @@ function bootstrap(meta = {}){
         if (changedKeys.has('trains') && mainLayers.length && !mapRendered) {
             await renderLayers(false)
         }
-        if (legendDiv.lastElementChild && (colourChanged || changedKeys.has('t') || changedKeys.has('scale'))) await refreshLegend()
+        if (legendDiv.lastElementChild) await refreshLegend()
     }
 
     let settingsApplication = Promise.resolve()
@@ -3800,11 +3842,17 @@ function bootstrap(meta = {}){
             if (changedSettings.some(setting => setting.key === 'animation')) setAnimation(nextOverrides.animation || '')
             else if (changedSettings.some(setting => setting.key === `a.${playing}`)) setAnimation(playing)
             refreshAnimationTimeline()
+            settingOverrides = {...nextOverrides}
             changedSettings = changedSettings.filter(setting => setting.refresh !== 'animation')
-            if (!changedSettings.length) return
+            if (!changedSettings.length) {
+                if (legendDiv.lastElementChild) void refreshLegend()
+                return
+            }
         }
         if (changedSettings.every(setting => setting.refresh === 'budget')) {
+            settingOverrides = {...nextOverrides}
             urlState.replace(updateUrlSettingOverrides(urlState.read(), nextOverrides, changedSettings))
+            if (legendDiv.lastElementChild) void refreshLegend()
             for (const {key} of changedSettings) {
                 if (settingEnabled(nextOverrides[key] ?? metadataSettings[key])) {
                     if (multiQueryEnabled && multiQueryGroup?.entries.length) void repeatQuery()

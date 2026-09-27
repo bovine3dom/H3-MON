@@ -76,6 +76,12 @@ function makeControl(setting, value, colourSchemes, getLegendBounds) {
         return {node: root, read: () => current, write}
     }
     if (setting.type === 'scale') return makeScaleControl(value)
+    if (setting.type === 'textarea') {
+        const input = document.createElement('textarea')
+        input.rows = 3
+        input.value = value ?? ''
+        return {node: input, event: 'input', read: () => input.value, write: next => { input.value = next ?? '' }}
+    }
 
     if (setting.type === 'boolean') {
         const input = document.createElement('input')
@@ -346,6 +352,7 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
         const addSelect = (label, key, options) => {
             const row = element('div', 'setting-field')
             const name = element('label', 'setting-name', label)
+            name.title = `client.${key}`
             const select = document.createElement('select')
             for (const [value, text] of options) {
                 const option = document.createElement('option')
@@ -369,6 +376,7 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
         addSelect('Statistic', 'aggregation', [['min', 'Minimum'], ['max', 'Maximum'], ['mean', 'Mean'], ['median', 'Median'], ['quantile', 'Quantile']])
         addSelect('Cell coverage', 'coverage', [['intersection', 'Intersection'], ['union', 'Union']])
         const quantileRow = element('label', 'setting-field')
+        quantileRow.title = 'client.quantile'
         quantileRow.htmlFor = 'multi-query-quantile'
         quantileRow.append(element('span', 'setting-name', 'Quantile (0–1)'))
         const quantileInput = document.createElement('input')
@@ -390,6 +398,7 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
         quantileRow.hidden = multiQueryOptions.aggregation !== 'quantile'
         group.append(quantileRow)
         const accumulateRow = element('label', 'setting-field')
+        accumulateRow.title = 'client.accumulateOnClick'
         accumulateRow.append(element('span', 'setting-name', 'Accumulate origins on click'))
         const accumulateControl = element('div', 'setting-control-row')
         const accumulateInput = document.createElement('input')
@@ -420,8 +429,9 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
         }
 
         const root = element('div', 'setting-field')
-        if (setting.type === 'scale') root.classList.add('setting-field-wide')
+        if (setting.type === 'scale' || setting.type === 'textarea') root.classList.add('setting-field-wide')
         const name = element('label', 'setting-name', setting.name)
+        name.title = setting.legendToken || `client.${setting.key}`
         const controlRow = element('div', 'setting-control-row')
         const control = makeControl(setting, fieldValue(setting), colourSchemes, getLegendBounds)
         const error = element('div', 'setting-error')
