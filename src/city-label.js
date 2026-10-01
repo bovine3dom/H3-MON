@@ -18,3 +18,15 @@ export function mostPopulousCityInCell(cities, center, neighbors) {
     }
     return best
 }
+
+// Cells without a town of their own, such as suburbs, borrow the name of the closest town.
+export function closestCity(cities, center) {
+    let best
+    let bestDistance = Infinity
+    for (const city of cities) {
+        if (!Number.isFinite(city?.latitude) || !Number.isFinite(city?.longitude)) continue
+        const distance = distanceSquared([city.latitude, city.longitude], center)
+        if (distance < bestDistance) [best, bestDistance] = [city, distance]
+    }
+    return best
+}

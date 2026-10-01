@@ -1,6 +1,6 @@
 import {cellToLatLng, gridDisk} from 'h3-js'
 import {findClosestCities} from 'tiny-geocoder'
-import {mostPopulousCityInCell} from './city-label.js'
+import {closestCity, mostPopulousCityInCell} from './city-label.js'
 
 const CANDIDATE_LIMIT = 20
 const cityForCellCache = new Map()
@@ -13,7 +13,7 @@ export function findMostPopulousCityForCell(index) {
         .filter(cell => String(cell) !== key)
         .map(cellToLatLng)
     const candidates = findClosestCities(center[0], center[1], CANDIDATE_LIMIT)
-    const city = mostPopulousCityInCell(candidates, center, neighbors)
+    const city = mostPopulousCityInCell(candidates, center, neighbors) || closestCity(candidates, center)
     cityForCellCache.set(key, city)
     return city
 }
