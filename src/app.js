@@ -3096,6 +3096,7 @@ function bootstrap(meta = {}){
         document.body.classList.remove('load-error')
         invalidateAnimation()
         prepared.forEach((request, index) => { group.entries[index].query = saveMultiQueryRequest(request) })
+        syncOriginMarkers()
         persistMultiQueryState(group)
         if (group.entries.length > 1) void highlightMultiQueryOrigins(multiQuerySelection(group))
         requestStatus.clear()
@@ -3120,6 +3121,7 @@ function bootstrap(meta = {}){
         invalidateAnimation()
         entry.query = saveMultiQueryRequest(prepared)
         group.entries.push(entry)
+        syncOriginMarkers()
         settingsPanelApi?.setMultiQueryOriginCount(group.entries.length)
         persistMultiQueryState(group)
         void highlightMultiQueryOrigins(multiQuerySelection(group))
@@ -3143,6 +3145,7 @@ function bootstrap(meta = {}){
         const group = multiQueryGroup
         if (!group || index < 0) return false
         const [removed] = group.entries.splice(index, 1)
+        syncOriginMarkers()
         settingsPanelApi?.setMultiQueryOriginCount(group.entries.length)
         removed.controller?.abort()
         removed.socket?.dispose()
@@ -3162,6 +3165,7 @@ function bootstrap(meta = {}){
     async function clearMultiQuery() {
         const group = multiQueryGroup
         multiQueryGroup = null
+        syncOriginMarkers()
         settingsPanelApi?.setMultiQueryOriginCount(0)
         interactions.cancel()
         invalidateSocket()
@@ -3263,6 +3267,51 @@ function bootstrap(meta = {}){
             await highlightCartogramOrigins(indexes)
         }
     }
+
+    const originMarkerLayer = document.getElementById('origin-markers')
+    let originMarkerItems = []
+
+    function originMarkerName(query) {
+        if (query.index) {
+            try {
+                const name = findMostPopulousCityForCell(query.index)?.name
+                if (name) return name
+            } catch (_) {}
+        }
+        if (!Number.isFinite(query.lat) || !Number.isFinite(query.lng)) return ''
+        try { return findClosestCity(query.lat, ((query.lng + 180) % 360 + 360) % 360 - 180)?.name || '' } catch (_) { return '' }
+    }
+
+    function syncOriginMarkers() {
+        originMarkerItems = (multiQueryGroup?.entries || []).map(entry => {
+            const query = entry.query || entry.point || {}
+            try {
+                // Map positions are [lng, lat]; H3 cells and map points are [lat, lng].
+                const [lat, lng] = query.index ? cellToLatLng(query.index) : [query.lat, query.lng]
+                if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null
+                const element = document.createElement('div')
+                element.className = 'origin-marker'
+                const label = document.createElement('span')
+                label.className = 'origin-marker-label'
+                label.textContent = originMarkerName(query)
+                const dot = document.createElement('span')
+                dot.className = 'origin-marker-dot'
+                element.append(label, dot)
+                return {position: [lng, lat], element}
+            } catch (_) { return null }
+        }).filter(Boolean)
+        originMarkerLayer.replaceChildren(...originMarkerItems.map(item => item.element))
+        positionOriginMarkers()
+    }
+
+    function positionOriginMarkers() {
+        for (const {position, element} of originMarkerItems) {
+            const point = map.project(position)
+            element.style.transform = `translate(-50%, -100%) translate(${point.x}px, ${point.y}px)`
+        }
+    }
+    map.on('move', positionOriginMarkers)
+    map.on('resize', positionOriginMarkers)
 
     async function restoreSelection(query) {
         displayedSelection = query
