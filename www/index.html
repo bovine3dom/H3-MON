@@ -157,7 +157,7 @@ body.cartogram-ready:not(.pane-open) .utility-controls {
 #origin-markers {
     position: absolute;
     inset: 0;
-    z-index: 1;
+    z-index: 2;
     overflow: hidden;
     pointer-events: none;
 }
@@ -169,12 +169,12 @@ body.cartogram-ready:not(.pane-open) .utility-controls {
     flex-direction: column;
     align-items: center;
     gap: 2px;
-    white-space: nowrap;
     will-change: transform;
 }
 .origin-marker-label {
     color: #fff;
     font: 800 20px/1.2 sans-serif;
+    white-space: nowrap;
     paint-order: stroke fill;
     -webkit-text-stroke: 4px #000;
 }
@@ -186,6 +186,35 @@ body.cartogram-ready:not(.pane-open) .utility-controls {
     border-radius: 50%;
     background: #000;
     box-shadow: 0 0 0 1px rgba(0,0,0,0.35);
+}
+.origin-pointer {
+    position: absolute;
+    top: 0;
+    left: 0;
+    will-change: transform;
+}
+.origin-pointer[hidden] {
+    display: none;
+}
+.origin-pointer-arrow {
+    position: absolute;
+    margin: -13px;
+    width: 26px;
+    height: 26px;
+    fill: #fff;
+    stroke: #000;
+    stroke-width: 3;
+    stroke-linejoin: round;
+    paint-order: stroke fill;
+}
+.origin-pointer > .origin-marker-label {
+    position: absolute;
+    left: 15px;
+    transform: translateY(-50%);
+}
+.origin-pointer-inward > .origin-marker-label {
+    left: auto;
+    right: 15px;
 }
 #reticule {
     position: absolute;
@@ -244,7 +273,7 @@ body.cartogram-ready:not(.pane-open) .utility-controls {
 }
 #search-container {
     position: absolute;
-    z-index: 1;
+    z-index: 3;
     top: 10px;
     right: 10px;
     width: min(276px, calc(100% - 110px));

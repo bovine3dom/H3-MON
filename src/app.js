@@ -3271,6 +3271,13 @@ function bootstrap(meta = {}){
     const originMarkerLayer = document.getElementById('origin-markers')
     let originMarkerItems = []
 
+    function originSpan(className, text) {
+        const element = document.createElement('span')
+        element.className = className
+        element.textContent = text
+        return element
+    }
+
     function originMarkerName(query) {
         if (query.index) {
             try {
@@ -3289,25 +3296,49 @@ function bootstrap(meta = {}){
                 // Map positions are [lng, lat]; H3 cells and map points are [lat, lng].
                 const [lat, lng] = query.index ? cellToLatLng(query.index) : [query.lat, query.lng]
                 if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null
+                const name = originMarkerName(query)
                 const element = document.createElement('div')
                 element.className = 'origin-marker'
-                const label = document.createElement('span')
-                label.className = 'origin-marker-label'
-                label.textContent = originMarkerName(query)
-                const dot = document.createElement('span')
-                dot.className = 'origin-marker-dot'
-                element.append(label, dot)
-                return {position: [lng, lat], element}
+                element.append(originSpan('origin-marker-label', name), originSpan('origin-marker-dot', ''))
+                const pointer = document.createElement('div')
+                pointer.className = 'origin-pointer'
+                pointer.hidden = true
+                pointer.innerHTML = '<svg class="origin-pointer-arrow" viewBox="0 0 24 24"><path d="M12 2L6 20h12L12 2z"/></svg>'
+                pointer.append(originSpan('origin-marker-label', name))
+                return {position: [lng, lat], element, pointer, arrow: pointer.firstElementChild}
             } catch (_) { return null }
         }).filter(Boolean)
-        originMarkerLayer.replaceChildren(...originMarkerItems.map(item => item.element))
+        originMarkerLayer.replaceChildren(...originMarkerItems.flatMap(item => [item.element, item.pointer]))
         positionOriginMarkers()
     }
 
+    function mapPointer(map, position, {paddingX = 24, paddingY = 24} = {}) {
+        if (map.getBounds().contains(position)) return null
+        const canvas = map.getCanvas()
+        const centre = map.project(map.getCenter())
+        const target = map.project(position)
+        const dx = target.x - centre.x, dy = target.y - centre.y
+        let t = Infinity
+        if (dx > 0) t = Math.min(t, (canvas.clientWidth - paddingX - centre.x) / dx)
+        else if (dx < 0) t = Math.min(t, (paddingX - centre.x) / dx)
+        if (dy > 0) t = Math.min(t, (canvas.clientHeight - paddingY - centre.y) / dy)
+        else if (dy < 0) t = Math.min(t, (paddingY - centre.y) / dy)
+        if (!Number.isFinite(t)) return null
+        return {x: centre.x + dx * t, y: centre.y + dy * t, bearing: Math.atan2(dy, dx) * 180 / Math.PI}
+    }
+
     function positionOriginMarkers() {
-        for (const {position, element} of originMarkerItems) {
-            const point = map.project(position)
-            element.style.transform = `translate(-50%, -100%) translate(${point.x}px, ${point.y}px)`
+        const half = map.getCanvas().clientWidth / 2
+        for (const item of originMarkerItems) {
+            const point = map.project(item.position)
+            item.element.style.transform = `translate(-50%, -100%) translate(${point.x}px, ${point.y}px)`
+            const pointer = mapPointer(map, item.position)
+            item.pointer.hidden = !pointer
+            if (pointer) {
+                item.pointer.classList.toggle('origin-pointer-inward', pointer.x > half)
+                item.pointer.style.transform = `translate(${pointer.x}px, ${pointer.y}px)`
+                item.arrow.style.transform = `rotate(${pointer.bearing + 90}deg)`
+            }
         }
     }
     map.on('move', positionOriginMarkers)
