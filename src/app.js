@@ -3344,6 +3344,7 @@ function bootstrap(meta = {}){
         const lng = parseFloat(div.dataset.lng)
         syncCartogramAfterNextMapMove('city-search')
         map.flyTo({center: [lng, lat], zoom: Math.max(7, map.getZoom())})
+        submitOnClick({lat, lng})
         searchInput.value = div.textContent
         resultsDiv.style.display = 'none'
         highlightedIdx = -1
