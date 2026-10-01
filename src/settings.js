@@ -210,11 +210,21 @@ export const SETTINGS_SCHEMA = [
     },
     {
         key: 'requireCompleteCoverage',
-        name: 'Require complete coverage',
-        description: 'Leave a cartogram cell empty if any positive-weight contributor is missing, including expected children. Overrides Missing value and Fill empty cells.',
-        group: 'Map and cartogram',
+        hidden: true,
         type: 'boolean',
         defaultValue: false,
+        refresh: 'data',
+    },
+    {
+        key: 'minimumFractionCoverage',
+        name: 'Minimum fraction coverage',
+        description: 'Require this fraction of a cartogram cell’s positive population weight to be reachable before it gets a colour. Use 1 for complete coverage.',
+        group: 'Map and cartogram',
+        type: 'number',
+        defaultValue: 0,
+        min: 0,
+        max: 1,
+        step: 0.01,
         refresh: 'data',
     },
 ]
@@ -230,7 +240,7 @@ export const MULTI_QUERY_SETTING_OPTIONS = Object.freeze({
 // Keep these bit positions stable. Add new settings at the end.
 const COMPACT_SETTING_KEYS = [
     'onclickBudgetOverride', 'onmoveBudgetOverride', 'colourScale', 'quantileSource', 'trimFactor', 'defaultValue',
-    'requireCompleteCoverage', 'multiAggregation', 'multiCoverage', 'multiQuantile', 'multiAccumulate',
+    'requireCompleteCoverage', 'multiAggregation', 'multiCoverage', 'multiQuantile', 'multiAccumulate', 'minimumFractionCoverage',
 ]
 const COMPACT_SETTING_INDEX = new Map(COMPACT_SETTING_KEYS.map((key, index) => [key, index]))
 const COMPACT_SETTING_DEFS = new Map([

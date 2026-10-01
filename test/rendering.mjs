@@ -41,7 +41,7 @@ const json = (path, data) => routes.set(path, ['application/json', JSON.stringif
 json('/toner_ofm_moderatlist.json', style);
 json('/data/rendering.json', {cartogram: 'none', raw: true, colourScheme: 'interpolateReds'});
 json('/data/settings.json', {cartogram: 'none', colourScale: 'rankit', trimFactor: 0});
-json('/data/coverage.json', {cartogram: 'coverage-cartogram_hilo.arrow', requireCompleteCoverage: false, trimFactor: 0});
+json('/data/coverage.json', {cartogram: 'coverage-cartogram_hilo.arrow', minimumFractionCoverage: 0.5, trimFactor: 0});
 routes.set('/data/coverage.arrow', ['application/octet-stream', arrow({...columns, value: Float64Array.from([0.6, NaN, 0, 0.8])})]);
 routes.set('/data/coverage-cartogram_hilo.arrow', ['application/octet-stream', arrow({...columns,
     x: Int32Array.from([0, 0, 2, 4]), y: Int32Array.from([0, 0, 2, 0]),
@@ -455,8 +455,8 @@ try {
             };
             await coverageTooltip(0, 0.6);
             await page.locator('#settingsBtn').click();
-            await page.getByRole('checkbox', {name: 'Require complete coverage', exact: true}).check();
-            await setting(page, 'requireCompleteCoverage', '1');
+            await page.getByRole('spinbutton', {name: 'Minimum fraction coverage', exact: true}).fill('1');
+            await setting(page, 'minimumFractionCoverage', '1');
             await coverageTooltip(0, null);
             await coverageTooltip(1, 0);
 

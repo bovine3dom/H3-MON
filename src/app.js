@@ -34,6 +34,10 @@ const DEFAULT_DOCUMENT_TITLE = document.title
 function flagEnabled(name) {
     return params.has(name) && settingEnabled(params.get(name), true)
 }
+function coverageThreshold(settings) {
+    const value = Number(settings.minimumFractionCoverage)
+    return Math.min(1, Math.max(0, Number.isFinite(value) ? value : 0, settingEnabled(settings.requireCompleteCoverage, false) ? 1 : 0))
+}
 const perfEnabled = flagEnabled('perf')
 const svgPerfEnabled = flagEnabled('svgperf')
 function parseH3Precision(value) {
@@ -1454,7 +1458,7 @@ function bootstrap(meta = {}){
         document.body.classList.remove('cartogram-ready')
     }
     let infill = settingEnabled(settings.infill, false)
-    let requireCompleteCoverage = settingEnabled(settings.requireCompleteCoverage, false)
+    let minimumFractionCoverage = coverageThreshold(settings)
     let showTrains = settingEnabled(settings.trains, false)
     let colourRamp
     const fileSource = {url: `data/${file_name}`, ext, format, cacheBust: true}
@@ -1876,8 +1880,9 @@ function bootstrap(meta = {}){
         const numerator = new Float64Array(targetCount)
         const denominator = new Float64Array(targetCount)
         const observedByTarget = new Uint8Array(targetCount)
-        const incompleteByTarget = requireCompleteCoverage ? new Uint8Array(targetCount) : null
-        const missingWeightByTarget = !requireCompleteCoverage && fillMissingContributors && defaultNumber != null ? new Float64Array(targetCount) : null
+        const totalWeightByTarget = minimumFractionCoverage > 0 ? new Float64Array(targetCount) : null
+        const coveredWeightByTarget = totalWeightByTarget ? new Float64Array(targetCount) : null
+        const missingWeightByTarget = fillMissingContributors && defaultNumber != null ? new Float64Array(targetCount) : null
         const missingCountByTarget = missingWeightByTarget ? new Uint32Array(targetCount) : null
         const missingValidCountByTarget = missingWeightByTarget ? new Uint32Array(targetCount) : null
         const invalidMissingWeightByTarget = missingWeightByTarget ? new Uint32Array(targetCount) : null
@@ -1901,14 +1906,14 @@ function bootstrap(meta = {}){
                 contributorsCoveredByInput++
                 if (coveredSourceH3s) coveredSourceH3s.add(splitSource ? splitLongToH3Index(sourceH3, sourceH3Upper) : sourceH3)
             }
+            const weight = getWeight(contributor, targetIndex, sourceH3)
+            if (totalWeightByTarget && Number.isFinite(weight) && weight > 0) {
+                totalWeightByTarget[targetIndex] += weight
+                if (value != null) coveredWeightByTarget[targetIndex] += weight
+            }
             if (value == null) {
-                if (incompleteByTarget) {
-                    const weight = getWeight(contributor, targetIndex, sourceH3)
-                    if (Number.isFinite(weight) && weight > 0) incompleteByTarget[targetIndex] = 1
-                }
                 if (missingWeightByTarget) {
                     missingCountByTarget[targetIndex]++
-                    const weight = getWeight(contributor, targetIndex, sourceH3)
                     if (weight == null) {
                         invalidMissingWeightByTarget[targetIndex]++
                     } else {
@@ -1926,7 +1931,6 @@ function bootstrap(meta = {}){
             }
             if (observedSourceH3s) observedSourceH3s.add(splitSource ? splitLongToH3Index(sourceH3, sourceH3Upper) : sourceH3)
 
-            const weight = getWeight(contributor, targetIndex, sourceH3)
             if (weight == null) {
                 invalidWeights++
                 return
@@ -1951,7 +1955,7 @@ function bootstrap(meta = {}){
         let targetsWithData = 0
         let targetsMissing = 0
         for (let i = 0; i < targetCount; i++) {
-            if (denominator[i] && !incompleteByTarget?.[i]) {
+            if (denominator[i] && (!totalWeightByTarget || totalWeightByTarget[i] > 0 && coveredWeightByTarget[i] / totalWeightByTarget[i] >= minimumFractionCoverage)) {
                 values[i] = numerator[i] / denominator[i]
                 targetsWithData++
             } else {
@@ -1981,7 +1985,8 @@ function bootstrap(meta = {}){
         const numerator = new Float64Array(cellCount)
         const denominator = new Float64Array(cellCount)
         const observedByTarget = new Uint8Array(cellCount)
-        const incompleteByTarget = requireCompleteCoverage ? new Uint8Array(cellCount) : null
+        const totalWeightByTarget = minimumFractionCoverage > 0 ? new Float64Array(cellCount) : null
+        const coveredWeightByTarget = totalWeightByTarget ? new Float64Array(cellCount) : null
         const values = new Array(cellCount)
         const rowCell = cartogramAgg.rowCell
         const lowerCol = cartogramAgg.h3Cols[H3_INDEX_LOWER]
@@ -1997,13 +2002,12 @@ function bootstrap(meta = {}){
         for (let i = 0; i < cartogramRows; i++) {
             const targetIndex = rowCell[i]
             const value = splitMapGet(valuesRoot, toNumber(lowerCol[i]), toNumber(upperCol[i]))
-            if (value == null) {
-                if (incompleteByTarget) {
-                    const weight = weightValues ? weightValues[i] : 1
-                    if (Number.isFinite(weight) && weight > 0) incompleteByTarget[targetIndex] = 1
-                }
-                continue
+            const weight = weightValues ? weightValues[i] : 1
+            if (totalWeightByTarget && Number.isFinite(weight) && weight > 0) {
+                totalWeightByTarget[targetIndex] += weight
+                if (value != null) coveredWeightByTarget[targetIndex] += weight
             }
+            if (value == null) continue
 
             contributorValuesObserved++
             if (!observedByTarget[targetIndex]) {
@@ -2011,7 +2015,6 @@ function bootstrap(meta = {}){
                 targetsWithObservedData++
             }
 
-            const weight = weightValues ? weightValues[i] : 1
             if (!Number.isFinite(weight)) {
                 invalidWeights++
                 continue
@@ -2024,7 +2027,7 @@ function bootstrap(meta = {}){
         let targetsWithData = 0
         let targetsMissing = 0
         for (let i = 0; i < cellCount; i++) {
-            if (denominator[i] && !incompleteByTarget?.[i]) {
+            if (denominator[i] && (!totalWeightByTarget || totalWeightByTarget[i] > 0 && coveredWeightByTarget[i] / totalWeightByTarget[i] >= minimumFractionCoverage)) {
                 values[i] = numerator[i] / denominator[i]
                 targetsWithData++
             } else {
@@ -3881,7 +3884,7 @@ function bootstrap(meta = {}){
         settings = nextSettings
         refreshCrosshair()
         infill = settingEnabled(settings.infill, false)
-        requireCompleteCoverage = settingEnabled(settings.requireCompleteCoverage, false)
+        minimumFractionCoverage = coverageThreshold(settings)
         showTrains = settingEnabled(settings.trains, false)
         document.title = legendTitle(displayedSelection) || DEFAULT_DOCUMENT_TITLE
         if (changedKeys.has('colourScheme') || changedKeys.has('cyclical') || changedKeys.has('flip')) rebuildColourRamp()

@@ -99,7 +99,7 @@ Put metadata alongside the data: `www/data/example.json` for `example.arrow`,
 | `cartogram` | Mapping filename, blank/default for `cartogram_weights.arrow`, or `none`. which probably is a bad choice given most people don't have cartogram mappings. |
 | `defaultValue` | Substitute for missing h3 contributors to cartogram cells that have other contributors; a number or `null`. |
 | `infill` | Let that substitute fill wholly unobserved cartogram cells too. |
-| `requireCompleteCoverage` | Makes missings infectious for the cartogram |
+| `minimumFractionCoverage` | Require this fraction of the cell’s population weight to have data before the cell gets a colour. Set to `1` for complete coverage or `0.5` to require 50%. |
 | `animate` | Show the paused animation timeline. The default is `false`. |
 
 ## Interaction endpoints

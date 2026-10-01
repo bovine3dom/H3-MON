@@ -57,6 +57,17 @@ Deno.test('fixed application settings use stable bit positions and decode legacy
     assert(readSettingLayers({}, url.searchParams).settings.colourScale === 'rankit')
 })
 
+Deno.test('coverage settings support fractions and legacy complete-coverage URLs', () => {
+    const url = new URL('https://example.test/?data=sample.csv&s=v1*1s*b1')
+    assert(readSettingLayers({}, url.searchParams).settings.requireCompleteCoverage === true)
+    const overrides = {minimumFractionCoverage: 0.5}
+    updateUrlSettingOverrides(url, overrides)
+    assert(readSettingLayers({}, url.searchParams).settings.minimumFractionCoverage === 0.5)
+    const setting = SETTINGS_BY_KEY.get('minimumFractionCoverage')
+    assert(validateSettingValue(setting, 0.5) === null)
+    assert(validateSettingValue(setting, 1.1) !== null)
+})
+
 Deno.test('animation settings use compact URLs and retain JSON compatibility', () => {
     const time = {type: 'animation', control: {type: 'time'}}, number = {type: 'animation', control: {type: 'number'}}
     const config = {start: '00:00', end: '23:59', step: 1800, step_rate: 2}
@@ -83,7 +94,7 @@ Deno.test('typed settings round-trip while legacy strings retain their meaning',
 
 Deno.test('validation and fixed scales preserve bounds, missing values and inverse units', () => {
     for (const [key, good, bad] of [
-        ['colourScale', 'rankit', 'unknown'], ['trimFactor', 0, 0.5],
+        ['colourScale', 'rankit', 'unknown'], ['trimFactor', 0, 0.5], ['minimumFractionCoverage', 0.5, 1.1],
         ['scale', {'0': 'Low'}, {nope: 'Low'}], ['legendBounds', [0, 1], [2, 1]],
     ]) {
         assert(validateSettingValue(SETTINGS_BY_KEY.get(key), good) === null)
