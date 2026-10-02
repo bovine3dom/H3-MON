@@ -3648,6 +3648,7 @@ function bootstrap(meta = {}){
             signal.throwIfAborted()
             await restoreSelection(source.query || displayedSelection)
             signal.throwIfAborted()
+            if (source.query?.event === 'onclick' || source.query?.event === 'onmove') revealFirstInteractionLegend()
             if (failedSource === source || source.socket && source.requestSource === latestSocketSource) {
                 requestError = null
                 failedSource = null
@@ -3740,10 +3741,24 @@ function bootstrap(meta = {}){
     window.d3 = d3
 
     const l = document.getElementById("attribution")
+    const hasOnmoveRequest = typeof metadataSettings.onmove?.url === 'string' && !!metadataSettings.onmove.url.trim()
+    const hasOnclickRequest = typeof metadataSettings.onclick?.url === 'string' && !!metadataSettings.onclick.url.trim()
+    let awaitingFirstInteraction = hasOnmoveRequest || hasOnclickRequest
     const legendDiv = document.createElement('div')
     legendDiv.id = "observable_legend"
+    legendDiv.hidden = awaitingFirstInteraction
+    const legendPlaceholder = document.createElement('div')
+    legendPlaceholder.id = 'legend-placeholder'
+    legendPlaceholder.hidden = !awaitingFirstInteraction
+    if (awaitingFirstInteraction) legendPlaceholder.textContent = hasOnmoveRequest ? 'Move the map to get started' : 'Click the map to pick an origin'
     const attributionText = document.createElement('span')
-    l.replaceChildren(legendDiv, attributionText)
+    l.replaceChildren(legendDiv, legendPlaceholder, attributionText)
+    function revealFirstInteractionLegend() {
+        if (!awaitingFirstInteraction) return
+        awaitingFirstInteraction = false
+        legendPlaceholder.hidden = true
+        legendDiv.hidden = false
+    }
     const legendResizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => fitLegendTicks(legendDiv))
     legendResizeObserver?.observe(legendDiv)
     function updateAttribution() {

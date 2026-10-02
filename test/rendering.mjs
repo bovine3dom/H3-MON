@@ -641,9 +641,14 @@ try {
             json('/data/query.json', {...metadata, colourScale: 'linear', onclick: socketAction, onmove: socketAction});
             await page.goto(url('query.csv'));
             await displayed(page, 0.65);
+            assert.equal(await page.locator('#legend-placeholder').textContent(), 'Move the map to get started');
+            assert.equal(await page.locator('#observable_legend').isVisible(), false);
+            assert.equal(await page.locator('#attribution > span').isVisible(), true);
             await clickCell(page);
             reply(await received(1), 10);
             await displayed(page, 10);
+            assert.equal(await page.locator('#legend-placeholder').isVisible(), false);
+            assert.equal(await page.locator('#observable_legend').isVisible(), true);
             await clickCell(page, cells[1]);
             await received(2);
             await clickCell(page, cells[2]);

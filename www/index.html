@@ -244,6 +244,10 @@ body.cartogram-ready:not(.pane-open) .utility-controls {
     text-align: right;
     overflow-wrap: anywhere;
 }
+#observable_legend[hidden],
+#legend-placeholder[hidden] {
+    display: none;
+}
 #observable_legend {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
@@ -253,6 +257,12 @@ body.cartogram-ready:not(.pane-open) .utility-controls {
 #observable_legend > div {
     grid-area: 1 / 1;
     min-width: 0;
+}
+#legend-placeholder {
+    margin-bottom: 0.4rem;
+    color: rgba(0, 0, 0, 0.72);
+    font: 12px/1.2 sans-serif;
+    text-align: left;
 }
 #observable_legend .title {
     padding-bottom: 0.5rem;
