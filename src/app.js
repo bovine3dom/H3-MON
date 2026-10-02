@@ -1400,6 +1400,7 @@ fetch(`data/${meta_name}`).then(r => {
 
 function bootstrap(meta = {}){
     const requestControls = createRequestControls(meta.controls)
+    const badnessChanged = changedKeys => requestControls.schema.some(setting => setting.type === 'select' && changedKeys.has(setting.key))
     const requestControlSchema = requestControls.schema.map(setting => ({...setting,
         legendToken: `remote.${setting.key.slice(2)}`}))
     const animationSchema = requestControls.animations.map(setting => ({...setting,
@@ -1479,7 +1480,7 @@ function bootstrap(meta = {}){
 
     function createColourRamp() {
         const doCyclical = settingEnabled(settings.cyclical, false)
-        const flip = settingEnabled(settings.flip, false)
+        const flip = settingEnabled(settings.flip, false) !== requestControls.isBad(settings)
         const namedColourScheme = d3[settings.colourScheme]
         const colourScheme = typeof namedColourScheme === 'function' ? namedColourScheme : (doCyclical ? d3.interpolateRainbow : d3.interpolateSpectral)
         if (settings.colourScheme && typeof namedColourScheme !== 'function') console.warn(`Unknown D3 colour scheme "${settings.colourScheme}", using the default`)
@@ -3887,7 +3888,7 @@ function bootstrap(meta = {}){
         minimumFractionCoverage = coverageThreshold(settings)
         showTrains = settingEnabled(settings.trains, false)
         document.title = legendTitle(displayedSelection) || DEFAULT_DOCUMENT_TITLE
-        if (changedKeys.has('colourScheme') || changedKeys.has('cyclical') || changedKeys.has('flip')) rebuildColourRamp()
+        if (changedKeys.has('colourScheme') || changedKeys.has('cyclical') || changedKeys.has('flip') || badnessChanged(changedKeys)) rebuildColourRamp()
         if (changedKeys.has('cartogram')) resetCartogramState()
         if (changedKeys.has('animate') && !settingEnabled(settings.animate, false) && playing) setAnimation('')
         updateAttribution()
@@ -3895,7 +3896,7 @@ function bootstrap(meta = {}){
     }
 
     async function refreshPresentation(changedKeys) {
-        const colourChanged = changedKeys.has('colourScheme') || changedKeys.has('cyclical') || changedKeys.has('flip')
+        const colourChanged = changedKeys.has('colourScheme') || changedKeys.has('cyclical') || changedKeys.has('flip') || badnessChanged(changedKeys)
         let mapRendered = false
         if (colourChanged) {
             if (activeH3Layer && mainLayers.includes(activeH3Layer.layer)) {

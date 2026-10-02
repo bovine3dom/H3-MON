@@ -154,6 +154,10 @@ Choose `number`, `time`, `text`, `select` or `boolean` for `type`.
 Add `unit` and `help` if required.
 For numbers and times, use `min`, `max` and `step` to configure the input.
 For selects, supply `options`, for example `[{"value":"mean","label":"Mean"}]`.
+Add `"isbad": true` to an option when higher values are worse.
+If any selected option has `"isbad": true`, the app reverses the colour direction.
+The `flip` setting reverses the direction again.
+The colour scheme controls the actual colours.
 
 To show a control only when a condition is true, add `showIf` to its definition:
 

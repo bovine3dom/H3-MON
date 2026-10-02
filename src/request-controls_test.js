@@ -50,6 +50,23 @@ Deno.test('showIf uses typed raw values and option values without encoding', () 
     assert(showIf(controls.values({'p.time': '30', 'p.flag': 'false', 'p.text': 'other'})) === false)
 })
 
+Deno.test('selected isbad options combine with OR across select controls', () => {
+    const controls = createRequestControls({
+        measure: {label: 'Measure', type: 'select', default: 'population', options: [
+            {value: 'population', label: 'Population'}, {value: 'travel_time', label: 'Travel time', isbad: true},
+        ]},
+        summary: {label: 'Summary', type: 'select', default: 'mean', options: [
+            {value: 'mean', label: 'Mean'}, {value: 'range', label: 'Best to worst', isbad: true},
+        ]},
+    })
+    assert(controls.isBad({}) === false)
+    assert(controls.isBad({'p.measure': 'travel_time'}) === true)
+    assert(controls.isBad({'p.measure': 'travel_time', 'p.summary': 'range'}) === true)
+    assert(controls.isBad({'p.measure': 'population', 'p.summary': 'range'}) === true)
+    assertThrows(() => createRequestControls({mode: {...definitions.mode,
+        options: [{value: 'rail', label: 'Train', isbad: 'true'}]}}), 'isbad')
+})
+
 Deno.test('hidden controls keep their raw values and encoded request fields', () => {
     const controls = createRequestControls({time: {...definitions.time, showIf: 'values => values.time < 0'}})
     const settings = {'p.time': '30'}

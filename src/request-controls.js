@@ -43,7 +43,8 @@ export function createRequestControls(definitions = {}) {
             if (!Array.isArray(definition.options) || !definition.options.length) fail('options must be a nonempty array')
             setting.options = definition.options.map(option => {
                 if (!record(option) || typeof option.value !== 'string' || typeof option.label !== 'string' || !option.label.trim()) fail('options require string values and nonempty labels')
-                return {value: option.value, name: option.label}
+                if (Object.hasOwn(option, 'isbad') && typeof option.isbad !== 'boolean') fail('option isbad must be a boolean')
+                return {value: option.value, name: option.label, isbad: option.isbad === true}
             })
             if (new Set(setting.options.map(option => option.value)).size !== setting.options.length) fail('option values must be unique')
         } else if (Object.hasOwn(definition, 'options')) fail('options are only supported for select fields')
@@ -100,6 +101,11 @@ export function createRequestControls(definitions = {}) {
         ])))
     }
 
+    function isBad(settings = {}) {
+        return fields.some(({setting}) => setting.type === 'select'
+            && setting.options.some(option => option.value === String(settings[setting.key] ?? setting.defaultValue) && option.isbad))
+    }
+
     function encode(settings) {
         const inputs = values(settings)
         return Object.fromEntries(fields.map(({id, convert, fail}) => {
@@ -125,5 +131,5 @@ export function createRequestControls(definitions = {}) {
             defaultValue: definitions[id].animate, control: setting,
             validate: value => { try { animationSequence(setting, value) } catch (error) { return error.message } }}
     })
-    return {schema: fields.map(({setting}) => setting), animations, values, encode}
+    return {schema: fields.map(({setting}) => setting), animations, values, encode, isBad}
 }
