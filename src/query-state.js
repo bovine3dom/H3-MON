@@ -1,4 +1,4 @@
-const MASKED_QUERY = /^q2([om])([0-9a-f]{1,2})(?:_(.*))?$/
+const MASKED_QUERY = /^q2([omc])([0-9a-f]{1,2})(?:_(.*))?$/
 const QUERY_FIELDS = [['index', 1], ['lat', 2], ['lng', 4], ['zoom', 8]]
 const CARTOGRAM_BIT = 16
 
@@ -8,7 +8,7 @@ function validateQuery(query) {
     const fail = () => { throw new Error('Invalid saved query: expected an event, H3 origin and finite coordinates') }
     if (!query || typeof query !== 'object' || Array.isArray(query)) fail()
     if (Object.keys(query).some(key => !['event', 'index', 'lat', 'lng', 'zoom', 'cartogram'].includes(key))) fail()
-    if (!['onclick', 'onmove'].includes(query.event)) fail()
+    if (!['onclick', 'onmove', 'onchange'].includes(query.event)) fail()
     if (Object.hasOwn(query, 'index') && (typeof query.index !== 'string' || query.index.length !== 15 || !/^8[0-9a-f]{14}$/.test(query.index))) fail()
     if (Object.hasOwn(query, 'lat') && (!Number.isFinite(query.lat) || Math.abs(query.lat) > 90)) fail()
     if (Object.hasOwn(query, 'lng') && (!Number.isFinite(query.lng) || Math.abs(query.lng) > 180)) fail()
@@ -29,7 +29,7 @@ function compactQuery(query) {
         mask |= CARTOGRAM_BIT
         fields.push(...query.cartogram)
     }
-    return `q2${query.event === 'onclick' ? 'o' : 'm'}${mask.toString(16)}${fields.length ? `_${fields.join('_')}` : ''}`
+    return `q2${{onclick: 'o', onmove: 'm', onchange: 'c'}[query.event]}${mask.toString(16)}${fields.length ? `_${fields.join('_')}` : ''}`
 }
 
 function numberField(field) {
@@ -45,7 +45,7 @@ function expandMaskedQuery(value) {
     const fields = match[3] ? match[3].split('_') : []
     const expected = QUERY_FIELDS.reduce((count, [, bit]) => count + (mask & bit ? 1 : 0), mask & CARTOGRAM_BIT ? 2 : 0)
     if (mask & ~31 || fields.length !== expected) invalidEncoding()
-    const query = {event: match[1] === 'o' ? 'onclick' : 'onmove'}
+    const query = {event: {o: 'onclick', m: 'onmove', c: 'onchange'}[match[1]]}
     let offset = 0
     for (const [name, bit] of QUERY_FIELDS) {
         if (!(mask & bit)) continue

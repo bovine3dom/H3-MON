@@ -2840,8 +2840,10 @@ function bootstrap(meta = {}){
         return query
     }
 
+    const hasOnchangeRequest = typeof metadataSettings.onchange?.url === 'string' && !!metadataSettings.onchange.url.trim()
     let lastClickPoint = restoredQuery?.event === 'onclick' ? restoredQuery : null
     const multiQueryEnabled = typeof metadataSettings.onclick?.url === 'string' && !!metadataSettings.onclick.url.trim()
+        && (metadataSettings.onclick.format ?? 'arrow') === 'arrow'
     let multiQueryOptions = readMultiQueryOptions(params)
     let multiQueryGroup = null
     const hasMultipleOrigins = () => multiQueryEnabled && multiQueryGroup?.entries.length > 1
@@ -2872,7 +2874,7 @@ function bootstrap(meta = {}){
             }
             return values
         },
-        request: (url, {event, point, values, tokens, socket, manual}) => {
+        request: (url, {event, point, values, tokens, socket, format, manual}) => {
             invalidateAnimation()
             const query = savedQuery(event, point, values, tokens)
             const pageURL = writeQueryState(urlState.read(), query)
@@ -2880,7 +2882,7 @@ function bootstrap(meta = {}){
             writeRequestControlSettings(pageURL, values._inputs)
             urlState.replace(pageURL)
             lastQuery = query
-            const source = {url, ext: 'arrow', format: FORMATS.arrow, cacheBust: false, socket,
+            const source = {url, ext: format, format: FORMATS[format], cacheBust: false, socket,
                 query: {...query, index_lower: values.index_lower, index_upper: values.index_upper, _inputs: values._inputs}}
             const inputs = JSON.stringify(values._inputs)
             const reset = !socket || socket !== latestSocketSource?.socket || event !== 'onmove' || manual
@@ -3222,6 +3224,7 @@ function bootstrap(meta = {}){
     }
 
     function repeatQuery({force = true} = {}) {
+        if (hasOnchangeRequest) return interactions.replay('onchange', {}, {force})
         if (multiQueryEnabled && multiQueryGroup?.entries.length) {
             return runMultiQuery(multiQueryGroup.entries.map(entry => entry.point))
         }
@@ -3648,7 +3651,7 @@ function bootstrap(meta = {}){
             signal.throwIfAborted()
             await restoreSelection(source.query || displayedSelection)
             signal.throwIfAborted()
-            if (source.query?.event === 'onclick' || source.query?.event === 'onmove') revealFirstInteractionLegend()
+            if (source.query) revealFirstInteractionLegend()
             if (failedSource === source || source.socket && source.requestSource === latestSocketSource) {
                 requestError = null
                 failedSource = null
@@ -4017,8 +4020,8 @@ function bootstrap(meta = {}){
     const animationPlayer = createAnimationPlayer({
         prepare: value => {
             const group = hasMultipleOrigins() ? multiQueryGroup : null
-            const event = group ? 'onclick' : lastQuery?.event || ['onmove', 'onclick'].find(key => metadataSettings[key]?.url)
-            if (!event) throw new Error('Animation requires an onclick or onmove URL.')
+            const event = group ? 'onclick' : lastQuery?.event || ['onchange', 'onmove', 'onclick'].find(key => metadataSettings[key]?.url)
+            if (!event) throw new Error('Animation requires a query URL.')
             const point = event === 'onmove' ? map.getCenter() : lastClickPoint || lastQuery || map.getCenter()
             const id = animationTarget || playing
             const overrides = {...metadataSettings, ...settingsPanelApi.getOverrides(), [`p.${id}`]: value}
@@ -4033,7 +4036,7 @@ function bootstrap(meta = {}){
         latency: () => {
             const group = hasMultipleOrigins() ? multiQueryGroup : null
             if (group) return group.entries.reduce((sum, entry) => sum + (interactions.preview('onclick', entry.point)?.cost || 0), 0)
-            const event = lastQuery?.event || ['onmove', 'onclick'].find(key => metadataSettings[key]?.url)
+            const event = lastQuery?.event || ['onchange', 'onmove', 'onclick'].find(key => metadataSettings[key]?.url)
             if (!event) return 0
             return interactions.preview(event, event === 'onmove' ? map.getCenter() : lastClickPoint || map.getCenter())?.cost
         },
@@ -4054,6 +4057,7 @@ function bootstrap(meta = {}){
                     multiQueryPrepared: packet.multiRequests}
             }
             const {url, context} = packet
+            if (context.format !== 'arrow') throw new Error('Animation requires Arrow responses')
             interactions.check(context.event, url)
             const {event, values, socket, point, tokens} = context
             const query = {...savedQuery(event, point, values, tokens),
@@ -4243,7 +4247,7 @@ function bootstrap(meta = {}){
         onAnimation: setAnimation,
         onRequestEdit: invalidateAnimation,
         getLegendBounds: () => displayedLegendBounds,
-        getRequestEstimates: overrides => Object.fromEntries(['onclick', 'onmove'].map(key => [key,
+        getRequestEstimates: overrides => Object.fromEntries(['onclick', 'onmove', 'onchange'].map(key => [key,
             interactions.preview(key, key === 'onclick' ? lastClickPoint || map.getCenter() : map.getCenter(), {...metadataSettings, ...overrides})])),
         multiQuery: multiQueryEnabled,
         multiQuerySettings: multiQueryOptions,
@@ -4258,7 +4262,8 @@ function bootstrap(meta = {}){
     })
     refreshAnimationTimeline()
 
-    if (multiQueryEnabled && restoredOrigins.length) void runMultiQuery(restoredOrigins)
+    if (hasOnchangeRequest) void repeatQuery()
+    else if (multiQueryEnabled && restoredOrigins.length) void runMultiQuery(restoredOrigins)
     else if (restoredQuery?.event === 'onclick' && multiQueryEnabled) void runMultiQuery([restoredQuery])
     else if (restoredQuery) repeatQuery()
     if (params.get('animation')) setAnimation(params.get('animation'))

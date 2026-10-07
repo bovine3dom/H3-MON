@@ -6,8 +6,9 @@ import {chromium} from 'playwright';
 import {PNG} from 'pngjs';
 import {cellToBoundary, cellToLatLng, gridDisk, h3IndexToSplitLong, latLngToCell} from 'h3-js';
 import {tableFromArrays, tableToIPC} from 'apache-arrow';
-import {findClosestCity} from 'tiny-geocoder';
+import {findMostPopulousCityForCell} from '../src/city-label-lookup.js';
 import {readMultiQueryOptions} from '../src/multi-query.js';
+import {readQueryOrigins} from '../src/query-state.js';
 import {SETTINGS_BY_KEY, parseSettingValue, readSettingLayers, serializeSettingValue} from '../src/settings.js';
 
 // Serve the real build and deterministic fixtures, never local user data or a replacement Deck layer.
@@ -235,6 +236,55 @@ try {
             await displayed(page, 0.65);
             await page.mouse.move(0, 0);
             await frame(page, `${device}-flat`);
+
+            json('/data/static-files.json', {cartogram: 'none', trimFactor: 0, t: '{controls.layer}',
+                controls: {
+                    layer: {label: 'Load query', type: 'select', default: 'first', options: [
+                        {value: 'first', label: 'First load query'}, {value: 'second', label: 'Second load query'}]},
+                    format: {label: 'Map format', type: 'select', default: 'csv', options: [
+                        {value: 'csv', label: 'H3'}, {value: 'geojson', label: 'GeoJSON'}]},
+                }, onchange: {url: '/data/static-{controls.layer}.{controls.format}', format: 'auto'}});
+            routes.set('/data/static-files.csv', routes.get('/data/query.csv'));
+            for (const [name, value] of [['first', 17], ['second', 23]]) {
+                routes.set(`/data/static-${name}.csv`, ['text/csv', `index,value\n${cell},${value}\n`]);
+                json(`/data/static-${name}.geojson`, {type: 'FeatureCollection', features: [
+                    {type: 'Feature', geometry: {type: 'LineString', coordinates: boundary}, properties: {value}},
+                ]});
+            }
+            const staticRequests = [];
+            const recordStaticRequest = request => {
+                if (/\/data\/static-(first|second)\.(csv|geojson)$/.test(new URL(request.url()).pathname)) staticRequests.push(request.url());
+            };
+            page.on('request', recordStaticRequest);
+            await page.goto(url('static-files.csv'));
+            await displayed(page, 17);
+            assert.equal(await page.title(), 'First load query');
+            assert(await page.locator('#legend-placeholder').isHidden(), 'File selection has no map-action prompt');
+            await page.locator('#settingsBtn').click();
+            await page.getByRole('combobox', {name: 'Load query', exact: true}).selectOption('second');
+            await displayed(page, 23);
+            await page.getByRole('combobox', {name: 'Map format', exact: true}).selectOption('geojson');
+            await page.waitForFunction(() => document.body.classList.contains('load-complete') &&
+                m._controls.find(control => control.getCanvas?.()?.id === 'deckgl-overlay')._deck.props.layers
+                    .some(layer => layer.id === 'GeoJsonLayer' && layer.props.data.features[0].properties.value === 23));
+            await setting(page, 'p.format', 'geojson');
+            const selectedURL = page.url(), requestsBeforeMove = staticRequests.length;
+            await page.evaluate(() => m.panBy([20, 0], {duration: 0}));
+            await settle(page);
+            assert.equal(staticRequests.length, requestsBeforeMove, 'Moving the map does not fetch static files');
+            await page.goto('about:blank');
+            await page.goto(selectedURL);
+            await page.waitForFunction(() => document.body.classList.contains('load-complete') &&
+                m._controls.find(control => control.getCanvas?.()?.id === 'deckgl-overlay')._deck.props.layers
+                    .some(layer => layer.id === 'GeoJsonLayer'));
+            await page.locator('#settingsBtn').click();
+            await page.getByRole('combobox', {name: 'Map format', exact: true}).selectOption('csv');
+            await displayed(page, 23);
+            assert(staticRequests.some(url => url.endsWith('static-second.geojson')));
+            page.off('request', recordStaticRequest);
+            console.log(`${device}: static files load on startup and control changes, including GeoJSON and shared URLs`);
+            await page.goto(url('rendering.csv'));
+            await displayed(page, 0.65);
             await page.evaluate(center => m.jumpTo({bearing: 30, pitch: 35, zoom: 7.7,
                 center: [center[0] + 0.025, center[1] + 0.015]}), center);
             await frame(page, `${device}-camera`);
@@ -525,7 +575,8 @@ try {
             await multiOption(page, 'quantile', 0.25);
             const sharedSettings = new URL(page.url()).searchParams;
             assert.equal(sharedSettings.getAll('multiOrigin').length, 1, 'All origins use one query parameter');
-            assert(sharedSettings.get('multiOrigin').split('*').every(origin => /^q2o1_/.test(origin)), 'Origins store only the H3 index when requests do not use coordinates');
+            assert.deepEqual(readQueryOrigins(sharedSettings), [cell, cells[1]].map(index => ({event: 'onclick', index})),
+                'Origins store only the H3 index when requests do not use coordinates');
             assert.equal(sharedSettings.has('query'), false, 'Multi-origin URL omits the duplicate last query');
             assert.deepEqual(readMultiQueryOptions(sharedSettings), {aggregation: 'quantile', coverage: 'union', quantile: 0.25, accumulateOnClick: false});
             await page.reload();
@@ -595,7 +646,7 @@ try {
             assert.deepEqual(await marker(), []);
             await pending.fulfill({contentType: 'application/octet-stream', body: values(10)});
             await displayed(page, 10);
-            const firstTitle = `From ${findClosestCity(...cellToLatLng(cell)).name}: 2 min`;
+            const firstTitle = `From ${findMostPopulousCityForCell(cell).name}: 2 min`;
             await checkTitle(firstTitle);
             assert.deepEqual(await marker(), [cell]);
             const failed = page.waitForRequest('**/selection-result?*');
@@ -611,7 +662,7 @@ try {
             assert.equal((await retry).url(), (await failed).url());
             await pending.fulfill({contentType: 'application/octet-stream', body: values(12)});
             await displayed(page, 12);
-            await checkTitle(`From ${findClosestCity(...cellToLatLng(cells[1])).name}: 2 min`);
+            await checkTitle(`From ${findMostPopulousCityForCell(cells[1]).name}: 2 min`);
             assert.deepEqual(await marker(), [cells[1]]);
 
             // Persistent socket: rapid latest/trailing replies, reconnect and settings progress under continuous traffic.

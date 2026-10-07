@@ -45,6 +45,31 @@ Deno.test('CPU budgets allow equality, reject invalid estimates and persist inde
     }
 })
 
+Deno.test('onchange file queries replay controls without a map action and infer formats', async () => {
+    const config = {url: '/data/{controls.layer}.{controls.extension}', format: 'auto'}
+    let values = {'controls.layer': 'speed-for-axle-22p5t', 'controls.extension': 'csv'}
+    const f = setup({onchange: config}, {getValues: () => values})
+    await f.replay('onchange', {}, {force: false})
+    await f.replay('onchange', {}, {force: false})
+    assert(f.calls.length === 1 && f.calls[0].context.format === 'csv')
+    values = {...values, 'controls.extension': 'geojson'}
+    await f.replay('onchange', {}, {force: false})
+    assert(f.calls.length === 2 && f.calls[1].context.format === 'geojson')
+    assert(f.calls.every(call => call.context.event === 'onchange' && !call.context.tokens.has('index')))
+    for (const format of ['arrow', 'csv', 'parquet', 'geojson']) {
+        const explicit = setup({onchange: {url: '/query', format}})
+        await explicit.replay('onchange', {})
+        assert(explicit.calls[0].context.format === format)
+    }
+    const legacy = setup({onclick: {url: '/query'}})
+    await legacy.click({})
+    assert(legacy.calls[0].context.format === 'arrow')
+    const invalid = setup({onchange: {...config, format: 'invalid'}})
+    assert(!await invalid.replay('onchange', {}) && invalid.errors.length === 1)
+    const socket = setup({onchange: {url: '/query', format: 'csv', socket: 'wss://example.test'}})
+    assert(!await socket.replay('onchange', {}) && socket.errors.length === 1)
+})
+
 Deno.test('cartogram origin is central and deterministic, including the dateline', () => {
     const points = {left: [0, -1], middle: [0, 0], right: [0, 1]}
     assert(centralLinkedH3(['right', 'left', 'middle', 'left'], key => points[key]) === 'middle')

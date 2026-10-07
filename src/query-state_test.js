@@ -171,6 +171,14 @@ Deno.test('saved queries round-trip without replacing controls, data or camera',
     assert(readQueryState(new URLSearchParams()) === null)
 })
 
+Deno.test('file-selection queries save and restore without an origin', () => {
+    const url = new URL('https://example.test/?data=loads/index.csv&p.layer=max-axle-at-90kmh')
+    writeQueryState(url, {event: 'onchange'})
+    assert(url.searchParams.get('query') === 'q2c0')
+    assert(JSON.stringify(readQueryState(url.searchParams)) === '{"event":"onchange"}')
+    assert(url.searchParams.get('p.layer') === 'max-axle-at-90kmh')
+})
+
 Deno.test('saved origin sets use bare H3 indexes when possible and read legacy encodings', () => {
     const h3Origins = [
         {event: 'onclick', index: query.index},

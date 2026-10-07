@@ -102,6 +102,49 @@ Put metadata alongside the data: `www/data/example.json` for `example.arrow`,
 | `minimumFractionCoverage` | Require this fraction of the cell’s population weight to have data before the cell gets a colour. Set to `1` for complete coverage or `0.5` to require 50%. |
 | `animate` | Show the paused animation timeline. The default is `false`. |
 
+## Static file selection
+
+Use `onchange` to select a data file with controls. The app loads this URL on
+startup and after a control change.
+
+```json
+{
+  "cartogram": "none",
+  "t": "{controls.layer}",
+  "controls": {
+    "layer": {
+      "label": "Layer", "type": "select", "default": "axle",
+      "options": [
+        {"value": "axle", "label": "Maximum axle load (t)"},
+        {"value": "speed", "label": "Maximum speed (km/h)"}
+      ]
+    },
+    "format": {
+      "label": "Map format", "type": "select", "default": "csv",
+      "options": [
+        {"value": "csv", "label": "H3"},
+        {"value": "geojson", "label": "GeoJSON"}
+      ]
+    }
+  },
+  "onchange": {
+    "url": "data/loads/{controls.layer}.{controls.format}",
+    "format": "auto"
+  }
+}
+```
+
+Keep the metadata beside the initial data file, as described above.
+Shared links restore the selected file and controls without an origin.
+Map clicks and movement do not activate `onchange`.
+If `onchange` is present, control changes use it instead of replaying a map action.
+
+Each request configuration can specify `format`: `arrow`, `csv`, `parquet`,
+`geojson`, or `auto`. The default is `arrow` for existing query endpoints.
+`auto` uses the resolved URL's file extension. Unknown extensions use Arrow.
+HTTP requests can use all these formats. WebSocket queries, control animation,
+and multiple on-click results require Arrow. For multiple origins, use the default format or set `format` to `arrow`.
+
 ## Interaction endpoints
 
 ```json
@@ -201,8 +244,8 @@ To convert an input before sending it, supply `encode` as a JavaScript function 
 Both contain values before conversion.
 Return a string, a finite number or a boolean. Do not return a Promise.
 
-A valid control change sends a new request from the last query position.
-Before the first query, it uses the map centre.
+A valid control change loads `onchange` if configured. Otherwise, it sends a new request from the last query position.
+Before the first map query, it uses the map centre.
 Invalid inputs or failed conversions prevent the request.
 
 Titles show values before conversion. For selects, they show option labels.
@@ -230,7 +273,7 @@ Set `estimator` and an optional `budget` on `onclick` or `onmove` in metadata:
 The function receives the resolved URL, or the path and query for WebSocket requests. Use finite, nonnegative CPU milliseconds for the estimate and budget. Equal values are allowed.
 Settings shows live estimates in red when they exceed the budget. Without a budget, the estimate is information only.
 Invalid estimates cause a request error with Retry, even with an override. Estimator code comes only from the original metadata.
-The independent flags `onclickBudgetOverride` and `onmoveBudgetOverride` default to false. Select a flag in Settings to allow requests above its budget and retry the matching last action.
+The independent flags `onclickBudgetOverride`, `onmoveBudgetOverride`, and `onchangeBudgetOverride` default to false. Select a flag in Settings to allow requests above its budget and retry the matching last action.
 Flags persist in the page URL without a time limit, across input and location changes. Clear a flag or use Reset to restore metadata defaults.
 
 # Cartogram mapping spec

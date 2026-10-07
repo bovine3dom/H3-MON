@@ -23,7 +23,7 @@ export function createInteractions({getSettings, getReplaySettings = getSettings
     let lastKey = null
     let lastAction = null
     let lastDelivery = Promise.resolve(false)
-    const estimators = new Map(['onclick', 'onmove'].map(key => {
+    const estimators = new Map(['onclick', 'onmove', 'onchange'].map(key => {
         const definition = metadata[key]?.estimator
         try {
             const estimate = typeof definition === 'string' ? new Function(`return (${definition})`)() : definition
@@ -70,14 +70,17 @@ export function createInteractions({getSettings, getReplaySettings = getSettings
             }
             socket = endpoint.href
         }
-        return {url: config.url, socket, resolution: config.resolution, wait: config.wait ?? (socket ? 0 : 350), focus: config.focus ?? true, highlight: config.highlight ?? true}
+        const format = config.format ?? 'arrow'
+        if (!['arrow', 'csv', 'parquet', 'geojson', 'auto'].includes(format)) throw new Error(`Invalid ${key} response format`)
+        if (socket && format !== 'arrow') throw new Error('WebSocket queries require Arrow responses')
+        return {url: config.url, socket, format, resolution: config.resolution, wait: config.wait ?? (socket ? 0 : 350), focus: config.focus ?? true, highlight: config.highlight ?? true}
     }
 
     function deliver({url, context}, config, force = false) {
         if (config && JSON.stringify(readConfig('onmove')) !== JSON.stringify(config)) return Promise.resolve(false)
         check(context.event, url)
         // Ignore untemplated pan/zoom changes, but retain transport and query-state identity.
-        const key = JSON.stringify([url, context.socket, context.event, context.manual,
+        const key = JSON.stringify([url, context.format, context.socket, context.event, context.manual,
             context.values.index, context.values._inputs, context.point?.cartogram])
         if (!force && key === lastKey) return lastDelivery
         lastKey = key
@@ -125,7 +128,11 @@ export function createInteractions({getSettings, getReplaySettings = getSettings
         }
         if (config.socket && resolved.href.includes('#')) throw new Error('Socket query URLs must not contain fragments')
         const url = config.socket ? resolved.pathname + resolved.search : resolved.href
-        return {url, context: {event: key, point, values, tokens, socket: config.socket, manual}}
+        const extension = resolved.pathname.split('.').at(-1).toLowerCase()
+        const format = config.format === 'auto'
+            ? ['arrow', 'csv', 'parquet', 'geojson'].includes(extension) ? extension : 'arrow'
+            : config.format
+        return {url, context: {event: key, point, values, tokens, socket: config.socket, format, manual}}
     }
 
     function run(key, point, {manual = false, force = true} = {}) {

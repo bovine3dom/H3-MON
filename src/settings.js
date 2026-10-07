@@ -29,7 +29,7 @@ export function leadingThrottleDebounce(callback, wait = 350) {
 }
 
 export const SETTINGS_SCHEMA = [
-    ...['onclick', 'onmove'].map(event => ({
+    ...['onclick', 'onmove', 'onchange'].map(event => ({
         key: `${event}BudgetOverride`, name: `${event}: allow requests over CPU budget`,
         group: 'CPU budgets', type: 'boolean', defaultValue: false, refresh: 'budget',
     })),
@@ -241,6 +241,7 @@ export const MULTI_QUERY_SETTING_OPTIONS = Object.freeze({
 const COMPACT_SETTING_KEYS = [
     'onclickBudgetOverride', 'onmoveBudgetOverride', 'colourScale', 'quantileSource', 'trimFactor', 'defaultValue',
     'requireCompleteCoverage', 'multiAggregation', 'multiCoverage', 'multiQuantile', 'multiAccumulate', 'minimumFractionCoverage',
+    'onchangeBudgetOverride',
 ]
 const COMPACT_SETTING_INDEX = new Map(COMPACT_SETTING_KEYS.map((key, index) => [key, index]))
 const COMPACT_SETTING_DEFS = new Map([
