@@ -158,8 +158,10 @@ Enable this prototype in the dataset's metadata JSON:
 The default is `false`. This setting is not shown in the control panel.
 With a cartogram loaded, hold **Shift** and drag with the primary mouse button
 on the cartogram. The drag defines a straight stroke with a width of one square.
-The blue map overlay shows its weighted H3 footprint. A new stroke replaces the
-old one. Press **Escape** while the cartogram has focus to clear it.
+The map shows each affected H3 cell with a neutral background and a smaller blue
+hexagon. This removes the data colour below the footprint and leaves a clear border.
+Basemap detail remains visible. Blue opacity still shows the projected weight.
+A new stroke replaces the old one. Press **Escape** while the cartogram has focus to clear it.
 Normal dragging still pans; scrolling still zooms. Drawing does not submit
 interaction requests or move the geographic camera. Strokes are not saved.
 Changing the cartogram or disabling the setting clears the stroke.

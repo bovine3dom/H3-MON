@@ -178,6 +178,40 @@ async function frame(page, name, paneOpen = false) {
     assert(edges >= 3, `${name}: fewer than three unobscured edges`);
     console.log(`${name}: alignment, multiply and ${edges} rasterized edges passed`);
 }
+async function probeStyling(page, before, footprint) {
+    await settle(page);
+    const locations = cells.slice(0, 3).flatMap(index => {
+        const center = cellToLatLng(index).reverse(), boundary = cellToBoundary(index, true);
+        const edge = boundary[0].map((v, axis) => (v + boundary[1][axis]) / 2);
+        return [0.3, 0.875].map(fraction => center.map((v, axis) => v + fraction * (edge[axis] - v)));
+    });
+    const points = await page.evaluate(locations => {
+        const rect = m.getCanvas().getBoundingClientRect();
+        return locations.map(location => { const p = m.project(location); return [rect.x + p.x, rect.y + p.y]; });
+    }, locations);
+    const after = PNG.sync.read(await page.screenshot({scale: 'css'}));
+    let basemap;
+    const visibility = await page.locator('#deckgl-overlay').evaluate(canvas => {
+        const previous = canvas.style.visibility;
+        canvas.style.visibility = 'hidden';
+        return previous;
+    });
+    try {
+        basemap = PNG.sync.read(await page.screenshot({scale: 'css'}));
+    } finally {
+        await page.locator('#deckgl-overlay').evaluate((canvas, visibility) => { canvas.style.visibility = visibility; }, visibility);
+    }
+    for (let i = 0; i < 2; i++) {
+        const inner = points[2 * i], border = points[2 * i + 1];
+        assert(difference(rgb(before, border), rgb(basemap, border)) > 10, 'Fixture has data colour beneath the border');
+        assert(difference(rgb(after, border), rgb(basemap, border)) <= 5, 'Neutral border removes the data colour, not the basemap');
+        const alpha = Math.round(255 * footprint.find(row => row.index === cells[i]).weight) / 255;
+        const expected = rgb(basemap, inner).map((v, channel) => v * ((1 - alpha) + alpha * [0, 150, 255][channel] / 255));
+        assert(difference(rgb(after, inner), expected) <= 5, 'Inset blue intensity depends on weight, not the data colour');
+    }
+    assert(difference(rgb(after, points[4]), rgb(before, points[4])) <= 2, 'Unselected tiles keep their data colour');
+}
+
 async function clickCell(page, index = cell, modifiers = []) {
     const point = await page.evaluate(center => {
         const p = m.project(center), rect = m.getCanvas().getBoundingClientRect();
@@ -350,6 +384,7 @@ try {
                 return geometry;
             };
             const beforeCamera = await page.evaluate(() => [m.getCenter().lng, m.getCenter().lat, m.getZoom()]);
+            const beforeProbeImage = PNG.sync.read(await page.screenshot({scale: 'css'}));
             const beforeProbe = await drawProbe();
             await page.waitForFunction(() => m._controls.find(c => c.getCanvas?.()?.id === 'deckgl-overlay')
                 ._deck.props.layers.some(layer => layer.id === 'cartogram-line-footprint'));
@@ -360,8 +395,11 @@ try {
             assert.deepEqual((await probeGeometry()).zoom, beforeProbe.zoom, 'Drawing must not pan');
             assert.deepEqual(await page.evaluate(() => [m.getCenter().lng, m.getCenter().lat, m.getZoom()]), beforeCamera);
             assert.equal(probeClicks, 0, 'Drawing must not submit a click request');
+            await probeStyling(page, beforeProbeImage, footprint);
             await page.keyboard.press('Escape');
             assert.deepEqual(await probeData(), [], 'Escape clears the footprint');
+            assert(await page.evaluate(() => !m._controls.find(c => c.getCanvas?.()?.id === 'deckgl-overlay')
+                ._deck.props.layers.some(layer => layer.id === 'cartogram-line-backing')), 'Escape also removes the backing');
             await page.mouse.move(...beforeProbe.start);
             await page.mouse.wheel(0, -60);
             await page.waitForTimeout(700);

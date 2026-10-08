@@ -596,7 +596,7 @@ function computeH3Bounds(indices, options = {}) {
 }
 
 let highlightLayer = null
-let lineProbeLayer = null
+let lineProbeLayers = []
 let renderLayers = null
 let hex_flying = false
 let hexFlyToken = 0
@@ -954,17 +954,24 @@ function cartogramCellsAnchorH3Strings(cellIndexes) {
 }
 
 function updateLineProbe(stroke) {
-    lineProbeLayer = null
+    lineProbeLayers = []
     if (stroke && cartogramAgg?.h3Cols.weight) {
         const coverage = strokeCoverage(cartogramAgg.x, cartogramAgg.y, ...stroke)
         const data = projectStroke(coverage, cartogramAgg.h3RowsByCell,
             row => cartogramAgg.h3Cols.weight[row], row => h3IndexStringAt(cartogramAgg.h3Cols, row))
-        lineProbeLayer = new H3HexagonLayer({
+        const foreground = new H3HexagonLayer({
             id: 'cartogram-line-footprint', data, ...h3LayerProps(),
             getHexagon: d => d.index,
             getFillColor: d => [0, 150, 255, Math.round(255 * Math.min(1, d.weight))],
+            coverage: 0.75,
             filled: true, stroked: false, extruded: false, pickable: false,
+            parameters: {depthCompare: 'always', depthWriteEnabled: false},
         })
+        // White removes the data tint within each H3 cell, but preserves the basemap
+        // through the canvas's multiply blend. The inset leaves a neutral border.
+        lineProbeLayers = [foreground.clone({
+            id: 'cartogram-line-backing', coverage: 1, getFillColor: [255, 255, 255, 255],
+        }), foreground]
     }
     renderLayers?.(false)
 }
@@ -3539,10 +3546,10 @@ function bootstrap(meta = {}){
     renderLayers = (trackProgress = true) => {
         const layers = [...mainLayers]
         if (highlightLayer) layers.push(highlightLayer)
-        if (lineProbeLayer) layers.push(lineProbeLayer)
         if (showTrains) {
             layers.push(choochoo)
         }
+        layers.push(...lineProbeLayers)
         const rendered = waitForNextDeckRender(5000, trackProgress)
         const doneSetLayers = (trackProgress ? perfTimer : detailPerfTimer)('deck.set_layers', {layers: layers.length})
         mapOverlay.setProps({layers, onAfterRender: onDeckAfterRender})
