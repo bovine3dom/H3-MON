@@ -1,4 +1,5 @@
 import * as d3 from 'd3'
+import {createLineProbe} from './cartogram-line'
 
 const TRANSPARENT_COLOUR = 'rgba(0,0,0,0)'
 const DEFAULT_COLOUR_SCALE = d3.scaleSequential(d3.interpolateSpectral).domain([0,1])
@@ -36,6 +37,8 @@ export function render_cartogram(container, data, options = {}) {
         onclick_callback = console.log,
         onmove_callback = () => {},
         onviewchange_callback = () => {},
+        line_probe_enabled = () => false,
+        onlineprobe_callback = () => {},
     } = options
     const maxScreenFontPx = Math.max(font_size, label_max_font_size)
     const collisionCellSize = Math.max(64, maxScreenFontPx * 4)
@@ -828,6 +831,7 @@ export function render_cartogram(container, data, options = {}) {
                 ctx.strokeRect(cellX[i] - half, cellY[i] - half, square_size, square_size)
             }
         }
+        lineProbe.draw(ctx, ([x, y]) => [getX(x), getY(y)], square_size)
         const highlightMs = svgPerf ? perfNow() - highlightStart : 0
 
         if (svgPerf) {
@@ -983,6 +987,18 @@ export function render_cartogram(container, data, options = {}) {
         })
     }
 
+    const lineProbe = createLineProbe(canvas, {
+        enabled: line_probe_enabled,
+        begin: stopMovement,
+        point: event => {
+            const p = canvasToViewBox(event)
+            const [x, y] = latestTransform.invert([p.x, p.y])
+            return [center_x + (x - width / 2) * 2 / square_size,
+                center_y + (y - height / 2) * 2 / square_size]
+        },
+        change: onlineprobe_callback,
+        redraw: () => drawCanvas(latestTransform),
+    })
     let hoveredCellIndex = null
     canvasSelection.on("click.cell", (event) => {
         const hit = cellIndexFromEvent(event)
@@ -994,7 +1010,7 @@ export function render_cartogram(container, data, options = {}) {
         if (hit.i != null) onclick_callback(currentData, event, hit.i)
     })
     canvasSelection.on("mousemove.cell", (event) => {
-        if (cartogramGestureActive || fitToBoundsActive) {
+        if (cartogramGestureActive || fitToBoundsActive || lineProbe.active) {
             recordSvgPerfTooltip('suppressed')
             hideTooltip()
             hoveredCellIndex = null
@@ -1024,6 +1040,8 @@ export function render_cartogram(container, data, options = {}) {
     })
 
     const zoom = d3.zoom().scaleExtent([0.5, 100])
+        .filter(event => (!event.ctrlKey || event.type === 'wheel') && !event.button
+            && !lineProbe.active && !(line_probe_enabled() && event.shiftKey && event.type !== 'wheel'))
         .on("start", (e) => {
             if (destroyed) return
             const source = e.sourceEvent
@@ -1098,6 +1116,7 @@ export function render_cartogram(container, data, options = {}) {
     function destroy() {
         if (destroyed) return
         destroyed = true
+        lineProbe.destroy()
         stopMovement()
         fitToBoundsToken++
         colorTransition = null
@@ -1163,6 +1182,7 @@ export function render_cartogram(container, data, options = {}) {
             drawCanvas(latestTransform)
             doneHighlight()
         },
+        clearLineProbe: () => lineProbe.clear(),
         stop: stopMovement,
         destroy,
         moveBy,

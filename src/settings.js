@@ -191,6 +191,13 @@ export const SETTINGS_SCHEMA = [
         refresh: 'cartogram',
     },
     {
+        key: 'cartogramLineProbe',
+        hidden: true,
+        type: 'boolean',
+        defaultValue: false,
+        refresh: 'render',
+    },
+    {
         key: 'defaultValue',
         name: 'Missing value',
         description: 'Value used for missing contributors of nearby cells when aggregating the cartogram.',

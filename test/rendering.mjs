@@ -48,6 +48,19 @@ routes.set('/data/coverage-cartogram_hilo.arrow', ['application/octet-stream', a
     x: Int32Array.from([0, 0, 2, 4]), y: Int32Array.from([0, 0, 2, 0]),
     code: Int32Array.from([100, 100, 100, 100]), weight: Float64Array.from([1, 1, 1, 1]),
 })]);
+const probeMetadata = {cartogram: 'probe-cartogram_hilo.arrow', cartogramLineProbe: true, trimFactor: 0,
+    onclick: {url: '/probe-click?index={index}', focus: false}};
+json('/data/probe.json', probeMetadata);
+routes.set('/data/probe.arrow', ['application/octet-stream', values(10)]);
+const probeIndexes = [cells[0], cells[0], cells[1], cells[2], cells[3]];
+routes.set('/data/probe-cartogram_hilo.arrow', ['application/octet-stream', arrow({
+    index_lower: Uint32Array.from(probeIndexes, index => h3IndexToSplitLong(index)[0]),
+    index_upper: Uint32Array.from(probeIndexes, index => h3IndexToSplitLong(index)[1]),
+    x: Int32Array.from([0, 2, 0, 2, 4]), y: Int32Array.from([0, 0, 0, 2, 2]),
+    code: Int32Array.from([100, 100, 100, 100, 100]),
+    weight: Float64Array.from([0.25, 0.75, 1, 1, 1]),
+    weight_mean: Float64Array.from([0.2, 1, 0.8, 1, 1]),
+})]);
 routes.set('/data/settings.arrow', ['application/octet-stream', values(10)]);
 for (const name of ['rendering', 'query']) routes.set(`/data/${name}.csv`, ['text/csv', `index,value\n${cell},0.65\n`]);
 for (const [name, type] of [['index.html', 'text/html'], ['app.js', 'text/javascript'], ['app.css', 'text/css']]) {
@@ -303,6 +316,70 @@ try {
             await frame(page, `${device}-restored`);
 
             await page.setViewportSize({width, height});
+            // The hidden line probe uses source weights, not target-normalized means.
+            json('/data/probe.json', probeMetadata);
+            let probeClicks = 0;
+            await page.route('**/probe-click?*', route => {
+                probeClicks++;
+                return route.fulfill({contentType: 'application/octet-stream', body: values(10)});
+            });
+            await page.goto(url('probe.arrow'));
+            await displayed(page, 10);
+            await page.waitForTimeout(650); // Finish the initial D3 fit transition.
+            assert(await page.locator('.cartogram-line-hint').isVisible());
+            assert.equal(await page.locator('[id="setting-cartogramLineProbe"]').count(), 0);
+            const probeGeometry = () => page.evaluate(() => {
+                const canvas = document.querySelector('#cartogram canvas'), rect = canvas.getBoundingClientRect();
+                const width = 45, height = 35, scale = Math.max(rect.width / width, rect.height / height);
+                const ox = (rect.width - width * scale) / 2, oy = (rect.height - height * scale) / 2;
+                const z = canvas.__zoom;
+                const point = (x, y) => [rect.x + z.x + z.k * (ox + (width / 2 + (x - 2) * 5) * scale),
+                    rect.y + z.y + z.k * (oy + (height / 2 + (y - 1) * 5) * scale)];
+                return {start: point(0, 0), end: point(0.5, 0), zoom: [z.x, z.y, z.k]};
+            });
+            const probeData = () => page.evaluate(() => m._controls.find(c => c.getCanvas?.()?.id === 'deckgl-overlay')
+                ._deck.props.layers.find(layer => layer.id === 'cartogram-line-footprint')?.props.data || []);
+            const drawProbe = async () => {
+                const geometry = await probeGeometry();
+                await page.keyboard.down('Shift');
+                await page.mouse.move(...geometry.start);
+                await page.mouse.down();
+                await page.mouse.move(...geometry.end, {steps: 5});
+                await page.mouse.up();
+                await page.keyboard.up('Shift');
+                return geometry;
+            };
+            const beforeCamera = await page.evaluate(() => [m.getCenter().lng, m.getCenter().lat, m.getZoom()]);
+            const beforeProbe = await drawProbe();
+            await page.waitForFunction(() => m._controls.find(c => c.getCanvas?.()?.id === 'deckgl-overlay')
+                ._deck.props.layers.some(layer => layer.id === 'cartogram-line-footprint'));
+            const footprint = await probeData();
+            assert.equal(footprint.length, 2);
+            assert.equal(footprint.find(row => row.index === cells[0]).weight, 0.3125);
+            assert.equal(footprint.find(row => row.index === cells[1]).weight, 0.875);
+            assert.deepEqual((await probeGeometry()).zoom, beforeProbe.zoom, 'Drawing must not pan');
+            assert.deepEqual(await page.evaluate(() => [m.getCenter().lng, m.getCenter().lat, m.getZoom()]), beforeCamera);
+            assert.equal(probeClicks, 0, 'Drawing must not submit a click request');
+            await page.keyboard.press('Escape');
+            assert.deepEqual(await probeData(), [], 'Escape clears the footprint');
+            await page.mouse.move(...beforeProbe.start);
+            await page.mouse.wheel(0, -60);
+            await page.waitForTimeout(700);
+            assert((await probeGeometry()).zoom[2] > beforeProbe.zoom[2], 'Scrolling still zooms');
+            await drawProbe();
+            assert.deepEqual(await probeData(), footprint, 'Probe coordinates follow zoom');
+            console.log(`${device}: hidden line probe, weights, zoom and clear passed`);
+            await page.locator('#settingsBtn').click();
+            await page.locator('[id="setting-cartogram"]').fill('none');
+            await setting(page, 'cartogram', 'none');
+            await page.waitForFunction(() => !document.querySelector('#cartogram canvas'));
+            assert.deepEqual(await probeData(), [], 'Replacing the cartogram clears the footprint');
+            json('/data/probe.json', {...probeMetadata, cartogramLineProbe: false});
+            await page.goto(url('probe.arrow'));
+            await displayed(page, 10);
+            assert(await page.locator('.cartogram-line-hint').isHidden(), 'Probe is off when disabled');
+            if (process.argv.includes('--cartogram-line-only')) continue;
+
             // Visibility changes must not remove request values or hide validation errors.
             const conditional = {cartogram: 'none', trimFactor: 0, t: '{controls.metric}: {controls.origin_radius}',
                 controls: {

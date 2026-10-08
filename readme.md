@@ -145,6 +145,39 @@ Each request configuration can specify `format`: `arrow`, `csv`, `parquet`,
 HTTP requests can use all these formats. WebSocket queries, control animation,
 and multiple on-click results require Arrow. For multiple origins, use the default format or set `format` to `arrow`.
 
+## Experimental cartogram line probe
+
+Enable this prototype in the dataset's metadata JSON:
+
+```json
+{
+  "cartogramLineProbe": true
+}
+```
+
+The default is `false`. This setting is not shown in the control panel.
+With a cartogram loaded, hold **Shift** and drag with the primary mouse button
+on the cartogram. The drag defines a straight stroke with a width of one square.
+The blue map overlay shows its weighted H3 footprint. A new stroke replaces the
+old one. Press **Escape** while the cartogram has focus to clear it.
+Normal dragging still pans; scrolling still zooms. Drawing does not submit
+interaction requests or move the geographic camera. Strokes are not saved.
+Changing the cartogram or disabling the setting clears the stroke.
+
+The mapping must include source-normalized `weight`, not just `weight_mean`.
+For each source H3 cell, the overlay sums `weight × square coverage` over the
+stroke. Coverage is estimated with 16 sample points per square. Opacity increases
+with this sum, without normalization to the brightest cell. The map uses the
+mapping's H3 resolution, independently of the displayed dataset's resolution.
+A mapping without `weight` leaves the probe inactive.
+
+This is a weighted region, not an inverse coordinate transform or a travel route.
+It can contain disconnected areas. Sparse mapping losses remain in the result.
+
+Run `yarn test` for unit checks and `yarn test:cartogram-line` for headless browser
+checks. Set `CHROMIUM_PATH` if you use a system browser instead of Playwright's
+bundled browser.
+
 ## Interaction endpoints
 
 ```json

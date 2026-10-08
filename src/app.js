@@ -13,6 +13,7 @@ import * as observablehq from './vendor/observablehq' // from https://observable
 import {getCitiesStartsWith, findClosestCity} from 'tiny-geocoder'
 import {findMostPopulousCityForCell} from './city-label-lookup'
 import {render_cartogram} from './cartogram'
+import {strokeCoverage, projectStroke} from './cartogram-line'
 import {createSettingsPanel} from './settings-panel'
 import {SETTINGS_SCHEMA, colourScale, effectiveSettingValue, fixedLegendScale, readSettingLayers, serializeSettingValue, settingEnabled, updateUrlSettingOverrides} from './settings'
 import {centralLinkedH3, createInteractions} from './interactions'
@@ -595,6 +596,7 @@ function computeH3Bounds(indices, options = {}) {
 }
 
 let highlightLayer = null
+let lineProbeLayer = null
 let renderLayers = null
 let hex_flying = false
 let hexFlyToken = 0
@@ -949,6 +951,22 @@ function cartogramCellsAnchorH3Strings(cellIndexes) {
         if (strings[0]) refs.push(strings[0])
     }
     return refs
+}
+
+function updateLineProbe(stroke) {
+    lineProbeLayer = null
+    if (stroke && cartogramAgg?.h3Cols.weight) {
+        const coverage = strokeCoverage(cartogramAgg.x, cartogramAgg.y, ...stroke)
+        const data = projectStroke(coverage, cartogramAgg.h3RowsByCell,
+            row => cartogramAgg.h3Cols.weight[row], row => h3IndexStringAt(cartogramAgg.h3Cols, row))
+        lineProbeLayer = new H3HexagonLayer({
+            id: 'cartogram-line-footprint', data, ...h3LayerProps(),
+            getHexagon: d => d.index,
+            getFillColor: d => [0, 150, 255, Math.round(255 * Math.min(1, d.weight))],
+            filled: true, stroked: false, extruded: false, pickable: false,
+        })
+    }
+    renderLayers?.(false)
 }
 
 function hex(hexes, options = {}) {
@@ -2378,6 +2396,9 @@ function bootstrap(meta = {}){
                             color_transition_duration: COLOUR_TRANSITION_DURATION,
                             include_outer_borders: true,
                             data_col: cartoDataCol,
+                            line_probe_enabled: () => settingEnabled(settings.cartogramLineProbe, false)
+                                && !!cartogramAgg?.h3Cols.weight,
+                            onlineprobe_callback: updateLineProbe,
                             onviewchange_callback: (data, visibleIndices) => updateViewportQuantiles('cartogram', visibleIndices),
                             onclick_callback: (data, event, i) => {
                                 try {
@@ -3518,6 +3539,7 @@ function bootstrap(meta = {}){
     renderLayers = (trackProgress = true) => {
         const layers = [...mainLayers]
         if (highlightLayer) layers.push(highlightLayer)
+        if (lineProbeLayer) layers.push(lineProbeLayer)
         if (showTrains) {
             layers.push(choochoo)
         }
@@ -3908,6 +3930,7 @@ function bootstrap(meta = {}){
         document.title = legendTitle(displayedSelection) || DEFAULT_DOCUMENT_TITLE
         if (changedKeys.has('colourScheme') || changedKeys.has('cyclical') || changedKeys.has('flip') || badnessChanged(changedKeys)) rebuildColourRamp()
         if (changedKeys.has('cartogram')) resetCartogramState()
+        if (changedKeys.has('cartogramLineProbe')) cartogramApi?.clearLineProbe()
         if (changedKeys.has('animate') && !settingEnabled(settings.animate, false) && playing) setAnimation('')
         updateAttribution()
         refreshAnimationTimeline()

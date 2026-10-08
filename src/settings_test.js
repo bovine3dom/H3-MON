@@ -7,6 +7,15 @@ function assert(condition, message = 'Assertion failed') {
     if (!condition) throw new Error(message)
 }
 
+Deno.test('cartogram line probe is hidden, off by default, and accepts metadata', () => {
+    const setting = SETTINGS_BY_KEY.get('cartogramLineProbe')
+    assert(setting.hidden === true && setting.defaultValue === false)
+    assert(effectiveSettingValue({}, {}, setting) === false)
+    assert(effectiveSettingValue({cartogramLineProbe: true}, {}, setting) === true)
+    assert(readSettingLayers({cartogramLineProbe: true}).settings.cartogramLineProbe === true)
+    assert(parseSettingValue(setting, 'false') === false)
+})
+
 Deno.test('legacy colour aliases and canonical precedence survive shared URLs', () => {
     const setting = SETTINGS_BY_KEY.get('colourScale')
     assert(setting.type === 'select')

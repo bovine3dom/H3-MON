@@ -3,8 +3,9 @@
     "license": "BSD-2-Clause",
     "scripts": {
         "build": "node esbuild.config.mjs",
-        "test": "deno test src/settings_test.js src/rankit_test.js src/interactions_test.js src/request-status_test.js src/request-controls_test.js src/query-state_test.js src/query-socket_test.js src/animation_test.js src/multi-query_test.js",
+        "test": "deno test src/settings_test.js src/cartogram-line_test.js src/rankit_test.js src/interactions_test.js src/request-status_test.js src/request-controls_test.js src/query-state_test.js src/query-socket_test.js src/animation_test.js src/multi-query_test.js",
         "test:rendering": "yarn build && node test/rendering.mjs",
+        "test:cartogram-line": "yarn build && node test/rendering.mjs --cartogram-line-only",
         "watch": "node esbuild.config.mjs --watch",
         "serve": "yarn deno run --lock=deno.lock --allow-net --allow-read srv/watcher.ts",
         "postinstall": "cp node_modules/@loaders.gl/parquet/dist/parquet_wasm_bg.wasm www/"
