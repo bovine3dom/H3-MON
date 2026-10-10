@@ -283,6 +283,10 @@ try {
             await displayed(page, 0.65);
             await page.mouse.move(0, 0);
             await frame(page, `${device}-flat`);
+            const onchangeBudget = page.locator('#setting-onchangeBudgetOverride');
+            const budgetFieldHidden = () => onchangeBudget.evaluate(input => input.closest('.setting-field').hidden);
+            assert(await budgetFieldHidden(), 'No onchange configuration hides its budget field');
+            assert(await onchangeBudget.evaluate(input => input.closest('fieldset').hidden), 'No estimates hides the CPU budget group');
 
             json('/data/static-files.json', {cartogram: 'none', trimFactor: 0, t: '{controls.layer}',
                 controls: {
@@ -305,6 +309,7 @@ try {
             page.on('request', recordStaticRequest);
             await page.goto(url('static-files.csv'));
             await displayed(page, 17);
+            assert(await budgetFieldHidden(), 'An onchange URL without an estimator does not show budget controls');
             assert.equal(await page.title(), 'First load query');
             assert(await page.locator('#legend-placeholder').isHidden(), 'File selection has no map-action prompt');
             await page.locator('#settingsBtn').click();
@@ -329,7 +334,21 @@ try {
             await displayed(page, 23);
             assert(staticRequests.some(url => url.endsWith('static-second.geojson')));
             page.off('request', recordStaticRequest);
-            console.log(`${device}: static files load on startup and control changes, including GeoJSON and shared URLs`);
+            for (const budget of [undefined, 3]) {
+                json('/data/static-files.json', {cartogram: 'none', onchange: {
+                    url: '/data/static-first.csv', format: 'csv', estimator: '() => 2',
+                    ...(budget === undefined ? {} : {budget}),
+                }});
+                await page.goto(url('static-files.csv'));
+                await displayed(page, 17);
+                assert.equal(await budgetFieldHidden(), false, 'An onchange estimator shows its estimate');
+                assert.equal(await onchangeBudget.evaluate(input => input.closest('.setting-control-row').hidden), budget === undefined,
+                    'The override checkbox requires a configured budget');
+                assert.equal(await onchangeBudget.evaluate(input => input.closest('fieldset').hidden), false);
+                const estimate = await onchangeBudget.evaluate(input => input.closest('.setting-field').querySelector('[role="status"]').textContent);
+                assert.equal(estimate, budget === undefined ? 'Estimate: 2 CPU ms.' : 'Estimate: 2 CPU ms. Budget: 3 CPU ms.');
+            }
+            console.log(`${device}: static files and onchange budget visibility passed`);
             await page.goto(url('rendering.csv'));
             await displayed(page, 0.65);
             await page.evaluate(center => m.jumpTo({bearing: 30, pitch: 35, zoom: 7.7,

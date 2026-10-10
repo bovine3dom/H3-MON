@@ -198,7 +198,7 @@ export function createSettingsPanel({metadata, overrides, colourSchemes, onApply
     function refreshEstimates() {
         const estimates = getRequestEstimates(draftOverrides)
         const duration = value => `${Number(value.toPrecision(3))} CPU ms`
-        for (const key of ['onclick', 'onmove']) {
+        for (const key of ['onclick', 'onmove', 'onchange']) {
             const field = fields.get(`${key}BudgetOverride`)
             if (!field?.root) continue
             const estimate = estimates[key]
