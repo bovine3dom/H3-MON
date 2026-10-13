@@ -444,7 +444,8 @@ async function materializeArrowColumn(table, name, labelPrefix) {
     return measurePerf(label, {rows: column.length}, () => {
         const values = column.toArray()
         return (name === H3_INDEX_LOWER || name === H3_INDEX_UPPER) && Array.isArray(values)
-            && column.nullCount === 0 ? Uint32Array.from(values) : values
+            && column.type.dictionary?.ArrayType === Uint32Array && column.nullCount === 0
+            ? Uint32Array.from(values) : values
     })
 }
 

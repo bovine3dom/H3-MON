@@ -5,7 +5,7 @@ import {join} from 'node:path';
 import {chromium} from 'playwright';
 import {PNG} from 'pngjs';
 import {cellToBoundary, cellToLatLng, gridDisk, h3IndexToSplitLong, latLngToCell} from 'h3-js';
-import {tableFromArrays, tableToIPC, vectorFromArray, Dictionary, Int8, Uint32, Float64, Utf8} from 'apache-arrow';
+import {tableFromArrays, tableToIPC, vectorFromArray, Dictionary, Int8, Uint32, Uint64, Float64, Utf8} from 'apache-arrow';
 import {findMostPopulousCityForCell} from '../src/city-label-lookup.js';
 import {readMultiQueryOptions} from '../src/multi-query.js';
 import {readQueryOrigins} from '../src/query-state.js';
@@ -69,6 +69,7 @@ json('/data/dictionary.json', {cartogram: 'dictionary-cartogram_hilo.arrow', tri
 routes.set('/data/dictionary.arrow', ['application/octet-stream', arrow({...columns,
     index_lower: dictionary(columns.index_lower, new Uint32(), 1),
     value: dictionary([10, 20, 110, 10000], new Float64(), 2),
+    index_upper: dictionary(Array.from(columns.index_upper, BigInt), new Uint64(), 3),
 })]);
 routes.set('/data/dictionary-cartogram_hilo.arrow', ['application/octet-stream', arrow({...columns,
     index_lower: dictionary(columns.index_lower, new Uint32(), 1),
