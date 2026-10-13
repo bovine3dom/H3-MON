@@ -1,6 +1,7 @@
 import {MapboxOverlay} from '@deck.gl/mapbox'
 import {splitMapGet, splitMapHas, splitMapSet} from './split-index.js'
 import {groupedRows} from './grouped-rows.js'
+import {createPackedH3Map} from './packed-h3-map.js'
 import {H3HexagonLayer, TileLayer} from '@deck.gl/geo-layers'
 import {BitmapLayer, GeoJsonLayer } from '@deck.gl/layers'
 import {PackedH3FillTransition, PackedH3HexagonLayer} from 'faster-h3-for-deckgl'
@@ -719,43 +720,11 @@ function ensureH3StringColumn(cols, label = 'h3.index_strings.from_split') {
     return strings
 }
 
-function createSplitH3ToXYMap() {
-    const root = new Map()
-    const entries = []
-    return {
-        split: true,
-        entries,
-        size: 0,
-        get(h3) {
-            const split = Array.isArray(h3) ? h3 : h3IndexToSplitLong(String(h3))
-            return splitMapGet(root, split[0], split[1])
-        },
-        getSplit(lower, upper) {
-            return splitMapGet(root, lower, upper)
-        },
-        setSplit(lower, upper, entry) {
-            if (splitMapSet(root, lower, upper, entry)) {
-                entries.push(entry)
-                this.size++
-            }
-        },
-        *keys() {
-            for (const entry of entries) yield splitLongToH3Index(entry.lower, entry.upper)
-        },
-        *[Symbol.iterator]() {
-            for (const entry of entries) yield [[entry.lower, entry.upper], entry]
-        },
-    }
-}
-
-function addH3MapCell(map, split, lower, upper, h3, cellIndex, x, y) {
-    let entry = split ? map.getSplit(lower, upper) : map.get(h3)
+function addH3MapCell(map, h3, cellIndex, x, y) {
+    let entry = map.get(h3)
     if (!entry) {
-        entry = split
-            ? {lower, upper, cellIndices: [], xMin: x, xMax: x, yMin: y, yMax: y}
-            : {cellIndices: [], xMin: x, xMax: x, yMin: y, yMax: y}
-        if (split) map.setSplit(lower, upper, entry)
-        else map.set(h3, entry)
+        entry = {cellIndices: [], xMin: x, xMax: x, yMin: y, yMax: y}
+        map.set(h3, entry)
     } else {
         if (x < entry.xMin) entry.xMin = x
         if (x > entry.xMax) entry.xMax = x
@@ -854,13 +823,14 @@ function buildCartogramAggregation(rawCols) {
     }
     doneOutput()
 
+    const cells = x.length <= 65536 ? Uint16Array.from(rowCell) : rowCell
     done({cells: x.length, strategy: 'numeric-xy-key'})
     return {
         h3Cols: rawCols,
         weights,
         weightValues,
-        rowCell,
-        h3RowsByCell: groupedRows(rowCell, x.length),
+        rowCell: cells,
+        h3RowsByCell: groupedRows(cells, x.length),
         cellH3StringCache: [],
         x,
         y,
@@ -876,22 +846,16 @@ function buildH3ToXY(rawCols) {
     const rowCount = h3RowCount(rawCols)
     const doneIndex = perfTimer('cartogram.h3_to_xy.build', {rows: rowCount, h3Index: hasSplitH3Index(rawCols) ? 'split' : 'string'})
     const split = hasSplitH3Index(rawCols)
-    const map = split ? createSplitH3ToXYMap() : new Map()
-    if (split) {
-        for (let i = 0; i < rowCount; i++) {
-            const lower = toNumber(columnValue(rawCols[H3_INDEX_LOWER], i))
-            const upper = toNumber(columnValue(rawCols[H3_INDEX_UPPER], i))
-            const x = toNumber(rawCols.x[i])
-            const y = toNumber(rawCols.y[i])
-            addH3MapCell(map, true, lower, upper, null, cartogramAgg?.rowCell?.[i] ?? i, x, y)
-        }
-    } else {
+    const map = split ? createPackedH3Map({lower: rawCols[H3_INDEX_LOWER], upper: rawCols[H3_INDEX_UPPER],
+        x: rawCols.x, y: rawCols.y, cells: cartogramAgg?.rowCell},
+        {parseIndex: h3IndexToSplitLong, formatIndex: splitLongToH3Index, center: cellToLatLng}) : new Map()
+    if (!split) {
         const h3Strings = ensureH3StringColumn(rawCols, 'cartogram.h3_strings.from_split')
         for (let i = 0; i < rowCount; i++) {
             const hex = toStringValue(columnValue(h3Strings, i))
             const x = toNumber(rawCols.x[i])
             const y = toNumber(rawCols.y[i])
-            addH3MapCell(map, false, null, null, hex, cartogramAgg?.rowCell?.[i] ?? i, x, y)
+            addH3MapCell(map, hex, cartogramAgg?.rowCell?.[i] ?? i, x, y)
         }
     }
     h3toXY = map
@@ -1020,6 +984,7 @@ function hex(hexes, options = {}) {
 }
 
 function findClosestHex(targetLat, targetLng, h3map = h3toXY) {
+    if (h3map.closest) return h3map.closest(targetLat, targetLng)
     let best = null
     let bestDist = Infinity
     for (const [hex, pt] of h3map) {
