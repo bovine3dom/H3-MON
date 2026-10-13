@@ -2,6 +2,7 @@ import {MapboxOverlay} from '@deck.gl/mapbox'
 import {splitMapGet, splitMapHas, splitMapSet} from './split-index.js'
 import {groupedRows} from './grouped-rows.js'
 import {createPackedH3Map} from './packed-h3-map.js'
+import {compactCartogramColumns} from './compact-cartogram.js'
 import {H3HexagonLayer, TileLayer} from '@deck.gl/geo-layers'
 import {BitmapLayer, GeoJsonLayer } from '@deck.gl/layers'
 import {PackedH3FillTransition, PackedH3HexagonLayer} from 'faster-h3-for-deckgl'
@@ -859,6 +860,13 @@ function buildH3ToXY(rawCols) {
         }
     }
     h3toXY = map
+    if (rawCols === cartogramRawCols && cartogramAgg?.h3Cols === rawCols) {
+        const compact = compactCartogramColumns(rawCols)
+        if (compact) {
+            cartogramRawCols = cartogramAgg.h3Cols = compact
+            cartogramAgg.weights = cartogramAgg.weightValues = compact.weight_mean || compact.weight || null
+        }
+    }
     doneIndex({uniqueH3: map.size})
     return map
 }
