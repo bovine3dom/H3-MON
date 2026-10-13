@@ -5,7 +5,7 @@ import {join} from 'node:path';
 import {chromium} from 'playwright';
 import {PNG} from 'pngjs';
 import {cellToBoundary, cellToLatLng, gridDisk, h3IndexToSplitLong, latLngToCell} from 'h3-js';
-import {tableFromArrays, tableToIPC} from 'apache-arrow';
+import {tableFromArrays, tableToIPC, vectorFromArray, Dictionary, Int8, Uint32, Float64, Utf8} from 'apache-arrow';
 import {findMostPopulousCityForCell} from '../src/city-label-lookup.js';
 import {readMultiQueryOptions} from '../src/multi-query.js';
 import {readQueryOrigins} from '../src/query-state.js';
@@ -63,6 +63,19 @@ routes.set('/data/probe-cartogram_hilo.arrow', ['application/octet-stream', arro
     code: Int32Array.from([100, 100, 100, 100, 100]),
     weight: Float64Array.from([0.25, 0.75, 1, 1, 1]),
     weight_mean: Float64Array.from([0.2, 1, 0.8, 1, 1]),
+})]);
+const dictionary = (values, type, id) => vectorFromArray(values, new Dictionary(type, new Int8(), id));
+json('/data/dictionary.json', {cartogram: 'dictionary-cartogram_hilo.arrow', trimFactor: 0});
+routes.set('/data/dictionary.arrow', ['application/octet-stream', arrow({...columns,
+    index_lower: dictionary(columns.index_lower, new Uint32(), 1),
+    value: dictionary([10, 20, 110, 10000], new Float64(), 2),
+})]);
+routes.set('/data/dictionary-cartogram_hilo.arrow', ['application/octet-stream', arrow({...columns,
+    index_lower: dictionary(columns.index_lower, new Uint32(), 1),
+    population: dictionary([10, 20, 30, 40], new Float64(), 2),
+    label: dictionary(['City A', null, null, null], new Utf8(), 3),
+    x: Int16Array.from([0, 2, 4, 6]), y: new Int16Array(4),
+    code: Uint16Array.from([100, 100, 100, 100]), weight: Float32Array.from([1, 1, 1, 1]),
 })]);
 routes.set('/data/settings.arrow', ['application/octet-stream', values(10)]);
 for (const name of ['rendering', 'query']) routes.set(`/data/${name}.csv`, ['text/csv', `index,value\n${cell},0.65\n`]);
@@ -372,6 +385,11 @@ try {
             await frame(page, `${device}-restored`);
 
             await page.setViewportSize({width, height});
+            await page.goto(url('dictionary.arrow'));
+            await displayed(page, 10);
+            await page.locator('#cartogram canvas').waitFor({state: 'visible'});
+            assert.deepEqual(await page.evaluate(() => Array.from(window._columnData.value)), [10, 20, 110, 10000]);
+            console.log(`${device}: dictionary Arrow data and cartogram passed`);
             // The hidden line probe uses source weights, not target-normalized means.
             json('/data/probe.json', probeMetadata);
             let probeClicks = 0;
@@ -797,8 +815,12 @@ try {
             const metadata = {cartogram: 'none', trimFactor: 0, t: 'From {TOWN_NAME}: {controls.time} min',
                 controls: {time: {label: 'Travel time', type: 'number', default: 2, encode: 'value => value * 60'}}, onclick: action};
             json('/data/query.json', metadata);
-            let pending;
-            await page.route('**/selection-result?*', route => { pending = route; });
+            let pending, routeReady;
+            await page.route('**/selection-result?*', route => { pending = route; routeReady?.(); });
+            const nextRequest = () => Promise.all([
+                page.waitForRequest('**/selection-result?*'),
+                new Promise(resolve => { routeReady = resolve; }),
+            ]).then(([request]) => request);
             await page.goto(url('query.csv'));
             await displayed(page, 0.65);
             const marker = () => page.evaluate(() => m._controls.find(c => c.getCanvas?.()?.id === 'deckgl-overlay')
@@ -807,7 +829,7 @@ try {
                 assert.equal(await page.title(), text);
                 assert.equal(await page.locator('#observable_legend > :last-child .title').textContent(), text);
             };
-            const request = page.waitForRequest('**/selection-result?*');
+            const request = nextRequest();
             await clickCell(page);
             assert.equal(new URL((await request).url()).searchParams.get('time'), '120');
             await checkTitle(metadata.t);
@@ -817,7 +839,7 @@ try {
             const firstTitle = `From ${findMostPopulousCityForCell(cell).name}: 2 min`;
             await checkTitle(firstTitle);
             assert.deepEqual(await marker(), [cell]);
-            const failed = page.waitForRequest('**/selection-result?*');
+            const failed = nextRequest();
             await clickCell(page, cells[1]);
             await failed;
             await checkTitle(firstTitle);
@@ -825,7 +847,7 @@ try {
             await page.waitForFunction(() => document.body.classList.contains('load-error'));
             await checkTitle(firstTitle);
             assert.deepEqual(await marker(), [cell]);
-            const retry = page.waitForRequest('**/selection-result?*');
+            const retry = nextRequest();
             await page.getByRole('button', {name: 'Retry', exact: true}).click();
             assert.equal((await retry).url(), (await failed).url());
             await pending.fulfill({contentType: 'application/octet-stream', body: values(12)});

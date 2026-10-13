@@ -3,7 +3,7 @@ import {H3HexagonLayer, TileLayer} from '@deck.gl/geo-layers'
 import {BitmapLayer, GeoJsonLayer } from '@deck.gl/layers'
 import {PackedH3FillTransition, PackedH3HexagonLayer} from 'faster-h3-for-deckgl'
 import {CSVLoader} from '@loaders.gl/csv'
-import {ArrowLoader} from '@loaders.gl/arrow'
+import {tableFromIPC} from 'apache-arrow'
 import {ParquetWasmLoader} from '@loaders.gl/parquet'
 import {load, parse} from '@loaders.gl/core'
 import maplibregl from 'maplibre-gl'
@@ -397,8 +397,7 @@ async function measurePerf(label, details, fn) {
 }
 
 async function parseArrowTable(buf, label, details = {}) {
-    const table = await measurePerf(label, details, () => ArrowLoader.parseSync(buf, {arrow: {shape: 'arrow-table'}}))
-    return table.data
+    return measurePerf(label, details, () => tableFromIPC(buf))
 }
 
 async function parseCsvRows(text) {
@@ -1069,7 +1068,7 @@ const PARQUET_WASM_URL = './parquet_wasm_bg.wasm'
 
 const FORMATS = {
     csv:     {loader: CSVLoader,      kind: 'row',    layer: 'hex'},
-    arrow:   {loader: ArrowLoader,    kind: 'column', layer: 'hex'},
+    arrow:   {kind: 'column', layer: 'hex'},
     parquet: {loader: ParquetWasmLoader, kind: 'column', layer: 'hex', loadOptions: {shape: 'columnar-table', parquet: {wasmUrl: PARQUET_WASM_URL}}},
     geojson: {kind: 'row',            layer: 'geojson'},
 }
