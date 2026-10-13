@@ -2835,6 +2835,7 @@ function bootstrap(meta = {}){
     }
 
     const mapOverlay = new MapboxOverlay({
+        _typedArrayManagerProps: {overAlloc: 1, poolSize: 0},
         interleaved: false,
         _pickable: false,
     })
