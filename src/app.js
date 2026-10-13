@@ -3,6 +3,7 @@ import {splitMapGet, splitMapHas, splitMapSet} from './split-index.js'
 import {groupedRows} from './grouped-rows.js'
 import {createPackedH3Map} from './packed-h3-map.js'
 import {compactCartogramColumns} from './compact-cartogram.js'
+import {arrowColumnValues} from './arrow-columns.js'
 import {H3HexagonLayer, TileLayer} from '@deck.gl/geo-layers'
 import {BitmapLayer, GeoJsonLayer } from '@deck.gl/layers'
 import {PackedH3FillTransition, PackedH3HexagonLayer} from 'faster-h3-for-deckgl'
@@ -443,12 +444,7 @@ async function materializeArrowColumn(table, name, labelPrefix) {
     const label = `${labelPrefix}.${name}`
     const estimate = loadProgress.estimates[label] || LOAD_PROGRESS_DEFAULTS[label] || 0
     if (estimate > 50) await yieldToPaint(LOAD_PROGRESS_LABELS[label])
-    return measurePerf(label, {rows: column.length}, () => {
-        const values = column.toArray()
-        return (name === H3_INDEX_LOWER || name === H3_INDEX_UPPER) && Array.isArray(values)
-            && column.type.dictionary?.ArrayType === Uint32Array && column.nullCount === 0
-            ? Uint32Array.from(values) : values
-    })
+    return measurePerf(label, {rows: column.length}, () => arrowColumnValues(column, name))
 }
 
 async function materializeArrowColumns(table, names, labelPrefix) {
