@@ -31,8 +31,9 @@ export function createPackedH3Map({lower, upper, x, y, cells}, {parseIndex, form
         adjacency[next[i]++] = cells ? cells[row] : row
     }
     low = Uint32Array.from(low); high = Uint32Array.from(high)
-    xMin = Float64Array.from(xMin); xMax = Float64Array.from(xMax)
-    yMin = Float64Array.from(yMin); yMax = Float64Array.from(yMax)
+    const Bounds = x instanceof Int16Array && y instanceof Int16Array ? Int16Array : Float64Array
+    xMin = Bounds.from(xMin); xMax = Bounds.from(xMax)
+    yMin = Bounds.from(yMin); yMax = Bounds.from(yMax)
     let centers = null
     const entry = i => i === undefined ? undefined : ({
         lower: low[i], upper: high[i], cellIndices: adjacency.subarray(offsets[i], offsets[i + 1]),

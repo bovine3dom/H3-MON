@@ -32,6 +32,13 @@ Deno.test('packed H3 adjacency keeps bounds, row order, duplicates, and index wo
     equal([map.getSplit(7, 0xf8510000).lat, map.getSplit(7, 0xf8510000).lng], [30, 40])
 })
 
+Deno.test('packed H3 bounds retain the full Int16 coordinate range', () => {
+    const map = createPackedH3Map({lower: [7, 7], upper: [1, 1],
+        x: new Int16Array([-32768, 32767]), y: new Int16Array([32767, -32768])}, callbacks)
+    const a = map.getSplit(7, 1)
+    equal([a.xMin, a.xMax, a.yMin, a.yMax], [-32768, 32767, -32768, 32767])
+})
+
 Deno.test('packed H3 map handles empty input and uses row indexes without cells', () => {
     const map = createPackedH3Map({lower: [7, 7], upper: [1, 1], x: [0, 1], y: [2, 3]}, callbacks)
     equal(Array.from(map.getSplit(7, 1).cellIndices), [0, 1])
