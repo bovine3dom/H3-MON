@@ -5,35 +5,37 @@ export function createPackedH3Map({lower, upper, x, y, cells}, {parseIndex, form
     const rows = lower.length
     if ([upper, x, y].some(column => column.length !== rows) || cells && cells.length !== rows) throw Error('H3 column length mismatch')
     const lookup = new Map(), counts = [], sourceRow = new Uint32Array(rows)
-    let low = [], high = [], xMin = [], xMax = [], yMin = [], yMax = []
     for (let row = 0; row < rows; row++) {
-        const lo = Number(lower[row]), hi = Number(upper[row]), cx = Number(x[row]), cy = Number(y[row])
+        const lo = Number(lower[row]), hi = Number(upper[row])
         let i = splitMapGet(lookup, lo, hi)
         if (i === undefined) {
-            i = low.length
+            i = counts.length
             splitMapSet(lookup, lo, hi, i)
-            low.push(lo); high.push(hi); counts.push(0)
-            xMin.push(cx); xMax.push(cx); yMin.push(cy); yMax.push(cy)
+            counts.push(0)
         }
         sourceRow[row] = i
         counts[i]++
-        if (cx < xMin[i]) xMin[i] = cx
-        if (cx > xMax[i]) xMax[i] = cx
-        if (cy < yMin[i]) yMin[i] = cy
-        if (cy > yMax[i]) yMax[i] = cy
     }
-    const size = low.length, offsets = new Uint32Array(size + 1)
+    const size = counts.length, offsets = new Uint32Array(size + 1)
     for (let i = 0; i < size; i++) offsets[i + 1] = offsets[i] + counts[i]
     const next = offsets.slice(0, size)
     const adjacency = cells instanceof Uint16Array ? new Uint16Array(rows) : new Uint32Array(rows)
+    const low = new Uint32Array(size), high = new Uint32Array(size)
+    const Bounds = x instanceof Int16Array && y instanceof Int16Array ? Int16Array : Float64Array
+    const xMin = new Bounds(size), xMax = new Bounds(size), yMin = new Bounds(size), yMax = new Bounds(size)
     for (let row = 0; row < rows; row++) {
-        const i = sourceRow[row]
+        const i = sourceRow[row], cx = Number(x[row]), cy = Number(y[row])
+        if (next[i] === offsets[i]) {
+            low[i] = Number(lower[row]); high[i] = Number(upper[row])
+            xMin[i] = xMax[i] = cx; yMin[i] = yMax[i] = cy
+        } else {
+            if (cx < xMin[i]) xMin[i] = cx
+            if (cx > xMax[i]) xMax[i] = cx
+            if (cy < yMin[i]) yMin[i] = cy
+            if (cy > yMax[i]) yMax[i] = cy
+        }
         adjacency[next[i]++] = cells ? cells[row] : row
     }
-    low = Uint32Array.from(low); high = Uint32Array.from(high)
-    const Bounds = x instanceof Int16Array && y instanceof Int16Array ? Int16Array : Float64Array
-    xMin = Bounds.from(xMin); xMax = Bounds.from(xMax)
-    yMin = Bounds.from(yMin); yMax = Bounds.from(yMax)
     let centers = null
     const entry = i => i === undefined ? undefined : ({
         lower: low[i], upper: high[i], cellIndices: adjacency.subarray(offsets[i], offsets[i + 1]),
