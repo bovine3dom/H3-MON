@@ -1,4 +1,5 @@
 import {MapboxOverlay} from '@deck.gl/mapbox'
+import {splitMapGet, splitMapHas, splitMapSet} from './split-index.js'
 import {H3HexagonLayer, TileLayer} from '@deck.gl/geo-layers'
 import {BitmapLayer, GeoJsonLayer } from '@deck.gl/layers'
 import {PackedH3FillTransition, PackedH3HexagonLayer} from 'faster-h3-for-deckgl'
@@ -710,27 +711,6 @@ function ensureH3StringColumn(cols, label = 'h3.index_strings.from_split') {
     cols._h3Strings = strings
     doneStrings()
     return strings
-}
-
-function splitMapGet(root, lower, upper) {
-    const byLower = root.get(upper)
-    return byLower ? byLower.get(lower) : undefined
-}
-
-function splitMapHas(root, lower, upper) {
-    const byLower = root.get(upper)
-    return byLower ? byLower.has(lower) : false
-}
-
-function splitMapSet(root, lower, upper, value) {
-    let byLower = root.get(upper)
-    if (!byLower) {
-        byLower = new Map()
-        root.set(upper, byLower)
-    }
-    const isNew = !byLower.has(lower)
-    byLower.set(lower, value)
-    return isNew
 }
 
 function createSplitH3ToXYMap() {
