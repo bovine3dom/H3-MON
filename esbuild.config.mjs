@@ -20,6 +20,8 @@ const isWatch = process.argv.includes('--watch');
 const options = {
   entryPoints: ['src/app.js'],
   bundle: true,
+  // All consumers support H3 v4. Share the root package and its 32 MiB heap.
+  alias: {'h3-js': 'h3-js'},
   outfile: 'www/app.js',
   minify: !isWatch,
   plugins: [nodeBuiltinPlugin],
