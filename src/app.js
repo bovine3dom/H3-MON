@@ -1,5 +1,6 @@
 import {MapboxOverlay} from '@deck.gl/mapbox'
 import {splitMapGet, splitMapHas, splitMapSet} from './split-index.js'
+import {groupedRows} from './grouped-rows.js'
 import {H3HexagonLayer, TileLayer} from '@deck.gl/geo-layers'
 import {BitmapLayer, GeoJsonLayer } from '@deck.gl/layers'
 import {PackedH3FillTransition, PackedH3HexagonLayer} from 'faster-h3-for-deckgl'
@@ -440,7 +441,11 @@ async function materializeArrowColumn(table, name, labelPrefix) {
     const label = `${labelPrefix}.${name}`
     const estimate = loadProgress.estimates[label] || LOAD_PROGRESS_DEFAULTS[label] || 0
     if (estimate > 50) await yieldToPaint(LOAD_PROGRESS_LABELS[label])
-    return measurePerf(label, {rows: column.length}, () => column.toArray())
+    return measurePerf(label, {rows: column.length}, () => {
+        const values = column.toArray()
+        return (name === H3_INDEX_LOWER || name === H3_INDEX_UPPER) && Array.isArray(values)
+            && column.nullCount === 0 ? Uint32Array.from(values) : values
+    })
 }
 
 async function materializeArrowColumns(table, names, labelPrefix) {
@@ -786,7 +791,6 @@ function buildCartogramAggregation(rawCols) {
     const prominence = []
     const index = []
     const anchorIndex = []
-    const h3RowsByCell = []
     const codeCounts = []
     const labelStats = []
 
@@ -801,12 +805,10 @@ function buildCartogramAggregation(rawCols) {
             cellByKey.set(key, cellIndex)
             x.push(cx)
             y.push(cy)
-            h3RowsByCell.push([])
             codeCounts.push(new Map())
             labelStats.push(new Map())
         }
         rowCell[i] = cellIndex
-        h3RowsByCell[cellIndex].push(i)
 
         if (rawCols.code && rawCols.code[i] != null) addCount(codeCounts[cellIndex], toNumber(rawCols.code[i]) / 1000)
         if (rawCols.label && (!rawCols.label.isValid || rawCols.label.isValid(i))) {
@@ -825,7 +827,8 @@ function buildCartogramAggregation(rawCols) {
 
     if (weights) {
         const doneWeightValues = detailPerfTimer('cartogram.weights.values_precompute', {rows: rowCount})
-        weightValues = new Float64Array(rowCount)
+        weightValues = weights instanceof Float32Array || weights instanceof Float64Array
+            ? weights : new Float64Array(rowCount)
         let invalidWeights = 0
         for (let i = 0; i < rowCount; i++) {
             const weight = toFiniteNumber(weights[i])
@@ -856,7 +859,7 @@ function buildCartogramAggregation(rawCols) {
         weights,
         weightValues,
         rowCell,
-        h3RowsByCell,
+        h3RowsByCell: groupedRows(rowCell, x.length),
         cellH3StringCache: [],
         x,
         y,
