@@ -27,9 +27,14 @@ indices](https://h3geo.org/).
 | `weight` | number, optional | weight for scaling and aggregation |
 | other stuff | optional | gets bunged in the tooltip |
 
-Arrow files can be stream (IPC) or random access (...file. yeah they really do
-call them arrow file files.) but they must be uncompressed and have no
-dictionary encoded strings.
+Arrow input can use IPC files or streams. Ordinary dictionary encoding is
+supported, including strings. Use uncompressed IPC and the existing server
+compression policy.
+
+Cartogram exports use ordinary IPC files without per-batch replacement
+dictionaries or optional row reduction. H3-MON uses Arrow's public column
+conversion API. It does not apply importance-based row culling. This policy
+does not change query-result streams or colour-scale trimming.
 
 ### example query
 
