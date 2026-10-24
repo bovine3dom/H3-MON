@@ -4,6 +4,26 @@ export function settingEnabled(value, fallback = false) {
     return !['0', 'false', 'off', 'no'].includes(String(value).trim().toLowerCase())
 }
 
+export function compileScale(scale) {
+    if (scale == null) return null
+    if (typeof scale === 'function') return scale
+    if (typeof scale === 'string') {
+        const formatter = new Function('"use strict"; return (' + scale + ')')()
+        if (typeof formatter !== 'function') throw new Error('Scale must evaluate to a function.')
+        return formatter
+    }
+    if (typeof scale !== 'object' || Array.isArray(scale)) throw new Error('Scale must be a label object or function expression.')
+    const entries = Object.entries(scale)
+    if (!entries.length || entries.some(([key]) => !key.trim() || !Number.isFinite(Number(key)))) {
+        throw new Error('Scale must contain numeric breakpoints and labels.')
+    }
+    return value => entries.reduce((best, entry) => Math.abs(entry[0] - value) < Math.abs(best[0] - value) ? entry : best)[1]
+}
+
+export function formatValue(value, scale, precision = 2) {
+    return scale ? scale(value) : parseFloat(value.toPrecision(precision)).toLocaleString()
+}
+
 export function leadingThrottleDebounce(callback, wait = 350) {
     let timer = null
     let trailingArgs = null
@@ -157,7 +177,7 @@ export const SETTINGS_SCHEMA = [
     {
         key: 'scale',
         name: 'Scale labels',
-        description: 'Map numeric values to legend labels in raw-value mode.',
+        description: 'Use a JSON object to map numeric values to legend labels in raw-value mode, or enter a JavaScript function expression for display in all modes.',
         group: 'Values',
         type: 'scale',
         defaultValue: null,
@@ -453,12 +473,8 @@ export function validateSettingValue(setting, value) {
     if (setting.type === 'select' && !setting.options.some(option => option.value === value)) {
         return `${setting.name} has an unsupported value.`
     }
-    if (setting.type === 'scale' && value != null) {
-        if (!value || typeof value !== 'object' || Array.isArray(value)) return `${setting.name} must contain numeric breakpoints and labels.`
-        if (!Object.keys(value).length) return `${setting.name} must contain at least one breakpoint.`
-        for (const key of Object.keys(value)) {
-            if (key.trim() === '' || !Number.isFinite(Number(key))) return `${setting.name} breakpoint “${key}” is not numeric.`
-        }
+    if (setting.type === 'scale') {
+        try { compileScale(value) } catch (error) { return `${setting.name}: ${error.message}` }
     }
     return null
 }

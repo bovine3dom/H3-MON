@@ -17,10 +17,10 @@ function element(tag, className, text) {
 
 function makeScaleControl(value) {
     const input = document.createElement('textarea')
-    input.placeholder = '{"0":"Low","1":"High"}'
+    input.placeholder = '{"0":"Low","1":"High"} or value => value.toFixed(1)'
     input.rows = 3
     const write = nextValue => {
-        input.value = nextValue == null ? '' : typeof nextValue === 'string' ? nextValue : JSON.stringify(nextValue)
+        input.value = nextValue == null ? '' : typeof nextValue === 'object' ? JSON.stringify(nextValue) : String(nextValue)
     }
     write(value)
     return {

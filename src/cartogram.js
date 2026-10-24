@@ -33,6 +33,7 @@ export function render_cartogram(container, data, options = {}) {
         svgPerf = false,
         debug = false,
         get_color = defaultGetColour,
+        format_value = v => parseFloat(v.toPrecision(3)).toLocaleString(),
         color_transition_duration = 500,
         onclick_callback = console.log,
         onmove_callback = () => {},
@@ -927,7 +928,7 @@ export function render_cartogram(container, data, options = {}) {
                     ? `${parts.slice(0, 3).join(", ")}, … (${parts.length})`
                     : val
             } else if (typeof val === 'number') {
-                displayVal = parseFloat(val.toPrecision(3)).toLocaleString()
+                displayVal = key === 'value' ? format_value(val) : parseFloat(val.toPrecision(3)).toLocaleString()
             }
             if (displayVal != null && displayVal !== '') rows.push(`<div><strong>${escapeHtml(key)}:</strong> ${escapeHtml(displayVal)}</div>`)
         }

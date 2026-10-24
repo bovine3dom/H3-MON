@@ -15,7 +15,7 @@ import {findMostPopulousCityForCell} from './city-label-lookup'
 import {render_cartogram} from './cartogram'
 import {strokeCoverage, projectStroke} from './cartogram-line'
 import {createSettingsPanel} from './settings-panel'
-import {SETTINGS_SCHEMA, colourScale, effectiveSettingValue, fixedLegendScale, readSettingLayers, serializeSettingValue, settingEnabled, updateUrlSettingOverrides} from './settings'
+import {SETTINGS_SCHEMA, colourScale, compileScale, effectiveSettingValue, fixedLegendScale, formatValue, readSettingLayers, serializeSettingValue, settingEnabled, updateUrlSettingOverrides} from './settings'
 import {centralLinkedH3, createInteractions} from './interactions'
 import {createRequestStatus} from './request-status'
 import {createRequestControls} from './request-controls'
@@ -1461,6 +1461,7 @@ function bootstrap(meta = {}){
     const metadataSettings = settingLayers.metadata
     let settingOverrides = settingLayers.overrides
     let settings = settingLayers.settings
+    let scaleFormatter = compileScale(settings.scale)
     function refreshCrosshair() {
         document.getElementById('reticule').hidden = !(settingEnabled(settings.crosshair, true)
             && typeof settings.onmove?.url === 'string' && settings.onmove.url.trim())
@@ -2400,6 +2401,7 @@ function bootstrap(meta = {}){
                             debug: syncDebugEnabled,
                             draw_outline: false,
                             get_color: getCssColour,
+                            format_value: v => formatValue(v, scaleFormatter, 3),
                             color_transition_duration: COLOUR_TRANSITION_DURATION,
                             include_outer_borders: true,
                             data_col: cartoDataCol,
@@ -2706,9 +2708,9 @@ function bootstrap(meta = {}){
         return h3DataRowLookup.map.get(String(h3Index)) ?? null
     }
 
-    function formatDataValue(v) {
+    function formatDataValue(v, key) {
         if (v == null) return ''
-        if (typeof v === 'number') return parseFloat(v.toPrecision(4)).toLocaleString()
+        if (typeof v === 'number') return formatValue(v, key === 'value' ? scaleFormatter : undefined, 4)
         if (typeof v === 'object') return JSON.stringify(v)
         return v
     }
@@ -2729,7 +2731,7 @@ function bootstrap(meta = {}){
         }
         return rows
             .filter(([, value]) => value != null && value !== '')
-            .map(([key, value]) => `<div><strong>${escapeHtml(key)}</strong>: ${escapeHtml(formatDataValue(value))}</div>`)
+            .map(([key, value]) => `<div><strong>${escapeHtml(key)}</strong>: ${escapeHtml(formatDataValue(value, key))}</div>`)
             .join('')
     }
 
@@ -3859,18 +3861,13 @@ function bootstrap(meta = {}){
         const options = {color: d3.scaleSequential(colourRamp), marginTop: 0, height: 32}
         let legend
         try {
-            if (fmt !== undefined) {
-                legend = observablehq.legend({...options, tickFormat: v => {
-                    const value = fmt(v)
-                    return Number.isFinite(value) ? parseFloat(value.toPrecision(2)).toLocaleString() : ''
-                }})
-            } else {
-                if (settings.scale) {
-                    const fmt = v => settings['scale'][Object.keys(settings['scale']).map(x => [x, Math.abs(x - v)]).sort((l,r)=>l[1] - r[1])[0][0]]
-                    options.tickFormat = fmt
+            if (fmt !== undefined || scaleFormatter) {
+                options.tickFormat = v => {
+                    const value = fmt === undefined ? v : fmt(v)
+                    return Number.isFinite(value) ? formatValue(value, scaleFormatter) : ''
                 }
-                legend = observablehq.legend(options)
             }
+            legend = observablehq.legend(options)
         } catch(e) {
             console.warn(e)
             legend = observablehq.legend({...options, tickFormat: undefined})
@@ -3930,6 +3927,7 @@ function bootstrap(meta = {}){
 
     function activateSettings(nextSettings, changedKeys) {
         settings = nextSettings
+        if (changedKeys.has('scale')) scaleFormatter = compileScale(settings.scale)
         refreshCrosshair()
         infill = settingEnabled(settings.infill, false)
         minimumFractionCoverage = coverageThreshold(settings)

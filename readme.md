@@ -93,7 +93,7 @@ Put metadata alongside the data: `www/data/example.json` for `example.arrow`,
 | `trimFactor` | Fraction to trim from each end of the legend |
 | `quantileSource` | Scale against visible `map` (default) or `cartogram` values. |
 | `legendBounds` | Fixed linear bounds `[min,max]`|
-| `scale` | Numeric breakpoints and custom legend labels, or `null`. |
+| `scale` | Numeric breakpoint labels, a JavaScript formatter function, or `null` |
 | `trains` | Show OpenRailwayMap maximum-speed tiles. |
 | `crosshair` | Mark the map centre when `onmove` is enabled. default true. |
 | `cartogram` | Mapping filename, blank/default for `cartogram_weights.arrow`, or `none`. which probably is a bad choice given most people don't have cartogram mappings. |

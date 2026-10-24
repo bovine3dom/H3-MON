@@ -42,6 +42,9 @@ const json = (path, data) => routes.set(path, ['application/json', JSON.stringif
 json('/toner_ofm_moderatlist.json', style);
 json('/data/rendering.json', {cartogram: 'none', raw: true, colourScheme: 'interpolateReds'});
 json('/data/settings.json', {cartogram: 'none', colourScale: 'rankit', trimFactor: 0});
+json('/data/clock.json', {cartogram: 'none', colourScale: 'linear', legendBounds: [20, 1117],
+    scale: 'value => new Date(Math.round(value) * 60000).toISOString().slice(11, 16)'});
+routes.set('/data/clock.arrow', ['application/octet-stream', valuesFor(cells, [1117, 20, 59.6, 1439.6])]);
 json('/data/coverage.json', {cartogram: 'coverage-cartogram_hilo.arrow', minimumFractionCoverage: 0.5, trimFactor: 0});
 routes.set('/data/coverage.arrow', ['application/octet-stream', arrow({...columns, value: Float64Array.from([0.6, NaN, 0, 0.8])})]);
 routes.set('/data/coverage-cartogram_hilo.arrow', ['application/octet-stream', arrow({...columns,
@@ -522,6 +525,37 @@ try {
             assert(await predicateError.isVisible());
             assert.match(await predicateError.textContent(), /visibility-test-failure/);
             console.log(`${device}: conditional request controls passed`);
+
+            await page.goto(url('clock.arrow'));
+            await displayed(page, 1117);
+            const clockTicks = () => page.locator('#observable_legend .tick').allTextContents();
+            assert.equal((await clockTicks())[0], '00:20');
+            assert.equal((await clockTicks()).at(-1), '18:37');
+            const hoverPoint = await page.evaluate(center => {
+                const point = m.project(center), rect = m.getCanvas().getBoundingClientRect();
+                return [rect.x + point.x, rect.y + point.y];
+            }, center);
+            await page.mouse.move(...hoverPoint);
+            await page.locator('.h3-hover-tooltip').waitFor({state: 'visible'});
+            assert.match(await page.locator('.h3-hover-tooltip').textContent(), /value: 18:37/);
+            await page.locator('#settingsBtn').click();
+            const scaleInput = page.locator('textarea#setting-scale');
+            await scaleInput.fill('value => {');
+            assert.equal(await scaleInput.getAttribute('aria-invalid'), 'true');
+            await scaleInput.fill('{"20":"Start","1117":"End"}');
+            await setting(page, 'scale', 'json:{"20":"Start","1117":"End"}');
+            await settle(page);
+            assert.equal((await clockTicks())[0], 'Start');
+            assert.equal((await clockTicks()).at(-1), 'End');
+            const clockSource = 'v => new Date(Math.round(v) * 60000).toISOString().slice(11, 16)';
+            await scaleInput.fill(clockSource);
+            await setting(page, 'scale', clockSource);
+            await page.reload();
+            await displayed(page, 1117);
+            assert.equal((await clockTicks())[0], '00:20');
+            assert.equal((await clockTicks()).at(-1), '18:37');
+            console.log(`${device}: scale objects, functions, clock tooltips and shared URLs passed`);
+            if (process.argv.includes('--scale-only')) continue;
 
             await page.goto(url('settings.arrow&raw=true&linear=true'));
             await displayed(page, 10);

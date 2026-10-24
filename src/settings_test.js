@@ -1,5 +1,5 @@
 import {
-    SETTINGS_BY_KEY, colourScale, effectiveSettingValue, fixedLegendScale,
+    SETTINGS_BY_KEY, colourScale, compileScale, effectiveSettingValue, fixedLegendScale, formatValue,
     parseSettingValue, readSettingLayers, serializeSettingValue, updateUrlSettingOverrides, validateSettingValue,
 } from './settings.js'
 
@@ -103,6 +103,7 @@ Deno.test('typed settings round-trip while legacy strings retain their meaning',
 
 Deno.test('validation and fixed scales preserve bounds, missing values and inverse units', () => {
     for (const [key, good, bad] of [
+        ['scale', 'value => value.toFixed(1)', 'value => {'],
         ['colourScale', 'rankit', 'unknown'], ['trimFactor', 0, 0.5], ['minimumFractionCoverage', 0.5, 1.1],
         ['scale', {'0': 'Low'}, {nope: 'Low'}], ['legendBounds', [0, 1], [2, 1]],
     ]) {
@@ -116,4 +117,32 @@ Deno.test('validation and fixed scales preserve bounds, missing values and inver
     assert(fixedLegendScale([0, Infinity]) === null)
     const [constant, label] = fixedLegendScale([7, 7])
     assert(constant(7) === 0.5 && label(0) === 7 && label(1) === 7)
+})
+
+Deno.test('scale functions format original values with caller-defined units', () => {
+    const clock = compileScale('value => new Date(Math.round(value) * 60000).toISOString().slice(11, 16)')
+    for (const [value, expected] of [[1117, '18:37'], [20, '00:20'], [0, '00:00'],
+        [59.6, '01:00'], [1439.6, '00:00'], [1440, '00:00'], [-1, '23:59']]) {
+        assert(formatValue(value, clock) === expected)
+    }
+    assert(formatValue(1117) === (1100).toLocaleString())
+    assert(formatValue(1117, null, 4) === (1117).toLocaleString())
+    assert(formatValue(1500, compileScale('v => `${v / 1000} km`')) === '1.5 km')
+    const [, value] = fixedLegendScale([20, 1117])
+    assert(formatValue(value(0), clock) === '00:20')
+    assert(formatValue(value(1), clock) === '18:37')
+})
+
+Deno.test('scale objects and functions validate and round-trip through metadata and URLs', () => {
+    const setting = SETTINGS_BY_KEY.get('scale'), source = 'v => v.toFixed(1)'
+    const labels = compileScale({'0': 'Low', '1': 'High'})
+    assert(labels(0.2) === 'Low' && labels(0.8) === 'High')
+    assert(compileScale(null) === null)
+    assert(compileScale(v => String(v))(2) === '2')
+    for (const value of ['42', 'v => {', '{}', [], {}, {'nope': 'Bad'}]) assert(validateSettingValue(setting, value) !== null)
+    assert(compileScale(readSettingLayers({scale: source}).settings.scale)(2) === '2.0')
+    const url = new URL('https://example.test/?data=sunset.arrow')
+    updateUrlSettingOverrides(url, {scale: source})
+    assert(readSettingLayers({}, url.searchParams).settings.scale === source)
+    assert(compileScale(readSettingLayers({}, url.searchParams).settings.scale)(2) === '2.0')
 })
