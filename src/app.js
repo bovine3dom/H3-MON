@@ -3,6 +3,8 @@ import {splitMapGet, splitMapHas, splitMapSet} from './split-index.js'
 import {groupedRows} from './grouped-rows.js'
 import {createPackedH3Map} from './packed-h3-map.js'
 import {compactCartogramColumns} from './compact-cartogram.js'
+import {aggregateGeoJSONCartogram} from './geojson-cartogram.js'
+import {addWeightedValue, toFiniteNumber, weightedMean} from './numeric.js'
 import {arrowColumnValues} from './arrow-columns.js'
 import {H3HexagonLayer, TileLayer} from '@deck.gl/geo-layers'
 import {BitmapLayer, GeoJsonLayer } from '@deck.gl/layers'
@@ -606,6 +608,9 @@ let hex_flying = false
 let hexFlyToken = 0
 let h3toXY = null
 let cartogramApi = null
+let cartogramViewMode = null
+let geojsonCartogramLinks = null
+let geojsonHighlightLayer = null
 let cartogramEnabled = false
 let cartogramInit = null
 let cartogramWeightsFile = null
@@ -650,17 +655,6 @@ function dominantLabel(statsByLabel) {
 
 function toNumber(value) {
     return typeof value === 'bigint' ? Number(value) : value
-}
-
-function toFiniteNumber(value) {
-    if (value == null) return null
-    if (typeof value === 'string') {
-        value = value.trim()
-        if (value === '') return null
-    }
-    if (!['bigint', 'number', 'string'].includes(typeof value)) return null
-    const number = Number(value)
-    return Number.isFinite(number) ? number : null
 }
 
 function toStringValue(value) {
@@ -1449,8 +1443,11 @@ function bootstrap(meta = {}){
     mapHoverTooltip.style.display = 'none'
     mapContainer.appendChild(mapHoverTooltip)
     let hoveredMapH3 = null
+    let hoveredMapGeoJSONId = null
     let pendingMapHover = null
     let mapHoverRaf = null
+    let pendingGeoJSONHover = null
+    let geoJSONHoverRaf = null
     let suppressMapHoverUntil = 0
     const sidePane = document.getElementById('side-pane')
     const cartogramContainer = document.getElementById('cartogram')
@@ -1910,12 +1907,10 @@ function bootstrap(meta = {}){
             }
             if (observedSourceH3s) observedSourceH3s.add(splitSource ? splitLongToH3Index(sourceH3, sourceH3Upper) : sourceH3)
 
-            if (weight == null) {
+            if (!addWeightedValue(numerator, denominator, targetIndex, value, weight)) {
                 invalidWeights++
                 return
             }
-            numerator[targetIndex] += value * weight
-            denominator[targetIndex] += weight
             contributorValuesUsed++
         })
 
@@ -1934,8 +1929,9 @@ function bootstrap(meta = {}){
         let targetsWithData = 0
         let targetsMissing = 0
         for (let i = 0; i < targetCount; i++) {
-            if (denominator[i] && (!totalWeightByTarget || totalWeightByTarget[i] > 0 && coveredWeightByTarget[i] / totalWeightByTarget[i] >= minimumFractionCoverage)) {
-                values[i] = numerator[i] / denominator[i]
+            const mean = weightedMean(numerator, denominator, i)
+            if (mean != null && (!totalWeightByTarget || totalWeightByTarget[i] > 0 && coveredWeightByTarget[i] / totalWeightByTarget[i] >= minimumFractionCoverage)) {
+                values[i] = mean
                 targetsWithData++
             } else {
                 values[i] = null
@@ -1994,20 +1990,19 @@ function bootstrap(meta = {}){
                 targetsWithObservedData++
             }
 
-            if (!Number.isFinite(weight)) {
+            if (!addWeightedValue(numerator, denominator, targetIndex, value, weight)) {
                 invalidWeights++
                 continue
             }
-            numerator[targetIndex] += value * weight
-            denominator[targetIndex] += weight
             contributorValuesUsed++
         }
 
         let targetsWithData = 0
         let targetsMissing = 0
         for (let i = 0; i < cellCount; i++) {
-            if (denominator[i] && (!totalWeightByTarget || totalWeightByTarget[i] > 0 && coveredWeightByTarget[i] / totalWeightByTarget[i] >= minimumFractionCoverage)) {
-                values[i] = numerator[i] / denominator[i]
+            const mean = weightedMean(numerator, denominator, i)
+            if (mean != null && (!totalWeightByTarget || totalWeightByTarget[i] > 0 && coveredWeightByTarget[i] / totalWeightByTarget[i] >= minimumFractionCoverage)) {
+                values[i] = mean
                 targetsWithData++
             } else {
                 values[i] = null
@@ -2240,6 +2235,8 @@ function bootstrap(meta = {}){
             cartogramReady?.catch(() => {})
             const h3res = schemaHasH3Index && h3RowCount(dataCols) ? getResolution(h3IndexInputAt(dataCols, 0)) : dataH3Res
             dataH3Res = h3res
+            geojsonCartogramLinks = null
+            geojsonHighlightLayer = null
             const valuekey = doQuantiles ? 'quantile' : 'value'
             let getquantileFn
             let getvalueFn
@@ -2342,6 +2339,10 @@ function bootstrap(meta = {}){
                     }
                     activeCartogramDataCol = cartoDataCol
 
+                    if (cartogramApi && cartogramViewMode !== 'h3') {
+                        cartogramApi.destroy()
+                        cartogramApi = null
+                    }
                     if (!cartogramApi) {
                         setLoadStage('Showing cartogram pane')
                         await current(ensureCartogramPaneLaidOut('initial-render'))
@@ -2402,6 +2403,7 @@ function bootstrap(meta = {}){
                             }
                         })
                         doneRenderCartogram()
+                        cartogramViewMode = 'h3'
                         setLoadStage('Fitting cartogram to map')
                         await current(nextPaint())
                         svgPerfLog('cartogram.initial_fit.layout', cartogramLayoutDetails())
@@ -2488,6 +2490,7 @@ function bootstrap(meta = {}){
 
         let data
         let valuekey = 'value'
+        let geojsonGetquantile = null
         if (doQuantiles && (format.layer === 'hex' || format.layer === 'geojson')) {
             setLoadStage('Calculating quantiles')
             let values, weights
@@ -2505,6 +2508,7 @@ function bootstrap(meta = {}){
             }
             const doneEcdf = perfTimer('data.quantile.ecdf', {rows: values.length, weighted: !!weights})
             const [getquantile, getvalue] = fixedScale || ecdf(values, trimFactor, weights)
+            if (format.layer === 'geojson') geojsonGetquantile = getquantile
             doneEcdf()
             if (format.layer === 'hex') {
                 const doneQuantileAssign = perfTimer('data.quantile.assign', {rows: values.length})
@@ -2550,19 +2554,62 @@ function bootstrap(meta = {}){
         }
 
         if (format.layer === 'geojson') {
+            hideMapHoverTooltip()
+            dataH3Res = null
+            geojsonCartogramLinks = null
+            geojsonHighlightLayer = null
             setLoadStage('Preparing GeoJSON layer')
-            const getColor = f => {
-                const v = valuekey === 'quantile' ? f.properties?.quantile : (f.properties?.value ?? f.value ?? f.properties?.val)
-                return getColour(v)
+            let cartoData = null
+            let cartoDataCol = null
+            let cartoMissingValueRows = 0
+            if (cartogramEnabled && settings.cartogramSourceIdColumn) {
+                cartogramWeightsFile = cartogramFile(settings.cartogram)
+                const response = await current(fetch(`data/${cartogramWeightsFile}`, {signal}))
+                if (!response.ok) throw new Error(`Failed to load ${cartogramWeightsFile}: HTTP ${response.status}`)
+                const buffer = await current(response.arrayBuffer())
+                const table = await current(parseArrowTable(buffer, 'cartogram.weights.arrow_parse', {bytes: buffer.byteLength}))
+                const fields = table.schema.fields.map(field => field.name)
+                const columns = await current(materializeArrowColumns(
+                    table, fields, 'cartogram.weights.column',
+                ))
+                const aggregation = aggregateGeoJSONCartogram(data, columns, settings.cartogramIdProperty || 'id', settings.cartogramSourceIdColumn)
+                cartoMissingValueRows = aggregation.missingValueRows
+                cartoData = aggregation.cartogram
+                geojsonCartogramLinks = aggregation.links
+                if (doQuantiles) {
+                    if (useCartogramQuantiles) {
+                        const [getquantile, getvalue] = fixedScale || ecdf(cartoData.value_mean, trimFactor)
+                        geojsonGetquantile = getquantile
+                        data = {
+                            ...data,
+                            features: data.features.map(feature => ({
+                                ...feature,
+                                properties: {
+                                    ...feature.properties,
+                                    quantile: getquantile(feature.properties?.value ?? feature.value ?? feature.properties?.val),
+                                },
+                            })),
+                        }
+                        makeLegend(getvalue)
+                    }
+                    cartoData.carto_quantile = assignQuantiles(cartoData.value_mean, geojsonGetquantile)
+                }
+                cartoDataCol = doQuantiles ? 'carto_quantile' : 'value_mean'
+            }
+            const getColor = feature => {
+                const value = valuekey === 'quantile'
+                    ? feature.properties?.quantile
+                    : (feature.properties?.value ?? feature.value ?? feature.properties?.val)
+                return getColour(value)
             }
             const doneGeoJsonLayer = perfTimer('deck.geojson_layer.create', {rows: data.features.length})
             const layer = new GeoJsonLayer({
                 id: 'GeoJsonLayer',
-                data: data,
+                data,
                 filled: true,
                 stroked: true,
                 getFillColor: getColor,
-                getLineColor: f => { const rgba = getColor(f); return rgba[3] === 0 ? rgba : [...rgba.slice(0,3), 255] },
+                getLineColor: feature => { const rgba = getColor(feature); return rgba[3] === 0 ? rgba : [...rgba.slice(0,3), 255] },
                 getLineWidth: 1000,
                 lineWidthMinPixels: 1,
                 lineJointRounded: true,
@@ -2571,10 +2618,67 @@ function bootstrap(meta = {}){
                 lineWidthUnits: 'meters',
                 lineBillboard: true,
                 transitions: {getFillColor: colourTransition, getLineColor: colourTransition},
-                pickable: false
+                pickable: true,
+                onClick: info => {
+                    const feature = info.object
+                    const id = feature?.properties?.[settings.cartogramIdProperty || 'id'] ?? feature?.id
+                    if (id == null) return false
+                    restoreSelection({event: 'onclick', feature_id: String(id)})
+                        .catch(error => console.warn('Could not highlight linked cartogram cells', error))
+                    return true
+                },
+                onHover: scheduleGeoJSONHoverTooltip,
             })
             doneGeoJsonLayer()
-            doneGetHexData({rows: data.features.length})
+            await current(publishLayer(layer))
+            if (cartoData) {
+                if (cartogramApi && cartogramViewMode !== 'geojson') {
+                    cartogramApi.destroy()
+                    cartogramApi = null
+                }
+                cartoAggCols = cartoData
+                activeCartogramDataCol = cartoDataCol
+                cartogramLoadError = null
+                await current(ensureCartogramPaneLaidOut('geojson-cartogram'))
+                if (!cartogramApi) {
+                    await current(yieldToPaint('Drawing GeoJSON cartogram'))
+                    cartogramApi = render_cartogram('#cartogram', cartoData, {
+                        perf: perfEnabled,
+                        svgPerf: svgPerfEnabled,
+                        debug: syncDebugEnabled,
+                        get_color: getCssColour,
+                        format_value: value => formatValue(value, scaleFormatter, 3),
+                        color_transition_duration: COLOUR_TRANSITION_DURATION,
+                        include_outer_borders: true,
+                        data_col: cartoDataCol,
+                        onviewchange_callback: (_data, visibleIndices) => updateViewportQuantiles('cartogram', visibleIndices),
+                        onmove_callback: (_data, visibleIndices) => fitMapToGeoJSONCartogramCells(visibleIndices),
+                        onclick_callback: (_data, _event, index) => {
+                            restoreSelection({event: 'onclick', cartogram: [cartoAggCols.x[index], cartoAggCols.y[index]]})
+                                .catch(error => console.warn('Could not highlight linked GeoJSON features', error))
+                        },
+                    })
+                } else {
+                    cartogramApi.updateData(cartoData, cartoDataCol)
+                }
+                cartogramViewMode = 'geojson'
+                const xMin = Math.min(...cartoData.x)
+                const xMax = Math.max(...cartoData.x)
+                const yMin = Math.min(...cartoData.y)
+                const yMax = Math.max(...cartoData.y)
+                await current(nextPaint())
+                cartogramApi.fitToBounds([[xMin - 1, yMin - 1, xMax + 1, yMax + 1]], 0)
+                fitGeoJSONCartogramToMapBounds()
+                document.body.classList.add('cartogram-ready')
+            } else if (cartogramApi) {
+                cartogramApi.destroy()
+                cartogramApi = null
+                cartogramViewMode = null
+                cartoAggCols = null
+                activeCartogramDataCol = null
+                document.body.classList.remove('cartogram-ready')
+            }
+            doneGetHexData({rows: data.features.length, cartogramRows: cartoData?.x.length ?? 0, missingValueRows: cartoMissingValueRows})
             return layer
         }
     }
@@ -2687,13 +2791,26 @@ function bootstrap(meta = {}){
             .join('')
     }
 
+    function geoJSONTooltipHtml(feature) {
+        return Object.entries(feature?.properties || {})
+            .filter(([, value]) => value != null && value !== '')
+            .map(([key, value]) => `<div><strong>${escapeHtml(key)}</strong>: ${escapeHtml(formatDataValue(value, key))}</div>`)
+            .join('')
+    }
+
     function hideMapHoverTooltip() {
         pendingMapHover = null
+        pendingGeoJSONHover = null
         if (mapHoverRaf !== null) {
             cancelAnimationFrame(mapHoverRaf)
             mapHoverRaf = null
         }
+        if (geoJSONHoverRaf !== null) {
+            cancelAnimationFrame(geoJSONHoverRaf)
+            geoJSONHoverRaf = null
+        }
         hoveredMapH3 = null
+        hoveredMapGeoJSONId = null
         mapHoverTooltip.style.display = 'none'
     }
 
@@ -2738,6 +2855,7 @@ function bootstrap(meta = {}){
     }
 
     function scheduleMapHoverTooltip(event) {
+        if (dataH3Res == null) return
         if (now() < suppressMapHoverUntil || event.originalEvent?.sourceCapabilities?.firesTouchEvents) {
             hideMapHoverTooltip()
             return
@@ -2748,6 +2866,37 @@ function bootstrap(meta = {}){
             lng: event.lngLat.lng,
         }
         if (mapHoverRaf === null) mapHoverRaf = requestAnimationFrame(updateMapHoverTooltip)
+    }
+
+    function updateGeoJSONHoverTooltip() {
+        geoJSONHoverRaf = null
+        const hover = pendingGeoJSONHover
+        pendingGeoJSONHover = null
+        if (!hover || updateRunning || (typeof map.isMoving === 'function' && map.isMoving())) {
+            hideMapHoverTooltip()
+            return
+        }
+        const feature = hover.feature
+        const id = String(feature.properties?.[settings.cartogramIdProperty || 'id'] ?? feature.id ?? '')
+        if (id !== hoveredMapGeoJSONId) {
+            hoveredMapGeoJSONId = id
+            mapHoverTooltip.innerHTML = geoJSONTooltipHtml(feature)
+            mapHoverTooltip.style.display = 'block'
+        }
+        positionMapHoverTooltip(hover.point)
+    }
+
+    function scheduleGeoJSONHoverTooltip(info) {
+        if (now() < suppressMapHoverUntil || info.srcEvent?.sourceCapabilities?.firesTouchEvents) {
+            hideMapHoverTooltip()
+            return
+        }
+        if (!info.object) {
+            hideMapHoverTooltip()
+            return
+        }
+        pendingGeoJSONHover = {feature: info.object, point: {x: info.x, y: info.y}}
+        if (geoJSONHoverRaf === null) geoJSONHoverRaf = requestAnimationFrame(updateGeoJSONHoverTooltip)
     }
 
     async function focusCartogramForH3(h3Index, {focus = true, highlight = true} = {}) {
@@ -2776,6 +2925,87 @@ function bootstrap(meta = {}){
         if (focus) cartogramApi.fitToBounds([[xMin - padding, yMin - padding, xMax + padding, yMax + padding]])
     }
 
+    function highlightGeoJSONCodes(codes) {
+        const features = geojsonCartogramLinks
+            ? [...new Set(codes.map(String))].map(code => geojsonCartogramLinks.featureById.get(code)).filter(Boolean)
+            : []
+        geojsonHighlightLayer = features.length ? new GeoJsonLayer({
+            id: 'geojson-highlight',
+            data: {type: 'FeatureCollection', features},
+            filled: false,
+            stroked: true,
+            getLineColor: [255, 0, 0, 255],
+            getLineWidth: 2,
+            lineWidthUnits: 'pixels',
+            lineWidthMinPixels: 2,
+            lineWidthMaxPixels: 3,
+            pickable: false,
+        }) : null
+        if (renderLayers) void renderLayers(false)
+    }
+
+    function clearSelectionHighlights() {
+        hex([])
+        cartogramApi?.highlightCells([])
+        highlightGeoJSONCodes([])
+    }
+
+    function boundsForGeoJSONCodes(codes) {
+        let west = Infinity, south = Infinity, east = -Infinity, north = -Infinity
+        for (const code of new Set(codes.map(String))) {
+            const bounds = geojsonCartogramLinks?.featureBoundsById.get(code)
+            if (!bounds) continue
+            west = Math.min(west, bounds[0])
+            south = Math.min(south, bounds[1])
+            east = Math.max(east, bounds[2])
+            north = Math.max(north, bounds[3])
+        }
+        return west === Infinity ? null : [west, south, east, north]
+    }
+
+    function fitMapToGeoJSONCodes(codes, padding = 200) {
+        const bounds = boundsForGeoJSONCodes(codes)
+        if (!bounds) return
+        const container = map.getContainer()
+        const fitPadding = Math.min(padding, Math.min(container.clientWidth, container.clientHeight) / 4)
+        map.stop()
+        map.fitBounds([[bounds[0], bounds[1]], [bounds[2], bounds[3]]], {padding: fitPadding, maxZoom: 15})
+    }
+
+    function fitCartogramToCellIndices(indices, padding = 20) {
+        if (!cartogramApi || !cartoAggCols) return
+        let xMin = Infinity, yMin = Infinity, xMax = -Infinity, yMax = -Infinity
+        for (const index of new Set(indices)) {
+            if (!Number.isInteger(index) || index < 0 || index >= cartoAggCols.x.length) continue
+            const x = Number(cartoAggCols.x[index]), y = Number(cartoAggCols.y[index])
+            if (!Number.isFinite(x) || !Number.isFinite(y)) continue
+            xMin = Math.min(xMin, x)
+            yMin = Math.min(yMin, y)
+            xMax = Math.max(xMax, x)
+            yMax = Math.max(yMax, y)
+        }
+        if (xMin !== Infinity) cartogramApi.fitToBounds([[xMin - padding, yMin - padding, xMax + padding, yMax + padding]])
+    }
+
+    function fitGeoJSONCartogramToMapBounds() {
+        if (!geojsonCartogramLinks || !cartogramApi || !cartoAggCols) return
+        const bounds = map.getBounds()
+        const west = bounds.getWest(), south = bounds.getSouth(), east = bounds.getEast(), north = bounds.getNorth()
+        const indices = new Set()
+        for (const [code, featureBounds] of geojsonCartogramLinks.featureBoundsById) {
+            if (featureBounds[2] < west || featureBounds[0] > east || featureBounds[3] < south || featureBounds[1] > north) continue
+            for (const index of geojsonCartogramLinks.featureToCells.get(code) || []) indices.add(index)
+        }
+        fitCartogramToCellIndices(indices)
+    }
+
+    function fitMapToGeoJSONCartogramCells(indices, padding = 0) {
+        if (!geojsonCartogramLinks) return
+        const codes = new Set()
+        for (const index of indices) for (const code of geojsonCartogramLinks.cellToFeatures[index] || []) codes.add(code)
+        fitMapToGeoJSONCodes([...codes], padding)
+    }
+
     async function highlightCartogramOrigins(indexes) {
         if (!cartogramApi || !cartoAggCols) return
         const h3map = await ensureH3ToXY()
@@ -2788,9 +3018,9 @@ function bootstrap(meta = {}){
     }
 
     const mapOverlay = new MapboxOverlay({
-        _typedArrayManagerProps: {overAlloc: 1, poolSize: 0},
+        _typedArrayManagerProps: {overAlloc: 2, poolSize: 0},
         interleaved: false,
-        _pickable: false,
+        _pickable: true,
     })
 
     map.addControl(mapOverlay)
@@ -3341,18 +3571,45 @@ function bootstrap(meta = {}){
             await highlightMultiQueryOrigins(query)
             return
         }
-        if (query?.event !== 'onclick' || metadataSettings.onclick?.highlight === false) {
-            hex([])
-            cartogramApi?.highlightCells([])
-            return
-        }
-        if (query.cartogram && cartoAggCols && cartogramApi) {
-            const row = cartoAggCols.x.findIndex((x, i) => x === query.cartogram[0] && cartoAggCols.y[i] === query.cartogram[1])
-            if (row >= 0) {
-                cartogramApi.highlightCells([row])
-                hex(cartogramCellH3Strings(row), {fit: false})
+        const isClick = query?.event === 'onclick'
+        const canFocus = isClick && metadataSettings.onclick?.focus !== false
+        const canHighlight = isClick && metadataSettings.onclick?.highlight !== false
+        if (query?.feature_id != null) {
+            const id = String(query.feature_id)
+            const cells = geojsonCartogramLinks?.featureToCells.get(id) || []
+            if (canFocus) {
+                fitMapToGeoJSONCodes([id])
+                fitCartogramToCellIndices(cells)
+            }
+            if (!canHighlight) {
+                clearSelectionHighlights()
                 return
             }
+            cartogramApi?.highlightCells(cells)
+            highlightGeoJSONCodes([id])
+            return
+        }
+        if (query?.cartogram && cartoAggCols && cartogramApi) {
+            const row = cartoAggCols.x.findIndex((x, i) => x === query.cartogram[0] && cartoAggCols.y[i] === query.cartogram[1])
+            if (row >= 0) {
+                const codes = geojsonCartogramLinks?.cellToFeatures[row] || []
+                if (canFocus) {
+                    fitCartogramToCellIndices([row])
+                    fitMapToGeoJSONCodes(codes)
+                }
+                if (!canHighlight) {
+                    clearSelectionHighlights()
+                    return
+                }
+                cartogramApi.highlightCells([row])
+                if (geojsonCartogramLinks) highlightGeoJSONCodes(codes)
+                else hex(cartogramCellH3Strings(row), {fit: false})
+                return
+            }
+        }
+        if (!canHighlight) {
+            clearSelectionHighlights()
+            return
         }
         const index = query.index || (Number.isFinite(query.index_lower) && Number.isFinite(query.index_upper)
             ? splitLongToH3Index(query.index_lower, query.index_upper)
@@ -3501,6 +3758,7 @@ function bootstrap(meta = {}){
     renderLayers = (trackProgress = true) => {
         const layers = [...mainLayers]
         if (highlightLayer) layers.push(highlightLayer)
+        if (geojsonHighlightLayer) layers.push(geojsonHighlightLayer)
         if (showTrains) {
             layers.push(choochoo)
         }
@@ -3588,6 +3846,9 @@ function bootstrap(meta = {}){
             h3toXY,
             h3toXYPromise,
             cartogramApi,
+            cartogramViewMode,
+            geojsonCartogramLinks,
+            geojsonHighlightLayer,
             activeCartogramDataCol,
             columnData: window._columnData,
             layers: mainLayers,
@@ -3660,6 +3921,9 @@ function bootstrap(meta = {}){
             h3toXY = previousState.h3toXY
             h3toXYPromise = previousState.h3toXYPromise
             cartogramApi = previousState.cartogramApi
+            cartogramViewMode = previousState.cartogramViewMode
+            geojsonCartogramLinks = previousState.geojsonCartogramLinks
+            geojsonHighlightLayer = previousState.geojsonHighlightLayer
             activeCartogramDataCol = previousState.activeCartogramDataCol
             if (cartogramApi && cartoAggCols && activeCartogramDataCol) cartogramApi.updateData(cartoAggCols, activeCartogramDataCol)
             await restoreSelection(previousState.selection)
@@ -3850,7 +4114,10 @@ function bootstrap(meta = {}){
 
     function resetCartogramState() {
         cartogramApi?.destroy()
+        geojsonCartogramLinks = null
+        geojsonHighlightLayer = null
         cartogramApi = null
+        cartogramViewMode = null
         activeCartogramDataCol = null
         cartogramLoadError = null
         cartogramInit = null
@@ -4388,7 +4655,10 @@ function bootstrap(meta = {}){
             })
         }
         updateViewportQuantiles('map')
-        if (cartogramEnabled && shouldSyncCartogram) fitCartogramToMapBounds()
+        if (cartogramEnabled && shouldSyncCartogram) {
+            if (cartogramViewMode === 'geojson') fitGeoJSONCartogramToMapBounds()
+            else fitCartogramToMapBounds()
+        }
     })
 
     function upperBound(array, target) {

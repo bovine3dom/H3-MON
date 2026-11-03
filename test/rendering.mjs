@@ -42,6 +42,25 @@ const json = (path, data) => routes.set(path, ['application/json', JSON.stringif
 json('/toner_ofm_moderatlist.json', style);
 json('/data/rendering.json', {cartogram: 'none', raw: true, colourScheme: 'interpolateReds'});
 json('/data/settings.json', {cartogram: 'none', colourScale: 'rankit', trimFactor: 0});
+const linkedFeatures = ['FEATURE-A', 'FEATURE-B'].map((id, i) => {
+    const [lng, lat] = center
+    const offset = i * 1
+    return {type: 'Feature', id, properties: {id, value: i ? 30 : 10}, geometry: {type: 'Polygon', coordinates: [[
+        [lng + offset - 0.12, lat - 0.1], [lng + offset + 0.12, lat - 0.1],
+        [lng + offset + 0.12, lat + 0.1], [lng + offset - 0.12, lat + 0.1],
+        [lng + offset - 0.12, lat - 0.1],
+    ]]}};
+});
+json('/data/linked-features.json', {cartogram: 'feature-cartogram.arrow', cartogramIdProperty: 'id', cartogramSourceIdColumn: 'source_id', trimFactor: 0});
+json('/data/linked-features.geojson', {type: 'FeatureCollection', features: linkedFeatures});
+json('/data/lines.json', {});
+json('/data/lines.geojson', {type: 'FeatureCollection', features: [
+    {type: 'Feature', properties: {value: 1}, geometry: {type: 'LineString', coordinates: boundary}},
+]});
+routes.set('/data/feature-cartogram.arrow', ['application/octet-stream', arrow({
+    source_id: ['FEATURE-A', 'FEATURE-B'], x: Int32Array.from([0, 100]), y: Int32Array.from([0, 100]),
+    weight_mean: Float64Array.from([1, 1]), code: Int32Array.from([100, 100]),
+})]);
 json('/data/clock.json', {cartogram: 'none', colourScale: 'linear', legendBounds: [20, 1117],
     scale: 'value => new Date(Math.round(value) * 60000).toISOString().slice(11, 16)'});
 routes.set('/data/clock.arrow', ['application/octet-stream', valuesFor(cells, [1117, 20, 59.6, 1439.6])]);
@@ -229,6 +248,122 @@ async function probeStyling(page, before, footprint) {
     assert(difference(rgb(after, points[4]), rgb(before, points[4])) <= 2, 'Unselected tiles keep their data colour');
 }
 
+async function standaloneGeoJSONTest(page, url) {
+    await page.goto(url('lines.geojson'));
+    await page.waitForFunction(() => document.body.classList.contains('load-complete'));
+    await settle(page);
+    assert(!await page.locator('body').evaluate(body => body.classList.contains('cartogram-ready')),
+        'GeoJSON without a source-ID mapping loads without a cartogram');
+    const featureCount = await page.evaluate(() => m._controls.find(control => control.getCanvas?.()?.id === 'deckgl-overlay')
+        ._deck.props.layers.find(layer => layer.id === 'GeoJsonLayer')?.props.data.features.length);
+    assert.equal(featureCount, 1, 'Standalone line GeoJSON renders');
+}
+
+async function geoJSONCartogramLinkTest(page, url) {
+    const linkedUrl = url('linked-features.geojson').replace('z=8', 'z=5');
+    const ready = async () => {
+        await page.waitForFunction(() => document.body.classList.contains('load-complete')
+            && document.body.classList.contains('cartogram-ready'));
+        await settle(page);
+    };
+    const camera = () => page.evaluate(() => ({center: m.getCenter().toArray(), zoom: m.getZoom()}));
+    const cartogramZoom = () => page.locator('#cartogram canvas').evaluate(canvas => canvas.__zoom.k);
+    const highlightedLayer = () => page.evaluate(() => {
+        const layer = m._controls.find(control => control.getCanvas?.()?.id === 'deckgl-overlay')
+            ._deck.props.layers.find(item => item.id === 'geojson-highlight');
+        return layer && {features: layer.props.data.features, lineColor: layer.props.getLineColor};
+    });
+    const mapPoint = async point => page.evaluate(([lng, lat]) => {
+        const p = m.project([lng, lat]), rect = m.getCanvas().getBoundingClientRect();
+        return [rect.x + p.x, rect.y + p.y];
+    }, point);
+    const cartogramPoint = (x, y) => page.evaluate(([x, y]) => {
+        const canvas = document.querySelector('#cartogram canvas'), rect = canvas.getBoundingClientRect(), zoom = canvas.__zoom;
+        const size = 10, padding = 20, min = 0, max = 100;
+        const width = Math.ceil(((max - min + 1) * size + 2 * padding) / 2);
+        const height = width, scale = Math.max(rect.width / width, rect.height / height);
+        const offsetX = (rect.width - width * scale) / 2, offsetY = (rect.height - height * scale) / 2;
+        const modelX = width / 2 + (x - (min + max) / 2) * size / 2;
+        const modelY = height / 2 + (y - (min + max) / 2) * size / 2;
+        return [rect.x + zoom.x + zoom.k * (offsetX + modelX * scale),
+            rect.y + zoom.y + zoom.k * (offsetY + modelY * scale)];
+    }, [x, y]);
+    const click = point => page.mouse.click(...point);
+    const waitForHighlight = id => page.waitForFunction(id => {
+        const layer = m._controls.find(control => control.getCanvas?.()?.id === 'deckgl-overlay')
+            ._deck.props.layers.find(item => item.id === 'geojson-highlight');
+        return layer?.props.data.features.some(feature => feature.properties.id === id)
+            && JSON.stringify(layer.props.getLineColor) === '[255,0,0,255]';
+    }, id);
+
+    await page.goto(linkedUrl);
+    await ready();
+    const mapA = await mapPoint(center);
+    await page.mouse.move(...mapA);
+    const tooltip = page.locator('.h3-hover-tooltip');
+    await page.waitForFunction(() => {
+        const tooltip = document.querySelector('.h3-hover-tooltip');
+        return tooltip.style.display === 'block' && tooltip.textContent.includes('FEATURE-A');
+    });
+    const cameraBeforePolygonClick = await camera();
+    const cartogramBeforePolygonClick = await cartogramZoom();
+    const canvasBeforePolygonClick = await page.locator('#cartogram canvas').evaluate(canvas => canvas.toDataURL());
+    await click(mapA);
+    await waitForHighlight('FEATURE-A');
+    await page.waitForTimeout(600);
+    await settle(page);
+    const cameraAfterPolygonClick = await camera();
+    assert(cameraAfterPolygonClick.zoom > cameraBeforePolygonClick.zoom, 'A feature click fits the map to its geometry');
+    assert(await cartogramZoom() > cartogramBeforePolygonClick, 'A feature click fits the cartogram to linked cells');
+    assert.notEqual(await page.locator('#cartogram canvas').evaluate(canvas => canvas.toDataURL()), canvasBeforePolygonClick,
+        'A feature click highlights its cartogram cells');
+    assert.deepEqual((await highlightedLayer()).lineColor, [255, 0, 0, 255], 'Feature selection uses a red outline');
+
+    await page.goto(linkedUrl);
+    await ready();
+    const mapBeforeCellClick = await camera();
+    const cartogramBeforeCellClick = await cartogramZoom();
+    await click(await cartogramPoint(100, 100));
+    await waitForHighlight('FEATURE-B');
+    await page.waitForTimeout(600);
+    await settle(page);
+    const mapAfterCellClick = await camera();
+    assert(mapAfterCellClick.center[0] > mapBeforeCellClick.center[0] + 0.5, 'A cartogram click fits the map to linked polygons');
+    assert(mapAfterCellClick.zoom > mapBeforeCellClick.zoom, 'A cartogram click zooms to linked polygons');
+    assert(await cartogramZoom() > cartogramBeforeCellClick, 'A cartogram click fits its selected cell');
+
+    await page.goto(linkedUrl);
+    await ready();
+    await page.evaluate(() => m.jumpTo({zoom: 10}));
+    await settle(page);
+    const cartogramBeforeMapPan = await cartogramZoom();
+    const mapRect = await page.locator('.maplibregl-canvas').boundingBox();
+    for (let pan = 0; pan < 4; pan++) {
+        await page.mouse.move(mapRect.x + mapRect.width * 0.9, mapRect.y + mapRect.height / 2);
+        await page.mouse.down();
+        await page.mouse.move(mapRect.x + mapRect.width * 0.1, mapRect.y + mapRect.height / 2, {steps: 8});
+        await page.mouse.up();
+        await settle(page);
+    }
+    await page.waitForTimeout(600);
+    assert(await cartogramZoom() > cartogramBeforeMapPan, 'Map panning fits the linked cartogram view');
+
+    await page.goto(linkedUrl);
+    await ready();
+    const mapBeforeCartogramPan = await camera();
+    const cartogramRect = await page.locator('#cartogram canvas').boundingBox();
+    await page.mouse.move(cartogramRect.x + cartogramRect.width * 0.9, cartogramRect.y + cartogramRect.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(cartogramRect.x + cartogramRect.width * 0.1, cartogramRect.y + cartogramRect.height / 2, {steps: 8});
+    await page.mouse.up();
+    await page.waitForTimeout(600);
+    await settle(page);
+    const mapAfterCartogramPan = await camera();
+    assert(mapAfterCartogramPan.center[0] > mapBeforeCartogramPan.center[0] + 0.2,
+        'Cartogram panning fits the linked polygon view');
+    console.log('GeoJSON hover, click focus, highlights, and two-way panning passed');
+}
+
 async function clickCell(page, index = cell, modifiers = []) {
     const point = await page.evaluate(center => {
         const p = m.project(center), rect = m.getCanvas().getBoundingClientRect();
@@ -296,6 +431,8 @@ try {
             if (String(message).startsWith('watch:')) socket.send('watching:rendering.csv');
         }));
         try {
+            await standaloneGeoJSONTest(page, url);
+            await geoJSONCartogramLinkTest(page, url);
             await page.goto(url('rendering.csv'));
             await displayed(page, 0.65);
             await page.mouse.move(0, 0);
