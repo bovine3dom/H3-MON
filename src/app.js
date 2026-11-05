@@ -2164,16 +2164,16 @@ function bootstrap(meta = {}){
         return grouped
     }
 
-    function groupCartogramRGBAWithMap(sourceCols, h3res) {
-        const channels = ['r', 'g', 'b', 'a'], sourceRows = h3RowCount(sourceCols)
-        const doneAggregate = perfEnabled ? detailPerfTimer('cartogram.rgba_group', {sourceRows, h3res}) : null
+    function groupCartogramChannelsWithMap(sourceCols, h3res, channels) {
+        const sourceRows = h3RowCount(sourceCols)
+        const kind = channels.length === 1 ? channels[0] : 'rgba'
+        const doneAggregate = perfTimer(`cartogram.${kind}_group`, {sourceRows, h3res})
         const sourceByH3 = new Map(), sourceLower = [], sourceUpper = []
         const split = hasSplitH3Index(sourceCols)
         const lowerCol = sourceCols[H3_INDEX_LOWER], upperCol = sourceCols[H3_INDEX_UPPER]
         const sourceChannels = channels.map(channel => {
             const values = new Array(sourceRows)
-            for (let i = 0; i < sourceRows; i++) values[i] = channel === 'a' && !Object.hasOwn(sourceCols, 'a')
-                ? 255 : toFiniteNumber(columnValue(sourceCols[channel], i))
+            for (let i = 0; i < sourceRows; i++) values[i] = toFiniteNumber(columnValue(sourceCols[channel], i))
             return values
         })
         for (let i = 0; i < sourceRows; i++) {
@@ -2254,10 +2254,24 @@ function bootstrap(meta = {}){
             label: cartogramAgg.label, prominence: cartogramAgg.prominence, index: cartogramAgg.index,
         }
         for (let channel = 0; channel < channels.length; channel++) aggCols[`${channels[channel]}_mean`] = means[channel]
-        aggCols.rgba = Array.from({length: cells}, (_, i) => means.some(values => values[i] == null) ? null
-            : `rgba(${means[0][i]},${means[1][i]},${means[2][i]},${means[3][i] / 255})`)
-        doneAggregate?.({cartogramCells: cells})
+        doneAggregate({cartogramCells: cells})
+        return {aggCols, means}
+    }
+
+    function groupCartogramRGBAWithMap(sourceCols, h3res) {
+        const channels = ['r', 'g', 'b', ...(Object.hasOwn(sourceCols, 'a') ? ['a'] : [])]
+        const {aggCols, means} = groupCartogramChannelsWithMap(sourceCols, h3res, channels)
+        aggCols.rgba = Array.from({length: cartogramAgg.x.length}, (_, i) => {
+            const alpha = means[3] ? means[3][i] : 255
+            return means.some(values => values[i] == null) || alpha == null ? null
+                : `rgba(${means[0][i]},${means[1][i]},${means[2][i]},${alpha / 255})`
+        })
         return {aggCols, meanCol: 'rgba'}
+    }
+
+    function groupCartogramValueWithMap(sourceCols, h3res) {
+        const {aggCols} = groupCartogramChannelsWithMap(sourceCols, h3res, ['value'])
+        return {aggCols, meanCol: 'value_mean'}
     }
 
     async function projectH3ToCartoResolution(dataCols, sourceValueKey, h3res) {
@@ -2494,8 +2508,8 @@ function bootstrap(meta = {}){
                             ? null : `rgba(${red},${green},${blue},${alpha / 255})`
                     }
                     cartoDataCol = 'rgba'
-                } else if (h3res === cartoRes) {
-                    const result = groupCartogramWithMap(dataCols, 'value', {source: 'same-resolution', rows: h3RowCount(dataCols), h3Index: hasSplitH3Index(dataCols) ? 'split' : 'string'})
+                } else if (h3res <= cartoRes) {
+                    const result = groupCartogramValueWithMap(dataCols, h3res)
                     cartoAggCols = result.aggCols
                     cartoDataCol = result.meanCol
                 } else {

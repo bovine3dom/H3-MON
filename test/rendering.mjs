@@ -4,7 +4,7 @@ import {createServer} from 'node:http';
 import {join} from 'node:path';
 import {chromium} from 'playwright';
 import {PNG} from 'pngjs';
-import {cellToBoundary, cellToLatLng, gridDisk, h3IndexToSplitLong, latLngToCell} from 'h3-js';
+import {cellToBoundary, cellToChildren, cellToLatLng, cellToParent, gridDisk, h3IndexToSplitLong, latLngToCell} from 'h3-js';
 import {tableFromArrays, tableToIPC, vectorFromArray, Dictionary, Int8, Uint32, Uint64, Float64, Utf8} from 'apache-arrow';
 import {findMostPopulousCityForCell} from '../src/city-label-lookup.js';
 import {readMultiQueryOptions} from '../src/multi-query.js';
@@ -14,10 +14,11 @@ import {SETTINGS_BY_KEY, parseSettingValue, readSettingLayers, serializeSettingV
 // Serve the real build and deterministic fixtures, never local user data or a replacement Deck layer.
 const cell = '851fb467fffffff', center = cellToLatLng(cell).reverse(), boundary = cellToBoundary(cell, true);
 const cells = [cell, ...gridDisk(cell, 1).filter(index => index !== cell).slice(0, 2), latLngToCell(0, 0, 5)];
-const columns = {
-    index_lower: Uint32Array.from(cells, index => h3IndexToSplitLong(index)[0]),
-    index_upper: Uint32Array.from(cells, index => h3IndexToSplitLong(index)[1]),
-};
+const indexColumns = indexes => ({
+    index_lower: Uint32Array.from(indexes, index => h3IndexToSplitLong(index)[0]),
+    index_upper: Uint32Array.from(indexes, index => h3IndexToSplitLong(index)[1]),
+});
+const columns = indexColumns(cells);
 const arrow = data => Buffer.from(tableToIPC(tableFromArrays(data)));
 const values = value => arrow({...columns, value: Float64Array.from([value, 20, 110, 10000])});
 const valuesFor = (indexes, dataValues) => arrow({
@@ -80,6 +81,14 @@ routes.set('/data/coverage.arrow', ['application/octet-stream', arrow({...column
 routes.set('/data/coverage-cartogram_hilo.arrow', ['application/octet-stream', arrow({...columns,
     x: Int32Array.from([0, 0, 2, 4]), y: Int32Array.from([0, 0, 2, 0]),
     code: Int32Array.from([100, 100, 100, 100]), weight: Float64Array.from([1, 1, 1, 1]),
+})]);
+const downprojectParents = [cellToParent(cells[0], 4), latLngToCell(0, 0, 4)];
+const downprojectIndexes = downprojectParents.flatMap(parent => cellToChildren(parent, 5).slice(0, 2));
+json('/data/downproject.json', {cartogram: 'downproject-cartogram_hilo.arrow', raw: true, trimFactor: 0});
+routes.set('/data/downproject.arrow', ['application/octet-stream', arrow({...indexColumns(downprojectParents), value: Float64Array.from([10, 50])})]);
+routes.set('/data/downproject-cartogram_hilo.arrow', ['application/octet-stream', arrow({...indexColumns(downprojectIndexes),
+    x: new Int16Array(4), y: new Int16Array(4), code: Uint16Array.from([100, 100, 100, 100]),
+    weight: Float64Array.from([1, 3, 1, 1]), weight_mean: Float64Array.from([1, 3, 1, 1]),
 })]);
 const probeMetadata = {cartogram: 'probe-cartogram_hilo.arrow', cartogramLineProbe: true, trimFactor: 0,
     onclick: {url: '/probe-click?index={index}', focus: false}};
@@ -898,6 +907,20 @@ try {
             await setting(page, 'minimumFractionCoverage', '1');
             await coverageTooltip(0, null);
             await coverageTooltip(1, 0);
+
+            // Coarser source H3 cells aggregate directly onto weighted cartogram children.
+            await page.goto(url('downproject.arrow'));
+            await page.waitForFunction(() => document.body.classList.contains('cartogram-ready') && document.body.classList.contains('load-complete'));
+            await settle(page);
+            await page.locator('#cartogram canvas').evaluate(canvas => {
+                const rect = canvas.getBoundingClientRect(), scale = Math.min(rect.width / 25, rect.height / 25);
+                const [x, y] = canvas.__zoom.apply([(rect.width - 25 * scale) / 2 + 12.5 * scale,
+                    (rect.height - 25 * scale) / 2 + 12.5 * scale]);
+                canvas.dispatchEvent(new MouseEvent('mouseleave'));
+                canvas.dispatchEvent(new MouseEvent('mousemove', {clientX: rect.x + x, clientY: rect.y + y, bubbles: true}));
+            });
+            await page.locator('.cartogram-tooltip').waitFor({state: 'visible'});
+            assert((await page.locator('.cartogram-tooltip div').allTextContents()).includes('value_mean: 23.3'));
 
             // On-click result sets aggregate by H3 cell and refresh every origin when request controls change.
             const multiRequests = [];
