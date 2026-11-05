@@ -25,6 +25,14 @@ const valuesFor = (indexes, dataValues) => arrow({
     index_upper: Uint32Array.from(indexes, index => h3IndexToSplitLong(index)[1]),
     value: Float64Array.from(dataValues),
 });
+const rgbaValues = arrow({...columns,
+    r: Uint8Array.from([18, 10, 40, 60]), g: Uint8Array.from([149, 30, 50, 70]),
+    b: Uint8Array.from([221, 40, 60, 80]), a: Uint8Array.from([128, 255, 255, 255]),
+});
+const rgbaCartogram = arrow({...columns,
+    x: new Int16Array(4), y: new Int16Array(4), code: Uint16Array.from([100, 100, 100, 100]),
+    weight: Float64Array.from([1, 3, 1, 1]), weight_mean: Float64Array.from([1, 3, 1, 1]),
+});
 const background = '#5890aa';
 const style = {
     version: 8, transition: {duration: 0, delay: 0},
@@ -41,6 +49,9 @@ const routes = new Map();
 const json = (path, data) => routes.set(path, ['application/json', JSON.stringify(data)]);
 json('/toner_ofm_moderatlist.json', style);
 json('/data/rendering.json', {cartogram: 'none', raw: true, colourScheme: 'interpolateReds'});
+json('/data/rgba.json', {cartogram: 'rgba-cartogram.arrow', raw: true, t: 'Direct RGBA caption'});
+routes.set('/data/rgba.arrow', ['application/octet-stream', rgbaValues]);
+routes.set('/data/rgba-cartogram_hilo.arrow', ['application/octet-stream', rgbaCartogram]);
 json('/data/settings.json', {cartogram: 'none', colourScale: 'rankit', trimFactor: 0});
 const linkedFeatures = ['FEATURE-A', 'FEATURE-B'].map((id, i) => {
     const [lng, lat] = center
@@ -117,6 +128,33 @@ function rgb(image, [x, y]) {
     assert(x >= 0 && y >= 0 && x < image.width && y < image.height, `Pixel outside screenshot: ${x},${y}`);
     const offset = (Math.floor(y) * image.width + Math.floor(x)) * 4;
     return Array.from(image.data.subarray(offset, offset + 3));
+}
+async function rgbaPixelOnWhite(page, point) {
+    const state = await page.evaluate(point => {
+        const canvas = document.getElementById('deckgl-overlay'), rect = m.getCanvas().getBoundingClientRect();
+        const projected = m.project(point);
+        return {pixel: [rect.x + projected.x, rect.y + projected.y],
+            inline: {visibility: canvas.style.visibility, mixBlendMode: canvas.style.mixBlendMode},
+            background: m.getPaintProperty('background', 'background-color'),
+            reference: m.getLayoutProperty('reference', 'visibility') || 'visible'};
+    }, point);
+    try {
+        await page.evaluate(() => {
+            const canvas = document.getElementById('deckgl-overlay');
+            canvas.style.visibility = 'visible'; canvas.style.mixBlendMode = 'normal';
+            m.setPaintProperty('background', 'background-color', '#ffffff');
+            m.setLayoutProperty('reference', 'visibility', 'none');
+        });
+        await settle(page);
+        return rgb(PNG.sync.read(await page.screenshot({scale: 'css'})), state.pixel);
+    } finally {
+        await page.evaluate(({inline, background, reference}) => {
+            Object.assign(document.getElementById('deckgl-overlay').style, inline);
+            m.setPaintProperty('background', 'background-color', background);
+            m.setLayoutProperty('reference', 'visibility', reference);
+        }, state);
+        await settle(page);
+    }
 }
 async function settle(page) {
     await page.evaluate(() => Promise.all(document.getAnimations().map(animation => animation.finished)));
@@ -437,6 +475,33 @@ try {
             await displayed(page, 0.65);
             await page.mouse.move(0, 0);
             await frame(page, `${device}-flat`);
+            await page.goto(url('rgba.arrow'));
+            await page.waitForFunction(() => document.body.classList.contains('load-complete')
+                && window._columnData?.r?.[0] === 18 && window._columnData.a?.[0] === 128 && !window._columnData.value);
+            await page.waitForFunction(() => document.body.classList.contains('cartogram-ready'));
+            await settle(page);
+            assert(await page.locator('#cartogram canvas').isVisible(), `${device}: direct RGBA loads the cartogram`);
+            await page.locator('#cartogram canvas').evaluate(canvas => {
+                const rect = canvas.getBoundingClientRect(), scale = Math.min(rect.width / 25, rect.height / 25);
+                const [x, y] = canvas.__zoom.apply([(rect.width - 25 * scale) / 2 + 12.5 * scale,
+                    (rect.height - 25 * scale) / 2 + 12.5 * scale]);
+                canvas.dispatchEvent(new MouseEvent('mouseleave'));
+                canvas.dispatchEvent(new MouseEvent('mousemove', {clientX: rect.x + x, clientY: rect.y + y, bubbles: true}));
+            });
+            await page.locator('.cartogram-tooltip').waitFor({state: 'visible'});
+            const rgbaTooltip = await page.locator('.cartogram-tooltip div').allTextContents();
+            for (const channel of ['r_mean: 24.7', 'g_mean: 59.8', 'b_mean: 80.2', 'a_mean: 234',
+                'rgba: rgba(24.666666666666668,59.833333333333336,80.16666666666667,0.9169934640522877)']) {
+                assert(rgbaTooltip.includes(channel), `${device}: cartogram channel aggregation includes ${channel}`);
+            }
+            assert(await page.locator('#observable_legend').isVisible(), `${device}: direct RGBA keeps the legend caption`);
+            assert.equal(await page.locator('#observable_legend .title').textContent(), 'Direct RGBA caption');
+            assert.equal(await page.locator('#observable_legend svg').count(), 0, `${device}: direct RGBA hides the colourbar`);
+            const expectedRGBA = [18, 149, 221].map(channel => Math.round((channel * 128 + 255 * 127) / 255));
+            assert(difference(await rgbaPixelOnWhite(page, center), expectedRGBA) <= 5, `${device}: direct RGBA fill and alpha`);
+            await page.goto(url('rendering.csv'));
+            await displayed(page, 0.65);
+            assert(await page.locator('#observable_legend svg').isVisible(), `${device}: scalar data shows the colourbar`);
             const onchangeBudget = page.locator('#setting-onchangeBudgetOverride');
             const budgetFieldHidden = () => onchangeBudget.evaluate(input => input.closest('.setting-field').hidden);
             assert(await budgetFieldHidden(), 'No onchange configuration hides its budget field');

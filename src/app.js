@@ -1585,11 +1585,40 @@ function bootstrap(meta = {}){
         return dataWrap
     }
 
-    function hexAccessors(kind, indexkey, valuekey, writeColourValue) {
+    function hasRGBAFields(fields) {
+        return Boolean(fields && ['r', 'g', 'b'].every(field => Object.hasOwn(fields, field)))
+    }
+
+    function hasRGBAData(data, kind) {
+        return hasRGBAFields(kind === 'column' ? data : data?.[0])
+    }
+
+    function writeColourForRGBA(red, green, blue, alpha, target = [0, 0, 0, 0], offset = 0) {
+        red = toFiniteNumber(red)
+        green = toFiniteNumber(green)
+        blue = toFiniteNumber(blue)
+        alpha = toFiniteNumber(alpha)
+        if (red == null || green == null || blue == null || alpha == null) {
+            target[offset] = target[offset + 1] = target[offset + 2] = target[offset + 3] = 0
+            return target
+        }
+        target[offset] = Math.round(Math.max(0, Math.min(255, red)))
+        target[offset + 1] = Math.round(Math.max(0, Math.min(255, green)))
+        target[offset + 2] = Math.round(Math.max(0, Math.min(255, blue)))
+        target[offset + 3] = Math.round(Math.max(0, Math.min(255, alpha)))
+        return target
+    }
+
+    function hexAccessors(kind, indexkey, valuekey, writeColourValue, directRGBA) {
         if (kind === 'column') {
             return {
                 getHexagon: (_, {index, data, target}) => h3IndexInputAt(data.src, index, target),
                 getFillColor: (_, {index, data, target}) => {
+                    if (directRGBA) {
+                        const {src} = data
+                        return writeColourForRGBA(columnValue(src.r, index), columnValue(src.g, index), columnValue(src.b, index),
+                            Object.hasOwn(src, 'a') ? columnValue(src.a, index) : 255, target)
+                    }
                     const column = data.src[valuekey]
                     const v = column ? columnValue(column, index) : null
                     return writeColourValue(v, target)
@@ -1598,12 +1627,14 @@ function bootstrap(meta = {}){
         }
         return {
             getHexagon: (d, {target} = {}) => rowH3IndexInput(d, indexkey, target),
-            getFillColor: (d, {target} = {}) => writeColourValue(d[valuekey], target || [0, 0, 0, 0])
+            getFillColor: (d, {target} = {}) => directRGBA
+                ? writeColourForRGBA(d.r, d.g, d.b, Object.hasOwn(d, 'a') ? d.a : 255, target)
+                : writeColourValue(d[valuekey], target || [0, 0, 0, 0])
         }
     }
 
     function createH3Layer(data, kind, valuekey) {
-        const accessors = hexAccessors(kind, 'index', valuekey, writeColourForValue)
+        const accessors = hexAccessors(kind, 'index', valuekey, writeColourForValue, hasRGBAData(data, kind))
         const layer = new PackedH3HexagonLayer({
             id: 'H3HexagonLayer',
             data: h3DeckSource(kind, data),
@@ -2107,6 +2138,128 @@ function bootstrap(meta = {}){
         return {aggCols, meanCol}
     }
 
+    function cartogramRowsByParentH3(h3res) {
+        const cache = cartogramAgg.parentRows ||= new Map()
+        if (cache.has(h3res)) return cache.get(h3res)
+        const rows = h3RowCount(cartogramAgg.h3Cols), cells = cartogramAgg.x.length
+        const heads = new Map(), next = new Int32Array(rows), totalWeights = new Float64Array(cells)
+        next.fill(-1)
+        const parentLower = [], parentUpper = []
+        const weightValues = cartogramAgg.weightValues, weights = cartogramAgg.weights
+        for (let i = 0; i < rows; i++) {
+            const h3 = h3IndexStringAt(cartogramAgg.h3Cols, i)
+            const [lower, upper] = h3IndexToSplitLong(h3res < cartoRes ? cellToParent(h3, h3res) : h3)
+            const head = splitMapGet(heads, lower, upper)
+            if (head == null) {
+                parentLower.push(lower)
+                parentUpper.push(upper)
+            } else next[i] = head
+            splitMapSet(heads, lower, upper, i)
+            const weight = weightValues ? (Number.isFinite(weightValues[i]) ? weightValues[i] : null)
+                : weights ? toFiniteNumber(weights[i]) : 1
+            if (Number.isFinite(weight) && weight > 0) totalWeights[cartogramAgg.rowCell[i]] += weight
+        }
+        const grouped = {heads, next, parentLower, parentUpper, totalWeights}
+        cache.set(h3res, grouped)
+        return grouped
+    }
+
+    function groupCartogramRGBAWithMap(sourceCols, h3res) {
+        const channels = ['r', 'g', 'b', 'a'], sourceRows = h3RowCount(sourceCols)
+        const doneAggregate = perfEnabled ? detailPerfTimer('cartogram.rgba_group', {sourceRows, h3res}) : null
+        const sourceByH3 = new Map(), sourceLower = [], sourceUpper = []
+        const split = hasSplitH3Index(sourceCols)
+        const lowerCol = sourceCols[H3_INDEX_LOWER], upperCol = sourceCols[H3_INDEX_UPPER]
+        const sourceChannels = channels.map(channel => {
+            const values = new Array(sourceRows)
+            for (let i = 0; i < sourceRows; i++) values[i] = channel === 'a' && !Object.hasOwn(sourceCols, 'a')
+                ? 255 : toFiniteNumber(columnValue(sourceCols[channel], i))
+            return values
+        })
+        for (let i = 0; i < sourceRows; i++) {
+            const [lower, upper] = split ? [toNumber(columnValue(lowerCol, i)), toNumber(columnValue(upperCol, i))]
+                : h3IndexToSplitLong(h3IndexStringAt(sourceCols, i))
+            if (splitMapSet(sourceByH3, lower, upper, i)) {
+                sourceLower.push(lower)
+                sourceUpper.push(upper)
+            }
+        }
+
+        const cells = cartogramAgg.x.length
+        const parents = cartogramRowsByParentH3(h3res)
+        const numerators = channels.map(() => new Float64Array(cells))
+        const denominators = channels.map(() => new Float64Array(cells))
+        const defaultNumber = toFiniteNumber(getDefaultValue())
+        const observed = defaultNumber == null ? null : channels.map(() => new Uint8Array(cells))
+        const coveredWeights = minimumFractionCoverage > 0 ? channels.map(() => new Float64Array(cells)) : null
+        const totalWeights = coveredWeights ? parents.totalWeights : null
+        const missingWeights = defaultNumber == null ? null : channels.map(() => new Float64Array(cells))
+        const missingCounts = missingWeights ? channels.map(() => new Uint32Array(cells)) : null
+        const weightValues = cartogramAgg.weightValues, weights = cartogramAgg.weights
+        const addRow = (i, source) => {
+            const target = cartogramAgg.rowCell[i]
+            const weight = weightValues ? (Number.isFinite(weightValues[i]) ? weightValues[i] : null)
+                : weights ? toFiniteNumber(weights[i]) : 1
+            for (let channel = 0; channel < channels.length; channel++) {
+                const value = source == null ? null : sourceChannels[channel][source]
+                if (value == null) {
+                    if (missingWeights) {
+                        missingCounts[channel][target]++
+                        if (weight != null) missingWeights[channel][target] += weight
+                    }
+                    continue
+                }
+                if (observed) observed[channel][target] = 1
+                if (coveredWeights && Number.isFinite(weight) && weight > 0) coveredWeights[channel][target] += weight
+                addWeightedValue(numerators[channel], denominators[channel], target, value, weight)
+            }
+        }
+
+        if (defaultNumber == null) {
+            for (let key = 0; key < sourceLower.length; key++) {
+                const source = splitMapGet(sourceByH3, sourceLower[key], sourceUpper[key])
+                let row = splitMapGet(parents.heads, sourceLower[key], sourceUpper[key])
+                while (row != null) {
+                    addRow(row, source)
+                    row = parents.next[row]
+                    if (row < 0) break
+                }
+            }
+        } else {
+            for (let key = 0; key < parents.parentLower.length; key++) {
+                const lower = parents.parentLower[key], upper = parents.parentUpper[key]
+                const source = splitMapGet(sourceByH3, lower, upper)
+                let row = splitMapGet(parents.heads, lower, upper)
+                while (row != null) {
+                    addRow(row, source)
+                    row = parents.next[row]
+                    if (row < 0) break
+                }
+            }
+            for (let channel = 0; channel < channels.length; channel++) for (let i = 0; i < cells; i++) {
+                if (!missingCounts[channel][i] || (!infill && !observed[channel][i])) continue
+                numerators[channel][i] += defaultNumber * missingWeights[channel][i]
+                denominators[channel][i] += missingWeights[channel][i]
+            }
+        }
+
+        const means = channels.map(() => new Array(cells))
+        for (let channel = 0; channel < channels.length; channel++) for (let i = 0; i < cells; i++) {
+            const mean = weightedMean(numerators[channel], denominators[channel], i)
+            means[channel][i] = mean != null && (!totalWeights || totalWeights[i] > 0
+                && coveredWeights[channel][i] / totalWeights[i] >= minimumFractionCoverage) ? mean : null
+        }
+        const aggCols = {
+            x: cartogramAgg.x, y: cartogramAgg.y, _code: cartogramAgg.code, code: cartogramAgg.code,
+            label: cartogramAgg.label, prominence: cartogramAgg.prominence, index: cartogramAgg.index,
+        }
+        for (let channel = 0; channel < channels.length; channel++) aggCols[`${channels[channel]}_mean`] = means[channel]
+        aggCols.rgba = Array.from({length: cells}, (_, i) => means.some(values => values[i] == null) ? null
+            : `rgba(${means[0][i]},${means[1][i]},${means[2][i]},${means[3][i] / 255})`)
+        doneAggregate?.({cartogramCells: cells})
+        return {aggCols, meanCol: 'rgba'}
+    }
+
     async function projectH3ToCartoResolution(dataCols, sourceValueKey, h3res) {
         const config = cartoProjectionConfig(h3res)
         const defaultValue = getDefaultValue()
@@ -2207,7 +2360,9 @@ function bootstrap(meta = {}){
                     schema = dataCols
                 }
             }
-            if (!dataCols.value || !hasH3Index(dataCols)) throw new Error('H3 data requires value and index or index_lower/index_upper columns')
+            const directRGBA = hasRGBAData(dataCols, 'column')
+            if ((!dataCols.value && !directRGBA) || !hasH3Index(dataCols)) throw new Error('H3 data requires value or r/g/b columns and index or index_lower/index_upper columns')
+            hideColourbar = directRGBA
             setLoadStage('Data parsed')
 
             const hasWeight = schema.hasOwnProperty('weight')
@@ -2220,9 +2375,10 @@ function bootstrap(meta = {}){
 
             const values = dataCols.value
             const weights = hasWeight ? dataCols.weight : null
+            const useValueQuantiles = doQuantiles && !directRGBA
             const schemaHasH3Index = hasH3Index(schema)
             const dataHasSplitH3Index = hasSplitH3Index(schema)
-            const cartogramReady = cartogramEnabled && schemaHasH3Index
+            const cartogramReady = cartogramEnabled && schemaHasH3Index && h3RowCount(dataCols) && (values || directRGBA)
                 ? measurePerf('cartogram.init.await', {dataH3Index: dataHasSplitH3Index ? 'split' : 'string'}, () => {
                     if (!cartogramInit) {
                         cartogramLoadError = null
@@ -2237,14 +2393,14 @@ function bootstrap(meta = {}){
             dataH3Res = h3res
             geojsonCartogramLinks = null
             geojsonHighlightLayer = null
-            const valuekey = doQuantiles ? 'quantile' : 'value'
+            const valuekey = useValueQuantiles ? 'quantile' : 'value'
             let getquantileFn
             let getvalueFn
             let cartoValueCol = null
 
             window._columnData = dataCols
 
-            if (doQuantiles) {
+            if (useValueQuantiles) {
                 setLoadStage('Calculating quantiles')
                 const doneEcdf = perfTimer('data.quantile.ecdf', {rows: values.length, weighted: !!weights})
                 const [getquantile, getvalue] = fixedScale || ecdf(values, trimFactor, weights)
@@ -2261,7 +2417,7 @@ function bootstrap(meta = {}){
             }
 
             setLoadStage('Preparing map layer')
-            const doneDeckLayer = perfTimer('deck.hex_layer.create', {rows: dataCols.value.length, renderer: 'packed', pickable: false, h3Index: hasSplitH3Index(dataCols) ? 'split' : 'string'})
+            const doneDeckLayer = perfTimer('deck.hex_layer.create', {rows: h3RowCount(dataCols), renderer: 'packed', pickable: false, h3Index: hasSplitH3Index(dataCols) ? 'split' : 'string'})
             const deckLayer = createH3Layer(dataCols, 'column', valuekey)
             doneDeckLayer()
             // Cartogram I/O must not delay the geographic map.
@@ -2305,7 +2461,40 @@ function bootstrap(meta = {}){
                 cartoAggCols = null
                 let cartoDataCol = null
 
-                if (h3res === cartoRes) {
+                if (directRGBA && h3res <= cartoRes) {
+                    const result = groupCartogramRGBAWithMap(dataCols, h3res)
+                    cartoAggCols = result.aggCols
+                    cartoDataCol = result.meanCol
+                } else if (directRGBA) {
+                    const channels = ['r', 'g', 'b', ...(Object.hasOwn(dataCols, 'a') ? ['a'] : [])]
+                    const sourceCols = {}
+                    let source = 'child-rollup'
+                    for (const channel of channels) {
+                        const projected = await current(projectH3ToCartoResolution(dataCols, channel, h3res))
+                        sourceCols.index ||= projected.grouped.index
+                        sourceCols[channel] = projected.grouped[channel]
+                        source = projected.source
+                    }
+                    const channelMeans = {}
+                    for (const channel of channels) {
+                        const result = groupCartogramWithMap(sourceCols, channel, {
+                            source, channel, rows: h3RowCount(sourceCols),
+                            h3Index: hasSplitH3Index(sourceCols) ? 'split' : 'string',
+                        })
+                        cartoAggCols ||= result.aggCols
+                        channelMeans[channel] = result.aggCols[result.meanCol]
+                        cartoAggCols[`${channel}_mean`] = channelMeans[channel]
+                    }
+                    delete cartoAggCols.value_mean
+                    cartoAggCols.rgba = new Array(cartoAggCols.x.length)
+                    for (let i = 0; i < cartoAggCols.rgba.length; i++) {
+                        const red = channelMeans.r[i], green = channelMeans.g[i], blue = channelMeans.b[i]
+                        const alpha = channelMeans.a ? channelMeans.a[i] : 255
+                        cartoAggCols.rgba[i] = red == null || green == null || blue == null || alpha == null
+                            ? null : `rgba(${red},${green},${blue},${alpha / 255})`
+                    }
+                    cartoDataCol = 'rgba'
+                } else if (h3res === cartoRes) {
                     const result = groupCartogramWithMap(dataCols, 'value', {source: 'same-resolution', rows: h3RowCount(dataCols), h3Index: hasSplitH3Index(dataCols) ? 'split' : 'string'})
                     cartoAggCols = result.aggCols
                     cartoDataCol = result.meanCol
@@ -2322,7 +2511,7 @@ function bootstrap(meta = {}){
                     setLoadStage('Preparing cartogram colours')
                     cartoValueCol = cartoDataCol
 
-                    if (useCartogramQuantiles && doQuantiles) {
+                    if (!directRGBA && useCartogramQuantiles && doQuantiles) {
                         const cartoValues = cartoAggCols[cartoDataCol]
                         const doneCartoEcdf = perfTimer('cartogram.quantile.ecdf', {rows: cartoValues.length})
                         const [getquantile, getvalue] = fixedScale || ecdf(cartoValues, trimFactor)
@@ -2330,7 +2519,7 @@ function bootstrap(meta = {}){
                         getquantileFn = getquantile
                         getvalueFn = getvalue
                     }
-                    if (doQuantiles && getquantileFn) {
+                    if (!directRGBA && doQuantiles && getquantileFn) {
                         const cartoValues = cartoAggCols[cartoValueCol]
                         const doneCartoQuantiles = perfTimer('cartogram.quantile.assign_cartogram', {rows: cartoValues.length})
                         cartoAggCols.carto_quantile = assignQuantiles(cartoValues, getquantileFn)
@@ -2353,7 +2542,7 @@ function bootstrap(meta = {}){
                             svgPerf: svgPerfEnabled,
                             debug: syncDebugEnabled,
                             draw_outline: false,
-                            get_color: getCssColour,
+                            get_color: directRGBA ? colour => colour : getCssColour,
                             format_value: v => formatValue(v, scaleFormatter, 3),
                             color_transition_duration: COLOUR_TRANSITION_DURATION,
                             include_outer_borders: true,
@@ -2414,7 +2603,7 @@ function bootstrap(meta = {}){
                         cartogramApi.updateData(cartoAggCols, cartoDataCol)
                         doneUpdateCartogram()
                     }
-                    if (useCartogramQuantiles && doQuantiles) {
+                    if (!directRGBA && useCartogramQuantiles && doQuantiles) {
                         const doneDataQuantiles = perfTimer('cartogram.quantile.assign_data', {rows: values.length})
                         dataCols.quantile = assignQuantiles(values, getquantileFn)
                         doneDataQuantiles()
@@ -2429,7 +2618,7 @@ function bootstrap(meta = {}){
                 failCartogram(error)
             }
 
-            if (doQuantiles && getquantileFn && !fixedScale) {
+            if (!directRGBA && doQuantiles && getquantileFn && !fixedScale) {
                 viewportQuantileState = {
                     source: useCartogramQuantiles && cartoValueCol ? 'cartogram' : 'map',
                     trimFactor,
@@ -2441,7 +2630,7 @@ function bootstrap(meta = {}){
                 }
             }
 
-            doneGetHexData({rows: dataCols.value.length, cartogramRows: cartoAggCols ? cartoAggCols.x.length : 0, h3Index: hasSplitH3Index(dataCols) ? 'split' : 'string'})
+            doneGetHexData({rows: h3RowCount(dataCols), cartogramRows: cartoAggCols ? cartoAggCols.x.length : 0, h3Index: hasSplitH3Index(dataCols) ? 'split' : 'string'})
             return deckLayer
         }
 
@@ -2491,7 +2680,9 @@ function bootstrap(meta = {}){
         let data
         let valuekey = 'value'
         let geojsonGetquantile = null
-        if (doQuantiles && (format.layer === 'hex' || format.layer === 'geojson')) {
+        const directRGBA = format.layer === 'hex' && hasRGBAData(raw, format.kind)
+        hideColourbar = directRGBA
+        if (doQuantiles && !directRGBA && (format.layer === 'hex' || format.layer === 'geojson')) {
             setLoadStage('Calculating quantiles')
             let values, weights
             if (format.layer === 'hex') {
@@ -2545,7 +2736,7 @@ function bootstrap(meta = {}){
         if (format.layer === 'hex') {
             setLoadStage('Preparing map layer')
             if (format.kind === 'column') window._columnData = data
-            const rows = format.kind === 'column' ? data.value.length : data.length
+            const rows = format.kind === 'column' ? h3RowCount(data) : data.length
             const doneDeckLayer = perfTimer('deck.hex_layer.create', {rows, renderer: 'packed', pickable: false, h3Index: format.kind === 'column' && hasSplitH3Index(data) ? 'split' : 'string'})
             const layer = createH3Layer(data, format.kind, valuekey)
             doneDeckLayer()
@@ -3996,6 +4187,7 @@ function bootstrap(meta = {}){
     const hasOnclickRequest = typeof metadataSettings.onclick?.url === 'string' && !!metadataSettings.onclick.url.trim()
     let awaitingFirstInteraction = hasOnmoveRequest || hasOnclickRequest
     const legendDiv = document.createElement('div')
+    let hideColourbar = false
     legendDiv.id = "observable_legend"
     legendDiv.hidden = awaitingFirstInteraction
     const legendPlaceholder = document.createElement('div')
@@ -4099,12 +4291,14 @@ function bootstrap(meta = {}){
         const heading = document.createElement('div')
         heading.className = 'title'
         heading.textContent = title || ''
-        entry.append(heading, legend)
+        entry.append(heading)
+        if (!hideColourbar) entry.append(legend)
         replaceLegend(entry)
     }
 
     function makeLegend(fmt) {
         legendFormatter = fmt
+        legendDiv.hidden = awaitingFirstInteraction
         return renderLegend(fmt)
     }
 
