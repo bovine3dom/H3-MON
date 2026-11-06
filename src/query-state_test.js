@@ -33,6 +33,16 @@ Deno.test('titles use raw inputs and select labels, preserving unknown tokens an
     assert(queryTitle('{lat}|{controls.time}', {lat: NaN, 'controls.time': '21600'}) === '{lat}|{controls.time}')
 })
 
+Deno.test('titles display formatted values for controls', () => {
+    const controls = createRequestControls({
+        frame: {label: 'Month', type: 'number', default: 0, min: 0, max: 1,
+            encode: "value => ['2016_08', '2018_02'][value]",
+            display: "value => ['2016_08', '2018_02'][value].replace('_', '-')"},
+    })
+    const query = {...controls.encode({'p.frame': 1}), _inputs: controls.values({'p.frame': 1})}
+    assert(queryTitle('Google Timeline — {controls.frame}', query, null, controls.schema) === 'Google Timeline — 2018-02')
+})
+
 Deno.test('title blocks hide with their controls and can contain static text', () => {
     const controls = createRequestControls({
         metric: {label: 'Metric', type: 'select', default: 'time', options: [

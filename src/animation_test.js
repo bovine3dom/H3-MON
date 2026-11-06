@@ -1,9 +1,14 @@
-import {animationSequence, createAnimationPlayer} from './animation.js'
+import {animationSequence, createAnimationPlayer, humanReadableAnimationValue} from './animation.js'
 import {createRequestControls} from './request-controls.js'
 const assert = (value, message = 'Assertion failed') => { if (!value) throw new Error(message) }
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 const number = {type: 'number', min: 0, max: 10}
 const config = {start: 0, end: 1, step: 0.3, step_rate: 30}
+Deno.test('animation labels use display formatters', () => {
+    assert(humanReadableAnimationValue(1, 'number', value => ['2016-08', '2018-02'][value]) === '2018-02')
+    assert(humanReadableAnimationValue(1, 'number') === '1')
+    assert(humanReadableAnimationValue(1, 'number', () => 1) === '1')
+})
 Deno.test('arithmetic frames include endpoints and validate rate, direction and bounds', () => {
     const sequence = animationSequence(number, config)
     assert(sequence.count === 5 && sequence.value(4) === 1 && sequence.value(3) === 0.3 * 3)

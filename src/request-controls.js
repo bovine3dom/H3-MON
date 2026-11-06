@@ -77,6 +77,16 @@ export function createRequestControls(definitions = {}) {
             }
         }
         const convert = Object.hasOwn(definition, 'encode') ? compile('encode') : value => value
+        if (Object.hasOwn(definition, 'display')) {
+            const display = compile('display')
+            setting.displayValue = value => {
+                let result
+                try { result = display(value) } catch (error) { fail(`display failed: ${error?.message ?? String(error)}`) }
+                if (result instanceof Promise) result.catch(() => {})
+                if (typeof result !== 'string') fail('display must return a string')
+                return result
+            }
+        }
         if (Object.hasOwn(definition, 'showIf')) {
             const showIf = compile('showIf')
             setting.showIf = values => {

@@ -284,11 +284,13 @@ To convert an input before sending it, supply `encode` as a JavaScript function 
 Both contain values before conversion.
 Return a string, a finite number or a boolean. Do not return a Promise.
 
+Set `display` to a JavaScript function string to format a control value in the legend title and animation timeline. The app calls the function with the raw value. Return a string.
+
 A valid control change loads `onchange` if configured. Otherwise, it sends a new request from the last query position.
 Before the first map query, it uses the map centre.
 Invalid inputs or failed conversions prevent the request.
 
-Titles show values before conversion. For selects, they show option labels.
+Titles use the `display` result when set. They show option labels for selects and raw values for other controls.
 They describe the displayed result, not a pending or failed request.
 
 Shared links store input values before conversion as `p.<id>` parameters.

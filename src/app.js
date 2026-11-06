@@ -4656,6 +4656,7 @@ function bootstrap(meta = {}){
             enabled: settingEnabled(settings.animate, false),
             animations: requestControls.animations.map(definition => ({
                 id: definition.key.slice(2), name: definition.control.name, type: definition.control.type,
+                formatValue: definition.control.displayValue,
             })),
             activeId: animationTarget || playing,
             playing,

@@ -33,6 +33,18 @@ Deno.test('controls expose typed panel labels and encode only namespaced raw inp
     assert(controls.values().time === 180 && controls.encode()['controls.text'] === '')
 })
 
+Deno.test('display converts format raw control values for the UI', () => {
+    const controls = createRequestControls({
+        frame: {label: 'Month', type: 'number', default: 0, min: 0, max: 1,
+            encode: "value => ['2016_08', '2018_02'][value]",
+            display: "value => ['2016_08', '2018_02'][value].replace('_', '-')"},
+    })
+    assert(controls.encode()['controls.frame'] === '2016_08')
+    assert(controls.schema[0].displayValue(0) === '2016-08')
+    assertThrows(() => createRequestControls({text: {...definitions.text, display: 'value => 1'}})
+        .schema[0].displayValue(''), 'display')
+})
+
 Deno.test('showIf uses typed raw values and option values without encoding', () => {
     const controls = createRequestControls({
         text: {...definitions.text, showIf: 'values => (values.mode === "rail" || values.mode === "bus") && values.time >= 30 && !values.flag && ["", "note"].includes(values.text)'},

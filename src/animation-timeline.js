@@ -1,16 +1,11 @@
 import './animation-timeline.css'
+import {humanReadableAnimationValue} from './animation.js'
 
 const element = (tag, className, text) => {
     const node = document.createElement(tag)
     if (className) node.className = className
     if (text != null) node.textContent = text
     return node
-}
-
-export function humanReadableAnimationValue(value, type) {
-    if (type === 'time' && typeof value === 'string') return value
-    if (typeof value !== 'number' || !Number.isFinite(value)) return String(value ?? '')
-    return value.toLocaleString(undefined, {maximumSignificantDigits: 12})
 }
 
 function labelIndices(count) {
@@ -66,6 +61,7 @@ export function createAnimationTimeline({root, onPlay = () => {}, onSeek = () =>
     let activeId = ''
     let currentState = null
     let currentType = 'number'
+    let currentFormatValue = null
     let renderedAnimationsKey = ''
     let renderedStateKey = ''
 
@@ -124,14 +120,14 @@ export function createAnimationTimeline({root, onPlay = () => {}, onSeek = () =>
 
     function writeValue(index) {
         if (!currentState?.sequence) return
-        range.setAttribute('aria-valuetext', humanReadableAnimationValue(currentState.sequence.value(index), currentType))
+        range.setAttribute('aria-valuetext', humanReadableAnimationValue(currentState.sequence.value(index), currentType, currentFormatValue))
         labels.querySelectorAll('[data-index]').forEach(node => node.classList.toggle('current', Number(node.dataset.index) === index))
         fitLabels()
     }
 
     function renderLabels(sequence, index) {
         labels.replaceChildren(...labelIndices(sequence.count).map(step => {
-            const node = element('span', '', humanReadableAnimationValue(sequence.value(step), currentType))
+            const node = element('span', '', humanReadableAnimationValue(sequence.value(step), currentType, currentFormatValue))
             node.dataset.index = String(step)
             node.title = `Step ${step + 1} of ${sequence.count}`
             node.classList.toggle('current', step === index)
@@ -171,7 +167,9 @@ export function createAnimationTimeline({root, onPlay = () => {}, onSeek = () =>
             play.textContent = playing === activeId ? '⏸' : '▶'
             play.setAttribute('aria-label', `${playing === activeId ? 'Pause' : 'Play'} ${selector.options[selector.selectedIndex]?.text || 'animation'}`)
             currentState = null
-            currentType = animations.find(animation => animation.id === activeId)?.type || 'number'
+            const activeAnimation = animations.find(animation => animation.id === activeId)
+            currentType = activeAnimation?.type || 'number'
+            currentFormatValue = activeAnimation?.formatValue || null
             error.textContent = ''
             try { currentState = getState(activeId) } catch (cause) { error.textContent = cause?.message || String(cause) }
             error.hidden = !error.textContent

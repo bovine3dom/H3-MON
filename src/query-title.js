@@ -66,7 +66,11 @@ export function queryTitle(template, query, findClosestCity, controls = [], latL
         if (setting?.showIf && !controlVisible(setting, showIfValues)) return {matched: true, hidden: true}
         const raw = values[lookupKey]
         const option = setting?.options?.find(option => option.value === raw)
-        const value = formatValue(option ? option.name : raw)
+        let display = option ? option.name : raw
+        if (setting?.displayValue) {
+            try { display = setting.displayValue(raw) } catch (_) {}
+        }
+        const value = formatValue(display)
         const control = namespace === 'controls' || !!setting?.remoteControl || !!option
         return value === null ? {matched: false} : {matched: true, value, raw, control}
     }

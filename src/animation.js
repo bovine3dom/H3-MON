@@ -1,3 +1,15 @@
+export function humanReadableAnimationValue(value, type, formatValue) {
+    if (typeof formatValue === 'function') {
+        try {
+            const formatted = formatValue(value)
+            if (typeof formatted === 'string') return formatted
+        } catch (_) {}
+    }
+    if (type === 'time' && typeof value === 'string') return value
+    if (typeof value !== 'number' || !Number.isFinite(value)) return String(value ?? '')
+    return value.toLocaleString(undefined, {maximumSignificantDigits: 12})
+}
+
 export function animationSequence(setting, config) {
     const fail = message => { throw new Error(message) }
     if (!config || typeof config !== 'object') fail('Animation requires start, end, step and step_rate.')
